@@ -1,0 +1,27 @@
+[package]
+name = "holos-shacl"
+description = "HOLOS L4 — SHACL validation over the store's own indexes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Passthrough so the engine's parallel Turtle parser can be measured fairly against
+# the bridge, which is what examples/bridge_vs_load does.
+parallel = ["holos-shacl-engine/parallel"]
+
+[dependencies]
+holos-core.workspace = true
+holos-store.workspace = true
+holos-shacl-engine.workspace = true
+oxrdf.workspace = true
+oxsdatatypes.workspace = true
+regex = "1"
+rustc-hash.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+oxrdfio.workspace = true

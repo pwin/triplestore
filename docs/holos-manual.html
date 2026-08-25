@@ -1,0 +1,872 @@
+<title>HOLOS Manual</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+/* ---- tokens: light is the bare :root, so the un-stamped default resolves ---- */
+:root{
+  --ground:#E8EAED;
+  --surface:#F6F7F9;
+  --surface-2:#EDEFF3;
+  --ink:#15181C;
+  --ink-2:#3C444E;
+  --muted:#5C646E;
+  --rule:#C8CFD6;
+  --rule-soft:#DCE1E6;
+  --accent:#A21C4B;
+  --accent-ink:#8A1740;
+  --accent-wash:#F1DBE3;
+  --ax-s:#0D6E7C;
+  --ax-p:#7A5E00;
+  --ax-o:#544697;
+  --ok:#1F6B3F;
+  --warn:#8A5A00;
+  --code-bg:#EDEFF3;
+  --shadow:0 1px 2px rgba(20,26,33,.06), 0 8px 24px -16px rgba(20,26,33,.28);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0F1215;
+    --surface:#171B20;
+    --surface-2:#1D2228;
+    --ink:#E3E7EB;
+    --ink-2:#BCC4CD;
+    --muted:#8B949E;
+    --rule:#2B323A;
+    --rule-soft:#222932;
+    --accent:#F0517F;
+    --accent-ink:#F87CA0;
+    --accent-wash:#38101F;
+    --ax-s:#45BECB;
+    --ax-p:#D6AB3C;
+    --ax-o:#A296EE;
+    --ok:#4FBE7C;
+    --warn:#E0A83C;
+    --code-bg:#12161A;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0F1215;
+  --surface:#171B20;
+  --surface-2:#1D2228;
+  --ink:#E3E7EB;
+  --ink-2:#BCC4CD;
+  --muted:#8B949E;
+  --rule:#2B323A;
+  --rule-soft:#222932;
+  --accent:#F0517F;
+  --accent-ink:#F87CA0;
+  --accent-wash:#38101F;
+  --ax-s:#45BECB;
+  --ax-p:#D6AB3C;
+  --ax-o:#A296EE;
+  --ok:#4FBE7C;
+  --warn:#E0A83C;
+  --code-bg:#12161A;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+}
+
+*{box-sizing:border-box;}
+body{
+  background:var(--ground);
+  color:var(--ink);
+  font-family:Archivo,-apple-system,"Segoe UI",Arial,sans-serif;
+  font-size:16px;
+  line-height:1.62;
+  margin:0;
+  -webkit-font-smoothing:antialiased;
+}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.87em;}
+
+/* ---- shell ---- */
+.wrap{max-width:1220px;margin:0 auto;padding:0 24px 96px;}
+@media (min-width:1000px){
+  .wrap{display:grid;grid-template-columns:236px 1fr;gap:56px;align-items:start;}
+  .masthead{grid-column:1 / -1;}
+}
+
+/* ---- masthead ---- */
+.masthead{padding:64px 0 30px;border-bottom:2px solid var(--ink);margin-bottom:40px;}
+.eyebrow{
+  font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--accent-ink);margin-bottom:14px;
+}
+h1{
+  font-size:clamp(38px,6vw,60px);line-height:1.02;letter-spacing:-.028em;
+  font-weight:700;margin:0 0 16px;text-wrap:balance;
+}
+.standfirst{font-size:19px;line-height:1.55;color:var(--ink-2);max-width:62ch;margin:0;}
+.badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px;}
+.badge{
+  font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.05em;
+  border:1px solid var(--rule);padding:5px 10px;color:var(--muted);background:var(--surface);
+}
+.badge b{color:var(--ink);font-weight:600;}
+
+/* ---- nav ---- */
+nav{font-size:13.5px;}
+@media (min-width:1000px){nav{position:sticky;top:24px;max-height:calc(100vh - 48px);overflow-y:auto;}}
+nav ol{list-style:none;margin:0;padding:0;counter-reset:s;}
+nav li{counter-increment:s;}
+nav a{
+  display:flex;gap:10px;padding:6px 0;color:var(--muted);text-decoration:none;
+  border-bottom:1px solid var(--rule-soft);
+}
+nav a::before{
+  content:counter(s,decimal-leading-zero);
+  font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--accent-ink);
+  flex:0 0 auto;padding-top:2px;
+}
+nav a:hover{color:var(--ink);}
+nav a:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+
+/* ---- sections ---- */
+section{margin-bottom:64px;scroll-margin-top:24px;}
+h2{
+  font-size:clamp(25px,3.4vw,33px);line-height:1.12;letter-spacing:-.02em;font-weight:700;
+  margin:0 0 8px;text-wrap:balance;display:flex;gap:14px;align-items:baseline;
+}
+h2 .num{
+  font-family:"IBM Plex Mono",monospace;font-size:13px;font-weight:500;
+  color:var(--accent-ink);letter-spacing:.04em;flex:0 0 auto;
+}
+h3{
+  font-size:18.5px;line-height:1.25;letter-spacing:-.012em;font-weight:600;
+  margin:36px 0 10px;text-wrap:balance;
+}
+h4{font-size:15px;font-weight:600;margin:24px 0 8px;color:var(--ink);}
+p{margin:0 0 15px;max-width:70ch;}
+.lede{font-size:17.5px;color:var(--ink-2);max-width:66ch;margin-bottom:22px;}
+a{color:var(--accent-ink);text-decoration:underline;text-underline-offset:2px;text-decoration-thickness:1px;}
+ul,ol{max-width:68ch;padding-left:22px;}
+li{margin-bottom:7px;}
+strong{font-weight:600;}
+
+/* ---- code ---- */
+pre{
+  background:var(--code-bg);border:1px solid var(--rule);
+  padding:15px 17px;overflow-x:auto;margin:0 0 18px;
+  font-family:"IBM Plex Mono",monospace;font-size:13px;line-height:1.62;
+}
+pre code{font-size:inherit;}
+:not(pre) > code{
+  background:var(--surface-2);border:1px solid var(--rule-soft);
+  padding:1px 5px;color:var(--accent-ink);
+}
+.codelabel{
+  font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--muted);margin-bottom:6px;
+}
+
+/* ---- tables ---- */
+.tablewrap{overflow-x:auto;margin:0 0 22px;border:1px solid var(--rule);}
+table{border-collapse:collapse;width:100%;font-size:14px;background:var(--surface);}
+th{
+  text-align:left;padding:10px 14px;border-bottom:1px solid var(--rule);
+  font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--muted);font-weight:500;white-space:nowrap;
+}
+td{padding:10px 14px;border-bottom:1px solid var(--rule-soft);vertical-align:top;}
+tr:last-child td{border-bottom:0;}
+td.k{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--accent-ink);white-space:nowrap;}
+.num-cell{font-variant-numeric:tabular-nums;text-align:right;}
+.yes{color:var(--ok);font-weight:600;}
+.no{color:var(--muted);}
+
+/* ---- callouts ---- */
+.note{
+  border-left:3px solid var(--accent);background:var(--surface);
+  padding:15px 18px;margin:0 0 22px;box-shadow:var(--shadow);
+}
+.note .lbl{
+  display:block;font-family:"IBM Plex Mono",monospace;font-size:10.5px;
+  letter-spacing:.11em;text-transform:uppercase;color:var(--accent-ink);margin-bottom:7px;
+}
+.note p{margin:0;max-width:none;font-size:15px;}
+.note p + p{margin-top:10px;}
+.caution{border-left-color:var(--warn);}
+.caution .lbl{color:var(--warn);}
+
+/* ---- diagrams ---- */
+.diagram{
+  background:var(--surface);border:1px solid var(--rule);
+  padding:22px 18px 14px;margin:0 0 12px;overflow-x:auto;
+}
+.diagram pre.mermaid{background:none;border:0;padding:0;margin:0;display:flex;justify-content:center;}
+.figcap{
+  font-size:13px;color:var(--muted);margin:0 0 24px;max-width:68ch;
+}
+.figcap b{color:var(--ink-2);font-weight:600;}
+
+/* ---- feature grid ---- */
+.grid{display:grid;gap:1px;background:var(--rule);border:1px solid var(--rule);margin:0 0 24px;}
+@media (min-width:720px){.grid.g3{grid-template-columns:repeat(3,1fr);}.grid.g2{grid-template-columns:repeat(2,1fr);}}
+.cell{background:var(--surface);padding:18px 20px;}
+.cell .h{
+  font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--accent-ink);margin-bottom:8px;
+}
+.cell .b{font-size:14px;line-height:1.55;color:var(--ink-2);}
+.cell .b b{color:var(--ink);font-weight:600;}
+
+/* ---- status pills ---- */
+.pill{
+  display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:10px;
+  letter-spacing:.09em;text-transform:uppercase;padding:2px 7px;
+  border:1px solid currentColor;vertical-align:2px;margin-left:8px;font-weight:500;
+}
+.pill.built{color:var(--ok);}
+.pill.partial{color:var(--warn);}
+.pill.absent{color:var(--muted);}
+
+footer{
+  grid-column:1 / -1;border-top:1px solid var(--rule);padding-top:22px;margin-top:20px;
+  font-size:13.5px;color:var(--muted);
+}
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <div class="eyebrow">Manual &middot; RDF 1.2 &middot; SPARQL 1.2</div>
+  <h1>HOLOS</h1>
+  <p class="standfirst">A triplestore where access policy is enforced at the index scan,
+  SHACL runs inside the write path, and a graph can carry its own invariants. This is how to
+  use it — for ordinary queries, for geospatial work, for validation, and for holons.</p>
+  <div class="badges">
+    <span class="badge"><b>303</b> tests</span>
+    <span class="badge"><b>45</b> GeoSPARQL functions</span>
+    <span class="badge">SPARQL 1.1 <b>321/321</b></span>
+    <span class="badge">SPARQL 1.2 <b>242/246</b></span>
+    <span class="badge">SHACL Core <b>92/97</b></span>
+  </div>
+</header>
+
+<nav aria-label="Contents">
+  <ol>
+    <li><a href="#start">Getting started</a></li>
+    <li><a href="#data">Loading data</a></li>
+    <li><a href="#query">Querying</a></li>
+    <li><a href="#policy">Access policy</a></li>
+    <li><a href="#geo">Geospatial</a></li>
+    <li><a href="#shacl">SHACL validation</a></li>
+    <li><a href="#holon">Holons</a></li>
+    <li><a href="#serve">Serving it</a></li>
+    <li><a href="#reference">Reference</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<!-- ============================================================ 1 -->
+<section id="start">
+  <h2><span class="num">01</span><span>Getting started</span></h2>
+  <p class="lede">Two binaries. <code>holos</code> is the command line; <code>holos-server</code>
+  speaks the SPARQL 1.2 Protocol over HTTP.</p>
+
+  <div class="codelabel">build</div>
+<pre><code>deploy/setup.sh          # checks prerequisites, builds, runs the tests
+# or on Windows
+deploy\setup.ps1</code></pre>
+
+  <p>You need Rust 1.87+, and <b>clang plus a C++ toolchain</b> because RocksDB compiles C++
+  and generates its bindings with libclang. That is the most common cause of a failed first
+  build, so <code>setup.sh</code> checks for it before starting rather than letting the
+  failure surface two hundred lines into a compile. Without persistence you need neither:
+  <code>cargo build --release --no-default-features</code>.</p>
+
+  <div class="codelabel">first query</div>
+<pre><code>holos query --data examples/hr.trig \
+  --query 'SELECT ?name WHERE { GRAPH ?g { ?s &lt;http://example.com/name&gt; ?name } }'</code></pre>
+
+  <h3>How the pieces fit</h3>
+
+  <div class="diagram">
+<pre class="mermaid">
+flowchart TB
+  subgraph app[" "]
+    direction LR
+    CLI["holos<br/>command line"]
+    SRV["holos-server<br/>SPARQL Protocol + console"]
+  end
+  SESS["Session<br/>principal + compiled policy"]
+  VIEW["DatasetView<br/><b>the policy chokepoint</b>"]
+  EVAL["SPARQL 1.2 evaluator<br/>+ 45 GeoSPARQL functions"]
+  STORE["Store<br/>nine index orders"]
+  DICT["Term dictionary<br/>tagged 64-bit ids"]
+  BACK["In-memory&nbsp;&nbsp;/&nbsp;&nbsp;RocksDB"]
+
+  CLI --> SESS
+  SRV --> SESS
+  SESS --> VIEW
+  EVAL <--> VIEW
+  VIEW --> STORE
+  STORE --> DICT
+  DICT --> BACK
+
+  SHACL["SHACL<br/>two validators"] --> STORE
+  HOLON["Holons<br/>scene + boundary"] --> SHACL
+
+  style VIEW fill:#A21C4B,stroke:#A21C4B,color:#fff
+  style SESS stroke-dasharray: 4 3
+</pre>
+  </div>
+  <p class="figcap"><b>Everything reaches data through one place.</b> There is no path from a
+  query, a dump, a SHACL run or a holon tick to the indexes that bypasses
+  <code>DatasetView</code>. That is what makes the policy guarantee in §4 a property of the
+  system rather than a convention people have to remember.</p>
+</section>
+
+<!-- ============================================================ 2 -->
+<section id="data">
+  <h2><span class="num">02</span><span>Loading data</span></h2>
+  <p class="lede">Seven input serialisations, chosen by file extension &mdash; each also
+  gzipped. Six on output.</p>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Format</th><th>Extension</th><th>Read</th><th>Write</th><th>Media type</th></tr></thead>
+      <tbody>
+        <tr><td>Turtle</td><td class="k">.ttl</td><td class="yes">yes</td><td class="yes">yes</td><td class="k">text/turtle</td></tr>
+        <tr><td>N-Triples</td><td class="k">.nt</td><td class="yes">yes</td><td class="yes">yes</td><td class="k">application/n-triples</td></tr>
+        <tr><td>TriG</td><td class="k">.trig</td><td class="yes">yes</td><td class="yes">yes</td><td class="k">application/trig</td></tr>
+        <tr><td>N-Quads</td><td class="k">.nq</td><td class="yes">yes</td><td class="yes">yes</td><td class="k">application/n-quads</td></tr>
+        <tr><td>RDF/XML</td><td class="k">.rdf .owl</td><td class="yes">yes</td><td class="yes">yes</td><td class="k">application/rdf+xml</td></tr>
+        <tr><td>JSON-LD</td><td class="k">.jsonld</td><td class="yes">yes</td><td class="yes">yes</td><td class="k">application/ld+json</td></tr>
+        <tr><td>N3</td><td class="k">.n3</td><td class="yes">yes</td><td class="no">no</td><td class="k">text/n3</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><b>TriG and N-Quads carry graph names; the others do not.</b> That makes the choice a
+  correctness question rather than a preference — dumping a quad store as N-Triples silently
+  flattens every named graph into one. <code>holos dump</code> therefore defaults to
+  N-Quads.</p>
+
+  <div class="note">
+      <span class="lbl">Gzipped input, streamed</span>
+      <p>Every format above also reads with a <code>.gz</code> suffix &mdash;
+      <code>data.nt.gz</code>, <code>dump.nq.gz</code> &mdash; which is how large RDF is
+      actually distributed, and which compresses about tenfold. Decompression is
+      <b>streamed</b>, so a 60&nbsp;GB dump costs no more memory than a small one.</p>
+      <p><b>Multi-member archives are read in full.</b> Large dumps are often produced by
+      concatenating compressed chunks; that is valid gzip, and a single-member decoder stops
+      at the end of the first chunk <em>while reporting success</em> &mdash; losing most of
+      the file without an error. There is a test for exactly that.</p>
+    </div>
+
+  <div class="codelabel">loading, and dumping back out</div>
+<pre><code>holos stats --data data/*.ttl --store ./var/store --bulk
+
+holos dump --store ./var/store                  # N-Quads
+holos dump --store ./var/store --format trig    # nq, nt, trig, ttl, rdf, jsonld</code></pre>
+
+  <div class="note">
+    <span class="lbl">--bulk is 3.3&ndash;3.6&times; faster, and the catch is worth knowing</span>
+    <p>It buffers writes and skips the write-ahead log: <b>36k quads/s against 10k</b> on
+    7.5 million quads, and the advantage <em>grows</em> with the dataset, because the log it
+    skips grows too. The cost is that a load interrupted part-way has to be discarded rather
+    than resumed — the right trade for a load you can simply re-run.</p>
+  </div>
+
+  <div class="note caution">
+    <span class="lbl">One process per store directory</span>
+    <p>RocksDB takes an exclusive lock. A second process gets
+    <code>Failed to create lock file: .../LOCK</code>. Stop the server before loading — this
+    is expected, not a fault.</p>
+  </div>
+
+  <h3>RDF 1.2 triple terms</h3>
+  <p>Triple terms are supported in object position, which is where RDF 1.2 puts them, and
+  <code>rdf:reifies</code> is the way to attach statements about them:</p>
+<pre><code>ex:claim1 rdf:reifies &lt;&lt;( ex:carol ex:salary 102000 )&gt;&gt; ;
+          ex:statedBy ex:payroll ;
+          ex:statedOn "2026-08-01T09:00:00Z"^^xsd:dateTime .</code></pre>
+</section>
+
+<!-- ============================================================ 3 -->
+<section id="query">
+  <h2><span class="num">03</span><span>Querying</span></h2>
+  <p class="lede">SPARQL 1.2 evaluates end to end. Here is exactly how complete that is —
+  both numbers, because one of them alone is misleading.</p>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Suite</th><th class="num-cell">Correctness</th><th class="num-cell">Coverage</th><th>What is not run</th></tr></thead>
+      <tbody>
+        <tr><td>SPARQL 1.1</td><td class="num-cell"><b>321/321</b> &middot; 100%</td><td class="num-cell">321/625 &middot; <b>51%</b></td><td>Update (149), protocol (47), entailment (70), federation (7)</td></tr>
+        <tr><td>SPARQL 1.2</td><td class="num-cell"><b>242/246</b> &middot; 98.4%</td><td class="num-cell">246/269 &middot; <b>91%</b></td><td>Update syntax (23)</td></tr>
+        <tr><td>SPARQL 1.0</td><td class="num-cell"><b>126/127</b> &middot; 99.2%</td><td class="num-cell">127/283 &middot; <b>45%</b></td><td>152 whose expected results the harness cannot read</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <span class="lbl">Read both columns</span>
+    <p><b>Correctness</b> is how much of what runs passes. <b>Coverage</b> is how much of the
+    suite runs at all. Quoting only the first would let a store report 100% while skipping
+    half the tests, so both are printed by
+    <code>cargo run -p holos-conformance --example coverage</code>.</p>
+    <p>The gaps are honest ones and each has a cause: <b>SPARQL Update is not implemented</b>
+    (that is 149 of SPARQL 1.1's skips and all of 1.2's), the protocol suites need endpoints
+    that do not exist yet, and entailment needs a reasoner. SPARQL 1.0's 152 are a
+    <em>harness</em> limitation, not an engine one — those tests encode expected results as
+    RDF, which the harness does not parse.</p>
+  </div>
+
+  <p>All four SPARQL 1.2 failures are in the reused parser rather than anything below it,
+  which the oracle differential establishes by re-running each failure through the same
+  evaluator over a plain in-memory dataset.</p>
+
+  <h3>Result formats</h3>
+  <p>Four, by <code>Accept</code> header over HTTP or <code>--results</code> on the command
+  line: <code>application/sparql-results+json</code> (default),
+  <code>application/sparql-results+xml</code>, <code>text/csv</code>,
+  <code>text/tab-separated-values</code>. CONSTRUCT and DESCRIBE negotiate the RDF formats in
+  §2 instead.</p>
+
+  <h3>Query planning, and why pattern order matters right now</h3>
+  <div class="note caution">
+    <span class="lbl">Write your most selective pattern first</span>
+    <p>The reused optimiser estimates cardinality from a <b>fixed lookup table</b> — a
+    pattern is guessed at 1,000,000 rows whether its predicate occurs three times or three
+    million. It cannot tell a 1-row pattern from a 50,000-row one, so it cannot fix a bad
+    join order.</p>
+    <p>Measured cost of that: <b>13×</b> at 7.5 million quads — and the penalty
+    <em>grows</em> with the data, from 8× at 750k. A well-written query stays linear; a badly
+    written one degrades faster than the dataset does. Characteristic-set statistics that
+    estimate six of seven query shapes exactly are built and measured, but there is no
+    injection point in the reused planner to feed them to, so the fix is to own the
+    planner.</p>
+
+    <div class="note caution">
+      <span class="lbl">And anchor your closures</span>
+      <p>A property path costs almost nothing when its left side is a constant:
+      <code>&lt;unit340&gt; ex:partOf* ?a</code> returns 5 rows in <b>0.22 ms</b>, and even an
+      inverse closure over the whole tree returns 340 rows in <b>0.70 ms</b>. But the same
+      <code>partOf*</code> with a <em>variable</em> on its left — reached through a join —
+      takes <b>25 seconds to return 5 rows</b>, because a zero-length path makes every term
+      in the dataset a candidate.</p>
+      <p>Prefer <code>+</code> to <code>*</code> where you can, and add the zero-length case
+      as a <code>UNION</code> branch that <em>repeats the anchor</em>:</p>
+      <pre><code># 1.7x faster, same answers
+{ &lt;:p1000&gt; ex:memberOf ?leaf . ?leaf ex:partOf+ ?u }
+UNION
+{ &lt;:p1000&gt; ex:memberOf ?u }</code></pre>
+      <p><b>Repeating the anchor is the part that matters.</b> Writing the second branch as
+      <code>{ BIND(?leaf AS ?u) }</code> looks equivalent and is not: a UNION branch does not
+      see <code>?leaf</code> from outside the group, so the <code>BIND</code> produces nothing
+      and the row for the leaf itself is silently lost. That form returned 4 rows where the
+      path returns 5.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 4 -->
+<section id="policy">
+  <h2><span class="num">04</span><span>Access policy</span></h2>
+  <p class="lede">The unusual part of this store, and the reason to read one section
+  carefully rather than skim it.</p>
+
+  <p>Policy is enforced <b>at the index scan</b> — not by rewriting queries, and not by
+  filtering results afterwards. The formal property that buys you:</p>
+
+  <div class="note">
+    <span class="lbl">The guarantee</span>
+    <p>The answer to query <em>Q</em> equals the answer <em>Q</em> would have over the
+    sub-dataset the principal is allowed to see.</p>
+  </div>
+
+  <p>That is stronger than it sounds, because it holds for <em>every</em> query shape without
+  anyone having to enumerate them. A <code>COUNT</code> cannot leak the existence of hidden
+  rows; a <code>FILTER NOT EXISTS</code> cannot probe for them; a spatial join gets no
+  geospatial exemption.</p>
+
+  <div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  Q["SPARQL query"] --> E["Evaluator"]
+  E -->|"pattern scan"| V{"DatasetView<br/>decide_quad"}
+  V -->|"permitted"| Y["quad reaches<br/>the evaluator"]
+  V -->|"denied"| N["quad is invisible"]
+  V -.->|"reads"| P["Compiled policy<br/>rules + labels"]
+  V -.->|"reads"| S["Principal<br/>roles + clearance"]
+  Y --> R["Results"]
+  N -.->|"filter mode"| R
+  N -.->|"fail-closed mode"| X["Error"]
+
+  style V fill:#A21C4B,stroke:#A21C4B,color:#fff
+  style N stroke-dasharray: 4 3
+</pre>
+  </div>
+  <p class="figcap"><b>Every quad is decided individually, on the way out of the index.</b>
+  Because the decision happens below the evaluator, the evaluator cannot be tricked into
+  revealing what it never received.</p>
+
+  <h3>Rules</h3>
+  <p>A rule grants or refuses a <b>mode</b> (read, write, validate, admin) over a
+  <b>scope</b> (everything, a graph, a predicate, or a graph-and-predicate pair) to a
+  <b>principal match</b>. More specific scopes win; at equal specificity, deny beats allow.</p>
+
+<pre><code>holos query --data hr.trig --deny-all \
+  --allow-graph http://example.com/public \
+  --deny-predicate http://example.com/salary \
+  --except-role hr \
+  --role hr \
+  --query 'SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }'</code></pre>
+
+  <p><code>--except-role</code> exists because "deny salary to everyone <em>except</em> HR"
+  is otherwise inexpressible: deny beats allow at equal specificity, so an allow rule for HR
+  would never win. Negation in the principal match is what makes the common enterprise rule
+  writable at all.</p>
+
+  <h3>Classification labels</h3>
+  <p>Beyond rules, graphs can carry a lattice label — a level plus compartments. A principal
+  reads a labelled graph only if its clearance <em>dominates</em> the label, which is the
+  standard Bell–LaPadula reading.</p>
+
+<pre><code>holos query --data hr.trig \
+  --label-graph http://example.com/reviews=3 \
+  --clearance 3 \
+  --query 'SELECT ?note WHERE { GRAPH ?g { ?s ex:reviewNote ?note } }'</code></pre>
+
+  <h3>Filter, or fail?</h3>
+  <div class="grid g2">
+    <div class="cell">
+      <div class="h">Filter &mdash; the default</div>
+      <div class="b">The query runs and returns what the principal is entitled to. Nothing
+      reveals that anything was withheld. <b>Right when a partial answer is a correct answer
+      for that principal.</b></div>
+    </div>
+    <div class="cell">
+      <div class="h">Fail closed</div>
+      <div class="b"><code>--fail-closed</code> turns a refusal into an error. <b>Right when
+      a partial answer would be misread as a complete one</b> — a compliance report, a
+      reconciliation total, anywhere silently missing rows are worse than no answer.</div>
+    </div>
+  </div>
+
+  <p>Add <code>--audit</code> to see what policy actually did to a query.</p>
+</section>
+
+<!-- ============================================================ 5 -->
+<section id="geo">
+  <h2><span class="num">05</span><span>Geospatial</span> <span class="pill built">45 functions</span></h2>
+  <p class="lede">GeoSPARQL runs through the ordinary query path, which means it composes
+  with policy and with the term encoding rather than sitting beside them.</p>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Family</th><th class="num-cell">Count</th><th>Functions</th></tr></thead>
+      <tbody>
+        <tr><td>Simple Features</td><td class="num-cell">8</td><td class="k">sfEquals sfDisjoint sfIntersects sfTouches sfCrosses sfWithin sfContains sfOverlaps</td></tr>
+        <tr><td>Egenhofer</td><td class="num-cell">8</td><td class="k">ehEquals ehDisjoint ehMeet ehOverlap ehCovers ehCoveredBy ehInside ehContains</td></tr>
+        <tr><td>RCC8</td><td class="num-cell">8</td><td class="k">rcc8eq rcc8dc rcc8ec rcc8po rcc8tppi rcc8tpp rcc8ntpp rcc8ntppi</td></tr>
+        <tr><td>Measurement</td><td class="num-cell">7</td><td class="k">distance area length perimeter dimension coordinateDimension spatialDimension</td></tr>
+        <tr><td>Construction</td><td class="num-cell">9</td><td class="k">buffer boundary envelope convexHull centroid intersection union difference symDifference</td></tr>
+        <tr><td>Predicates &amp; accessors</td><td class="num-cell">5</td><td class="k">relate isEmpty isSimple getSRID asGeoJSON</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <span class="lbl">Two of these are ours</span>
+    <p>43 come from <code>spargeo</code>. <code>geof:buffer</code> and
+    <code>geof:boundary</code> are implemented in HOLOS, because the design document had
+    claimed them before anything checked — a function probe against a live endpoint returned
+    "unknown function" for both. They exist now; the claim was false when it was written.</p>
+  </div>
+
+<pre><code>PREFIX geof: &lt;http://www.opengis.net/def/function/geosparql/&gt;
+PREFIX geo:  &lt;http://www.opengis.net/ont/geosparql#&gt;
+PREFIX uom:  &lt;http://www.opengis.net/def/uom/OGC/1.0/&gt;
+
+SELECT ?site WHERE {
+  ?site geo:asWKT ?g .
+  FILTER(geof:sfWithin(?g, geof:buffer(?depot, 5, uom:kilometre)))
+}</code></pre>
+
+  <h3>What <code>geof:buffer</code> actually computes</h3>
+  <p>CRS84 coordinates are degrees, and a metre is not a fixed number of them: about
+  1/111320 of a degree of latitude everywhere, but of <em>longitude</em> only at the equator,
+  shrinking by <code>cos(latitude)</code> toward the poles. So a metric buffer is computed in
+  a local equirectangular projection centred on the geometry, then converted back.</p>
+
+  <div class="grid g3">
+    <div class="cell">
+      <div class="h">Accurate</div>
+      <div class="b">A 1 km buffer measures <b>3,147,193 m²</b> against an ideal
+      &pi;&times;10⁶ = 3,141,593 — <b>0.18% out</b>, which is the polygon approximating a
+      circle.</div>
+    </div>
+    <div class="cell">
+      <div class="h">Latitude-aware</div>
+      <div class="b">The same 100 km buffer spans <b>twice as many degrees</b> of longitude
+      at 60°N as at the equator. That is correct, and it is what a scalar degree buffer gets
+      wrong.</div>
+    </div>
+    <div class="cell">
+      <div class="h">Not geodesic</div>
+      <div class="b">Over continental distances, or across a pole, the projection's own
+      distortion dominates. <b>Do not trust it there.</b> A radius in degrees skips the
+      projection and is exact in coordinate space.</div>
+    </div>
+  </div>
+
+  <div class="note caution">
+    <span class="lbl">These are filter functions, not an index</span>
+    <p><code>geof:sfWithin(?point, ?region)</code> evaluates over whatever bindings reach it,
+    so it scans every candidate geometry rather than probing an index. Fine on a small
+    dataset; not fine on a national gazetteer. An R-tree is designed for but not built, and
+    it needs a planner that can route to it — the same planner §3 is waiting on.</p>
+  </div>
+</section>
+
+<!-- ============================================================ 6 -->
+<section id="shacl">
+  <h2><span class="num">06</span><span>SHACL validation</span> <span class="pill partial">core built</span></h2>
+  <p class="lede">Two validators behind one trait, because they are good at different things
+  and neither dominates.</p>
+
+  <div class="grid g2">
+    <div class="cell">
+      <div class="h">vendored &mdash; coverage</div>
+      <div class="b">An adaptation of <b>SHACL_Engine</b>, bridged onto the store's own
+      dictionary so it never parses a file. <b>127/138</b> on SHACL 1.2 Core against the
+      native evaluator's 94. Use it for a full validation.</div>
+    </div>
+    <div class="cell">
+      <div class="h">native &mdash; incremental</div>
+      <div class="b">Reads the live store directly. Lower coverage (<b>92/97</b> SHACL Core),
+      but it is <b>the only one that can revalidate a delta</b> — the engine's graph is
+      immutable, so it cannot. That capability is what the holon layer needs.</div>
+    </div>
+  </div>
+
+<pre><code>holos validate --data data.nt --shapes shapes.ttl              # native
+holos validate --data data.nt --shapes shapes.ttl --engine vendored
+holos validate --data data.nt --shapes shapes.ttl --report     # N-Triples report</code></pre>
+
+  <h3>Incremental revalidation</h3>
+  <p>This is the mechanism the whole design rests on. At compile time, a
+  predicate&nbsp;→&nbsp;shape dependency index is built. On commit, the delta's predicates
+  are intersected with that index to derive which focus nodes could possibly be affected —
+  and only those are revalidated.</p>
+
+  <div class="diagram">
+<pre class="mermaid">
+flowchart TB
+  D["Delta<br/>ex:alice ex:email &quot;new@…&quot;"] --> P["Predicates in the delta<br/>{ ex:email }"]
+  P --> IDX["predicate → shape index<br/><i>built once, at compile time</i>"]
+  IDX --> SH["Shapes that could care<br/>{ EmailShape }"]
+  SH --> ANC["targeted ancestors<br/><i>anonymous property shapes have no<br/>targets of their own, so walk up</i>"]
+  ANC --> F["Affected focus nodes<br/>{ ex:alice }"]
+  F --> V["Validate just those"]
+  V --> OK{"conforms?"}
+  OK -->|yes| C["commit"]
+  OK -->|no| RB["reject &amp; undo"]
+
+  style V fill:#0D6E7C,stroke:#0D6E7C,color:#fff
+  style RB stroke-dasharray: 4 3
+</pre>
+  </div>
+  <p class="figcap"><b>The ancestor walk is not an optimisation — it is a correctness fix.</b>
+  A violating predicate usually belongs to an <em>anonymous</em> property shape that has no
+  targets at all. Restricting to shapes with targets drops it, and five safety tests failed
+  exactly that way before the upward closure was added.</p>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>400k triples, 100k instances</th><th class="num-cell">Time</th></tr></thead>
+      <tbody>
+        <tr><td>Full validation</td><td class="num-cell">0.812s &mdash; 20,000 results</td></tr>
+        <tr><td>Full validation after a one-triple change</td><td class="num-cell">0.975s</td></tr>
+        <tr><td><b>Incremental revalidation of that change</b></td><td class="num-cell"><b>0.006s &mdash; 161× faster</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><b>Not yet built:</b> SPARQL-based constraints, SHACL-AF rules, and most of the SHACL
+  1.2 additions on the native side.</p>
+</section>
+
+<!-- ============================================================ 7 -->
+<section id="holon">
+  <h2><span class="num">07</span><span>Holons</span> <span class="pill partial">walking skeleton</span></h2>
+  <p class="lede">A named graph that enforces its own invariants on the write path, and
+  records who changed what.</p>
+
+  <p>A <b>holon</b> is a whole that is also a part. Here that means three things travelling
+  together:</p>
+
+  <div class="grid g3">
+    <div class="cell">
+      <div class="h">Scene</div>
+      <div class="b">The graph the holon is responsible for &mdash; its own state.</div>
+    </div>
+    <div class="cell">
+      <div class="h">Boundary</div>
+      <div class="b">SHACL shapes that <b>must hold after every commit</b>. Not a nightly
+      report: a precondition for the write landing at all.</div>
+    </div>
+    <div class="cell">
+      <div class="h">Event log</div>
+      <div class="b">Per-statement provenance in RDF 1.2, so what changed and in which tick
+      is queryable like anything else.</div>
+    </div>
+  </div>
+
+  <h3>A tick</h3>
+  <div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  participant C as Caller
+  participant H as Holon
+  participant B as Boundary (SHACL)
+  participant S as Scene
+  participant L as Event log
+
+  C->>H: tick(delta)
+  H->>S: apply delta
+  H->>B: revalidate affected focus nodes only
+  alt conforms
+    B-->>H: ok
+    H->>L: record additions & removals
+    H-->>C: committed
+  else violates
+    B-->>H: violations
+    H->>S: undo the delta
+    H-->>C: rejected + report
+  end
+</pre>
+</div>
+  <p class="figcap"><b>A rejected tick costs slightly more than an accepted one</b> (0.0101s
+  against 0.0076s), because it also undoes what it applied. That is the right way round: the
+  system pays for refusing bad data, not for accepting it.</p>
+
+  <div class="codelabel">the shape of the event log</div>
+<pre><code>_:change rdf:reifies &lt;&lt;( ex:alice ex:email "new@example.com" )&gt;&gt; ;
+         holos:inTick _:tick ;
+         holos:operation holos:Added .</code></pre>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>100k instances, 300k triples, four shapes</th><th class="num-cell">Time</th></tr></thead>
+      <tbody>
+        <tr><td>Full validation of the scene</td><td class="num-cell">0.250s</td></tr>
+        <tr><td><b>Per commit, over 200 ticks</b></td><td class="num-cell"><b>0.0061s &mdash; 165 commits/s, 41× cheaper</b></td></tr>
+        <tr><td>A rejected tick</td><td class="num-cell">0.0101s</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <span class="lbl">Why that ratio decides whether any of this works</span>
+    <p>Validation inside every commit is only sane if a commit costs the size of <em>its own
+    change</em>. At full-pass cost, a boundary would be a nightly batch job wearing a
+    transaction's clothes, and the model collapses back into "validate the warehouse
+    overnight and hope". 165 commits/s is not a high-throughput write path and is not meant
+    to be — it is the price of a fully validated, fully attributed commit, against 4/s if
+    each one revalidated everything.</p>
+  </div>
+
+  <div class="note caution">
+    <span class="lbl">What the skeleton does not have yet</span>
+    <p><b>Atomicity</b> — a tick applies and undoes, but that undo is not a transaction; it
+    needs MVCC underneath. Also missing: boundary rules run to a fixpoint, incrementally
+    maintained projections, and time travel.</p>
+  </div>
+</section>
+
+<!-- ============================================================ 8 -->
+<section id="serve">
+  <h2><span class="num">08</span><span>Serving it</span></h2>
+  <p class="lede">Full deployment detail is in <code>OPERATIONS.md</code> and
+  <code>deploy/</code>. The two things worth knowing here:</p>
+
+  <h3>It authenticates nobody, deliberately</h3>
+  <p>Token verification, Kerberos, mTLS and SAML belong at the edge. The server sits behind
+  that edge and reads already-verified claims from <code>X-Holos-Principal</code>,
+  <code>X-Holos-Roles</code> and <code>X-Holos-Clearance</code> — and refuses to read them at
+  all unless started with <code>--trust-forwarded-identity</code>.</p>
+
+  <div class="note caution">
+    <span class="lbl">The front door contract</span>
+    <p>Your proxy must <b>strip whatever the client sent</b> under those names before setting
+    its own. Otherwise any caller can add <code>X-Holos-Roles: admin</code> to a curl command
+    and be believed. <code>deploy/Caddyfile</code> and <code>deploy/nginx.conf</code> both do
+    this, and the nginx one is the trap: nginx passes unknown client headers straight
+    through, so all three must be set explicitly.</p>
+  </div>
+
+  <div class="codelabel">endpoints</div>
+<pre><code>GET  /                   YASGUI console
+GET  /query?query=...    SPARQL 1.2 Protocol
+POST /query              form-encoded or application/sparql-query
+POST /update             501 — no update evaluator yet
+GET  /stats              {"quads":…,"dictionaryTerms":…,"namedGraphs":…}
+GET  /health             liveness</code></pre>
+
+  <h3>Writes are the gap</h3>
+  <p>There is no SPARQL Update and no Graph Store Protocol. Writes go through the
+  <code>holos</code> command line against a stopped store, or through the holon API. That is
+  the single largest hole in the HTTP surface and it is stated in the 501 rather than faked.</p>
+</section>
+
+<!-- ============================================================ 9 -->
+<section id="reference">
+  <h2><span class="num">09</span><span>Reference</span></h2>
+
+  <h3>Function families</h3>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Namespace</th><th>Status</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td class="k">SPARQL 1.1 built-ins</td><td class="yes">full</td><td>String, numeric, date/time, hash, term-construction and type-testing functions; all aggregates</td></tr>
+        <tr><td class="k">SPARQL 1.2 additions</td><td class="yes">full</td><td><code>TRIPLE</code>, <code>SUBJECT</code>, <code>PREDICATE</code>, <code>OBJECT</code>, <code>isTRIPLE</code>, <code>LANGDIR</code>, <code>hasLANG</code>, <code>hasLANGDIR</code>, <code>STRLANGDIR</code></td></tr>
+        <tr><td class="k">xsd: casts</td><td class="yes">full</td><td><code>xsd:integer("42")</code>, <code>xsd:dateTime(…)</code> and the rest</td></tr>
+        <tr><td class="k">geof:</td><td class="yes">45</td><td>See §5</td></tr>
+        <tr><td class="k">fn: (XPath 3 F&amp;O)</td><td class="no">none</td><td>Not registered. The SPARQL built-ins cover the same ground under different names — <code>UCASE</code> for <code>fn:upper-case</code>, <code>REPLACE</code> for <code>fn:replace</code>, <code>REGEX</code> for <code>fn:matches</code></td></tr>
+        <tr><td class="k">afn: (Jena ARQ)</td><td class="no">none</td><td>Not registered. <code>afn:localname</code>, <code>afn:namespace</code>, <code>afn:sprintf</code> and friends are unavailable</td></tr>
+        <tr><td class="k">spif: (SPIN)</td><td class="no">none</td><td>Not registered</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>An unregistered function is <b>not</b> a parse error — it parses fine and fails at
+  evaluation with <code>The custom function &lt;…&gt; is not supported</code>. Registering
+  more is a small change: they are ordinary <code>fn(&amp;[Term]) -&gt; Option&lt;Term&gt;</code>
+  entries on the evaluator, which is exactly how <code>geof:buffer</code> was added.</p>
+
+  <h3>Commands</h3>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Command</th><th>Does</th></tr></thead>
+      <tbody>
+        <tr><td class="k">holos query</td><td>Run SPARQL, with policy flags and <code>--audit</code></td></tr>
+        <tr><td class="k">holos stats</td><td>Load and report counts, dictionary size, predicate histogram</td></tr>
+        <tr><td class="k">holos dump</td><td>Emit what the principal may see, as RDF. Defaults to N-Quads</td></tr>
+        <tr><td class="k">holos validate</td><td>SHACL, native or vendored, with timings</td></tr>
+        <tr><td class="k">holos-server</td><td>SPARQL 1.2 Protocol over HTTP + console</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Measure it yourself</h3>
+<pre><code>cargo run --release -p holos-conformance --example coverage           # both conformance numbers
+cargo run --release -p holos-stats --example estimator_accuracy       # planner estimate quality
+cargo run --release -p holos-stats --example does_order_matter        # what bad estimates cost
+cargo run --release -p holos-shacl --example incremental data.nt shapes.ttl</code></pre>
+</section>
+
+</main>
+
+<footer>
+  Every number on this page comes from a command in it. Where something is not built, it says
+  so — <code>DESIGN.md</code> carries the reasoning, <code>OPERATIONS.md</code> the deployment
+  detail.
+</footer>
+
+</div>

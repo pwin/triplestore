@@ -1,0 +1,21 @@
+[package]
+name = "holos-stats"
+description = "HOLOS L3 — characteristic sets and cardinality estimation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+holos-core.workspace = true
+holos-store.workspace = true
+oxrdf.workspace = true
+rustc-hash.workspace = true
+spargebra.workspace = true
+
+[dev-dependencies]
+oxrdfio.workspace = true
+holos-engine.workspace = true
+holos-security.workspace = true
+spareval.workspace = true

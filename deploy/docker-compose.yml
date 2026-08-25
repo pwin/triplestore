@@ -1,0 +1,68 @@
+# A complete deployment: the store behind a front door that terminates TLS and resolves
+# identity, exactly as OPERATIONS.md describes.
+#
+#   docker compose -f deploy/docker-compose.yml up -d
+#   docker compose -f deploy/docker-compose.yml exec holos holos-smoke
+
+services:
+  holos:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: holos:latest
+    restart: unless-stopped
+    # No published ports: nothing reaches this except the proxy on the shared network.
+    # That is what makes --trust-forwarded-identity safe to turn on below.
+    expose:
+      - "7878"
+    command:
+      - --listen
+      - 0.0.0.0:7878
+      - --store
+      - /var/lib/holos/store
+      - --threads
+      - "8"
+      - --trust-forwarded-identity
+      # Policy travels with the deployment rather than living in someone's shell history.
+      - --deny-predicate
+      - http://example.com/salary
+      - --label-graph
+      - http://example.com/reviews=3
+    volumes:
+      - holos-data:/var/lib/holos
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7878/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          # RocksDB's block cache plus the term dictionary is where memory goes. Measure
+          # with /stats before setting this; a store whose dictionary does not fit will
+          # thrash rather than fail.
+          memory: 4g
+
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      holos:
+        condition: service_healthy
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  holos-data:
+  caddy-data:
+  caddy-config:

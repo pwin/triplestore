@@ -1,0 +1,16 @@
+[package]
+name = "holos-core"
+description = "HOLOS L1 — tagged 64-bit term identifiers and their inline value codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+oxrdf.workspace = true
+oxsdatatypes.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

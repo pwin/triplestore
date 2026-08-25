@@ -1,0 +1,37 @@
+[package]
+name = "holos-python"
+description = "HOLOS — Python bindings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "_holos"
+# `cdylib` for the wheel; `rlib` so the crate's own tests can still link it.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+holos-core.workspace = true
+holos-store.workspace = true
+holos-security.workspace = true
+holos-engine.workspace = true
+holos-shacl.workspace = true
+oxrdf.workspace = true
+oxrdfio.workspace = true
+sparesults.workspace = true
+spareval.workspace = true
+spargeo.workspace = true
+
+# abi3-py39 builds ONE wheel per platform that works on every CPython 3.9+, instead of a
+# separate wheel per minor version. That matters here because each wheel carries a
+# statically linked RocksDB and is therefore not small.
+pyo3 = { version = "0.29", features = ["abi3-py39", "extension-module"] }
+
+[features]
+# On by default: the published wheels carry persistence, because splitting a PyO3 extension
+# module in two would mean two incompatible sets of Python types. See PACKAGING.md for why
+# a Python "extra" cannot toggle compiled code, and what is done instead.
+default = ["rocksdb"]
+rocksdb = ["holos-store/rocksdb"]

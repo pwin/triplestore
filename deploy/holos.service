@@ -1,0 +1,71 @@
+# systemd unit for holos-server.
+#
+#   sudo useradd --system --home /var/lib/holos --shell /usr/sbin/nologin holos
+#   sudo mkdir -p /opt/holos /var/lib/holos/store
+#   sudo cp -r target/release/holos target/release/holos-server deploy /opt/holos/
+#   sudo chown -R holos:holos /var/lib/holos
+#   sudo cp deploy/holos.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now holos
+#
+# Edit /opt/holos/deploy/holos.env for configuration; `systemctl restart holos` to apply.
+
+[Unit]
+Description=HOLOS — RDF 1.2 triplestore with SPARQL 1.2
+Documentation=file:/opt/holos/OPERATIONS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=holos
+Group=holos
+WorkingDirectory=/opt/holos
+ExecStart=/opt/holos/deploy/run.sh
+
+# The store is a RocksDB directory held open for the process's lifetime, and only one
+# process may hold it. Restarting is therefore always a full stop-then-start; systemd's
+# default restart behaviour already does exactly that.
+Restart=on-failure
+RestartSec=5s
+
+# Give RocksDB time to flush its memtables and release the directory lock. A SIGKILL here
+# is survivable — the write-ahead log is replayed on the next open — but a clean stop
+# avoids the replay entirely.
+TimeoutStopSec=90
+KillSignal=SIGTERM
+
+# RocksDB opens a file per SST. The default 1024 is far too low for a large dataset.
+LimitNOFILE=65536
+
+# --- hardening ------------------------------------------------------------
+# The service reads RDF and answers queries. It needs no privileges beyond its own
+# directory, and the store is the only thing it writes.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# The one writable path.
+ReadWritePaths=/var/lib/holos
+
+# Bind to loopback only and let a front door face the network. If you genuinely need the
+# service itself on a public interface, widen this deliberately.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressAllow=localhost
+IPAddressDeny=any
+
+[Install]
+WantedBy=multi-user.target

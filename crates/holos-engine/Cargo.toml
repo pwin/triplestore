@@ -1,0 +1,30 @@
+[package]
+name = "holos-engine"
+description = "HOLOS L3 — SPARQL 1.2 evaluation over the HOLOS store, with policy enforced at the scan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+holos-core.workspace = true
+holos-store.workspace = true
+holos-security.workspace = true
+oxrdf.workspace = true
+oxiri = "0.2"
+oxrdfio.workspace = true
+spargebra.workspace = true
+spareval.workspace = true
+spargeo.workspace = true
+holos-stats.workspace = true
+flate2.workspace = true
+geo.workspace = true
+wkt.workspace = true
+geojson.workspace = true
+sparesults.workspace = true
+thiserror.workspace = true
+rustc-hash.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true

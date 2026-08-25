@@ -1,0 +1,29 @@
+[package]
+name = "holos-conformance"
+description = "HOLOS — W3C RDF 1.2 and SPARQL 1.2 test-suite harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+holos-core.workspace = true
+holos-store.workspace = true
+holos-security.workspace = true
+holos-engine.workspace = true
+holos-shacl.workspace = true
+# `rdfc-10` gives Dataset::canonicalize, which is how two results are compared for
+# isomorphism without hand-rolling a blank-node bijection.
+oxrdf = { workspace = true, features = ["rdfc-10"] }
+oxrdfio.workspace = true
+sparesults.workspace = true
+spargebra.workspace = true
+spareval.workspace = true
+anyhow.workspace = true
+tempfile = { workspace = true, optional = true }
+
+[features]
+default = []
+rocksdb = ["holos-store/rocksdb", "dep:tempfile"]

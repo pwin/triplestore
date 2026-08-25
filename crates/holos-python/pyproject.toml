@@ -1,0 +1,46 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "holos"
+requires-python = ">=3.9"
+description = "An RDF 1.2 triplestore with SPARQL 1.2 and access policy enforced at the index scan"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+keywords = ["rdf", "sparql", "triplestore", "shacl", "geosparql", "semantic-web"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Database :: Database Engines/Servers",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+# The published wheels already carry persistence, so this extra installs nothing. It exists
+# so that `pip install holos[rocksdb]` is not an error for anyone who writes it expecting
+# the usual convention, and so the intent is greppable in a requirements file.
+#
+# It cannot do the thing its name suggests: a Python extra selects *dependencies*, and
+# RocksDB is compiled into the extension module rather than installed beside it. Splitting
+# it into a second distribution would mean two PyO3 extension modules with mutually
+# incompatible `Store` types. PACKAGING.md sets out what is done instead; call
+# `holos.has_rocksdb()` to ask a wheel what it actually contains.
+rocksdb = []
+
+[project.urls]
+Repository = "https://github.com/pwin/holos"
+
+[tool.maturin]
+module-name = "holos._holos"
+python-source = "python"
+manifest-path = "Cargo.toml"
+features = ["pyo3/extension-module"]
+# abi3: one wheel per platform serves every CPython 3.9+, which matters when each wheel
+# carries a statically linked RocksDB.
+compatibility = "manylinux2014"
+strip = true

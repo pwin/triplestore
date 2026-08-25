@@ -1,0 +1,22 @@
+[package]
+name = "holos-holon"
+description = "HOLOS L5 — holons: scene, boundary, event log, projections, and the tick"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+holos-core.workspace = true
+holos-store.workspace = true
+holos-security.workspace = true
+holos-engine.workspace = true
+holos-shacl.workspace = true
+oxrdf.workspace = true
+spareval.workspace = true
+thiserror.workspace = true
+rustc-hash.workspace = true
+
+[dev-dependencies]
+oxrdfio.workspace = true

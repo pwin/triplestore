@@ -1,0 +1,304 @@
+# HOLOS
+
+An RDF 1.2 triplestore with SPARQL 1.2, and fine-grained access policy enforced at the scan.
+
+Working name. Early — see [Status](#status) for exactly what runs.
+
+## Why
+
+Four things exist separately and nowhere together: worst-case-optimal join execution
+(Tentris), a durable RDF-1.2-native transactional store (Oxigraph, Jena TDB2), SHACL enforced
+on the write path rather than run as a batch library ([SHACL_Engine](https://github.com/pwin/SHACL_Engine),
+generalised), and versioned shape-governed graph partitions with incrementally maintained
+views (what the [Holon](https://www.w3.org/groups/cg/holon/) model asks for, in database
+terms). Their combination is the thesis.
+
+The full argument, the layer design, the roadmap and the risks are in **[DESIGN.md](DESIGN.md)**.
+
+## Status
+
+| Layer | State |
+|---|---|
+| **L0** Terms & I/O | Reused wholesale from Oxigraph — `oxrdf`, `oxttl`, `oxrdfio`, `spargebra`, `sparesults`. RDF 1.2 and SPARQL 1.2 features on. |
+| **L1** Term dictionary | ✅ Tagged 64-bit ids, order-preserving inline integers / floats / dateTimes / short strings, well-known vocabulary table, recursive triple terms |
+| **L2** Storage | ◐ Two backends behind one trait: in memory, and RocksDB with the nine column families. Held to strict parity. Owes SST ingestion, MVCC timestamps, checkpoints |
+| **L3** Query engine | ◐ SPARQL 1.2 **query and update** evaluate end to end. Query timeouts, dataset selection, parameter binding and plan explanation all wired. Characteristic-set statistics built and measured — **mean q-error 1.1 against the reused optimiser's 2×10⁸**. Owes the planner that consumes them, and WCO joins |
+| **Security** | ✅ Principals, compiled fine-grained policy, classification lattice, audit sink — enforced at the scan, at **8 ns/quad**. See [ACCESS-CONTROL.md](ACCESS-CONTROL.md) |
+| **L4** SHACL | ◐ Two validators behind one trait: [SHACL_Engine](https://github.com/pwin/SHACL_Engine) vendored and adapted for coverage, and a native evaluator for **incremental revalidation at 161× a full pass** |
+| **GeoSPARQL** | ✅ 45 functions — 43 via `spargeo`, plus `geof:buffer` and `geof:boundary` implemented here — composing with policy and the term encoding — see [DESIGN.md §17](DESIGN.md#17-geospatial) |
+| **L5** Holon layer | ◐ Walking skeleton: scene, boundary enforced on the write path, event log with per-triple RDF 1.2 provenance, **165 validated commits/s at 41× a full pass**. Owes atomicity, rules, maintained projections, time travel |
+| **L6** Protocol server | ◐ SPARQL 1.2 Protocol over HTTP + YASGUI console, **`POST /update`**, and **Python bindings** on PyPI. Owes the Graph Store Protocol and WASM |
+
+345 unit and property tests pass (`cargo test --workspace`), plus the W3C suites below.
+
+**Documentation** — [ACCESS-CONTROL.md](ACCESS-CONTROL.md) is the detailed guide to the
+policy model, the enforcement guarantee and enterprise integration;
+[BENCHMARKS.md](BENCHMARKS.md) has load and query timings across dataset
+sizes, including property paths and holonic queries; [OPERATIONS.md](OPERATIONS.md) covers running it as a service, with
+scripts in [deploy/](deploy/); [docs/holos-manual.html](docs/holos-manual.html) is the user
+manual; [DESIGN.md](DESIGN.md) carries the reasoning and the measurements.
+
+## Performance
+
+One million triples, release build, on a Windows laptop. Numbers include parsing.
+
+| Configuration | Throughput | On disk |
+|---|---|---|
+| In memory | 208,161 quads/s | — |
+| RocksDB, `--bulk` | 40,782 quads/s | 48 MB |
+| RocksDB, no `--bulk` | 17,782 quads/s | — |
+
+A holon tick — SHACL validation inside every commit, on a 300k-triple scene:
+
+| | Time |
+|---|---|
+| Full validation of the scene | 0.250s |
+| **Per commit** | **0.0061s — 165 commits/s, 41× cheaper** |
+
+SHACL over 400k triples / 100k instances:
+
+| Phase | Time |
+|---|---|
+| Full validation | 0.812s (20,000 results) |
+| Full validation after a one-triple change | 0.975s |
+| **Incremental revalidation of that change** | **0.006s — 161× faster** |
+
+```sh
+holos validate --data data.nt --shapes shapes.ttl
+cargo run --release -p holos-shacl --example incremental -- data.nt shapes.ttl
+```
+
+How well the query planner can see, if it has the store to consult. *q-error* is
+`max(estimate/actual, actual/estimate)`, so 100× over and 100× under both score 100; a perfect
+estimate is 1.
+
+| | mean q-error | worst |
+|---|---:|---:|
+| The reused optimiser's constant table | 215,744,292 | 1,000,000,000 |
+| Characteristic sets | **1.1** | **2.0** |
+
+Six of seven query shapes are estimated exactly. The worst case for the constant table is a
+star over predicates that never co-occur: zero answers, estimated at a billion rows. And the
+error is not cosmetic — the same five-pattern query costs **3.0×** more with its selective
+pattern written last, because the estimator cannot tell a 1-row pattern from a 50,000-row one.
+
+```sh
+cargo run --release -p holos-stats --example estimator_accuracy
+cargo run --release -p holos-stats --example does_order_matter
+```
+
+The persistent path is about 12× short of the 500k/s figure `DESIGN.md` §11 originally set,
+and that figure has been withdrawn — it was written before anything was measured.
+[§16](DESIGN.md#16-what-the-store-measures) records where the time actually goes, which of
+the obvious explanations the evidence rules out, and what replaces the target.
+
+```sh
+holos stats --data data.nt --store ./db --bulk
+holos stats --data dump.nq.gz --store ./db --bulk   # gzip, streamed
+```
+
+## Conformance
+
+Two numbers, because either alone is misleading. **Correctness** is how much of what runs
+passes; **coverage** is how much of the suite runs at all.
+
+| Suite | Correctness | Coverage | Not run |
+|---|---:|---:|---|
+| SPARQL 1.1 | **470/470** · 100% | 470/625 · **75%** | Entailment (70), protocol (47), federation (7) |
+| SPARQL 1.2 | **262/266** · 98.5% | 266/269 · **99%** | 3 differing only in blank-node labels |
+| SPARQL 1.0 | **262/263** · 99.6% | 263/283 · **93%** | 20 the parser rejects (upstream) |
+
+**All 94 SPARQL 1.1 `UpdateEvaluationTest`s pass**, plus all 55 update-syntax tests. An
+update test is stricter than a query test: it compares the *entire resulting dataset*,
+every graph, quad for quad.
+
+```sh
+cargo run --release -p holos-conformance --example coverage
+```
+
+The SPARQL 1.0 gap was a *harness* limitation, not an engine one: those tests encode
+expected results as RDF in the DAWG `rs:` vocabulary. Reading that format took coverage
+from **45% to 93%**, and 135 of the 136 newly-running tests pass. Entailment needs a
+reasoner and the protocol suites need the harness to drive a live server; both remain
+roadmap items.
+
+**2,876 of 3,014 W3C tests pass, and all 138 failures are upstream — none is a HOLOS bug.**
+
+| Suite | Passing | Failing | Skipped | HOLOS bugs |
+|---|---|---|---|---|
+| RDF 1.1 | 987 / 1041 | 54 | 0 | **0** |
+| RDF 1.2 | 1326 / 1406 | 80 | 0 | **0** |
+| SPARQL 1.1 | 321 / 321 | 0 | 304 | **0** |
+| SPARQL 1.2 | 242 / 246 | 4 | 23 | **0** |
+| SHACL Core | 92 / 97 | 5 | 1 | 5 |
+| SHACL 1.2 Core (native) | 94 / 138 | 44 | 0 | 44 |
+| SHACL Core (vendored engine) | 90 / 98 | 8 | 0 | 8 |
+| SHACL 1.2 Core (vendored engine) | **127 / 138** | 11 | 0 | 11 |
+
+SHACL is the exception to the "all failures are upstream" line: `holos-shacl` is new code,
+so every SHACL failure is a HOLOS failure and the table says so.
+
+The parsers and the evaluator come from Oxigraph and are tested upstream, so the suites are
+run in a shape that isolates the new code instead. The RDF suites **round-trip through the
+store** — parse, load, read back, compare — so a difference is a term-encoding or index bug.
+The SPARQL suites use an **oracle**: a failure is re-run through the same evaluator over an
+`oxrdf::Dataset`, and only a divergence from that reference counts against HOLOS.
+[DESIGN.md §15](DESIGN.md#15-conformance) has the detail.
+
+```sh
+scripts/fetch-testsuites.sh          # or scripts\fetch-testsuites.ps1
+cargo test -p holos-conformance
+```
+
+The suites are not vendored; without them those tests skip, so a fresh checkout is still green.
+
+## Build
+
+```sh
+cargo build --release      # needs Rust 1.87+
+cargo test --workspace
+```
+
+## Serve it
+
+```sh
+holos-server --data examples/hr.trig --listen 127.0.0.1:7878
+```
+
+Then open <http://127.0.0.1:7878/> for a YASGUI console, or query the endpoint directly:
+
+```sh
+curl -H "Accept: text/csv" --data-urlencode \
+  'query=PREFIX ex: <http://example.com/> SELECT ?n WHERE { ?s ex:name ?n }' \
+  http://127.0.0.1:7878/query
+```
+
+**Access policy applies to HTTP with no extra code**, because every request opens a session:
+
+```sh
+holos-server --data examples/hr.trig \
+  --deny-predicate http://example.com/salary \
+  --label-graph http://example.com/reviews=3
+```
+
+Identity stays at the edge ([DESIGN.md §14.5](DESIGN.md#145-enterprise-interoperability)):
+the server reads `X-Holos-Principal` / `X-Holos-Roles` / `X-Holos-Clearance` only when
+started with `--trust-forwarded-identity`, since trusting those headers on an open port
+would let any client name its own roles. `--no-ui` drops the console, after which the server
+needs no network access at all.
+
+## GeoSPARQL
+
+43 GeoSPARQL functions are registered on the evaluator, so spatial predicates compose with
+ordinary SPARQL — and with the access policy:
+
+```sparql
+PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
+PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+SELECT ?name WHERE {
+  ?city ex:name ?name ; geo:asWKT ?point .
+  ex:westernEurope geo:asWKT ?region .
+  FILTER(geof:sfWithin(?point, ?region))
+}
+```
+
+They are *filter* functions: a spatial join still scans every candidate geometry. The R-tree
+that would turn that into an index probe needs the cost-based planner to route to it —
+[DESIGN.md §17](DESIGN.md#17-geospatial) says where it goes and why it waits.
+
+## Try it
+
+```sh
+cargo build
+./target/debug/holos --help
+```
+
+The repository ships a small dataset with a public graph, a graph worth classifying, and some
+RDF 1.2 reified provenance:
+
+```sh
+# What is in there
+./target/debug/holos stats --data examples/hr.trig
+
+# Everything
+./target/debug/holos query --data examples/hr.trig --results csv \
+  --query 'PREFIX ex: <http://example.com/>
+           SELECT ?name ?salary WHERE { GRAPH ?g { ?e ex:name ?name
+                                        OPTIONAL { ?e ex:salary ?salary } } }'
+```
+
+### Fine-grained policy
+
+Hide one predicate from everyone who is not in HR. The rows still come back; the column does
+not:
+
+```sh
+./target/debug/holos query --data examples/hr.trig --results csv \
+  --deny-predicate http://example.com/salary --except-role hr \
+  --query 'PREFIX ex: <http://example.com/>
+           SELECT ?name ?salary WHERE { GRAPH ?g { ?e ex:name ?name
+                                        OPTIONAL { ?e ex:salary ?salary } } }'
+```
+
+```
+name,salary
+Alice,
+Bob,
+Carol,
+```
+
+Add `--role hr` and the salaries reappear.
+
+### Classification labels
+
+A labelled graph is invisible below the clearance — and so is the fact that it exists:
+
+```sh
+./target/debug/holos query --data examples/hr.trig --results csv \
+  --label-graph http://example.com/reviews=3 \
+  --query 'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }'
+```
+
+```
+g
+http://example.com/public
+http://example.com/provenance
+```
+
+Add `--clearance 3` and `ex:reviews` appears in the list.
+
+The property this rests on: **policy is applied at the scan, not by rewriting the query**, so
+`NOT EXISTS`, `MINUS`, aggregates, property paths and subqueries all see the same filtered
+dataset. [DESIGN.md §14.1](DESIGN.md#141-enforce-at-the-scan-never-in-a-query-rewrite) states it
+formally; `policy_survives_every_operator_that_defeats_query_rewriting` in
+[crates/holos-engine/src/lib.rs](crates/holos-engine/src/lib.rs) tests it.
+
+## Layout
+
+| Crate | Contents |
+|---|---|
+| [crates/holos-core](crates/holos-core) | `TermId`, the inline value codec, the well-known vocabulary table |
+| [crates/holos-store](crates/holos-store) | Term dictionary and the nine-order quad index |
+| [crates/holos-security](crates/holos-security) | Principals, policy, compilation, classification lattice, audit |
+| [crates/holos-engine](crates/holos-engine) | The dataset view (and policy chokepoint), SPARQL evaluation |
+| [crates/holos-python](crates/holos-python) | Python bindings (PyO3 + maturin) — see its [PACKAGING.md](crates/holos-python/PACKAGING.md) |
+| [crates/holos-stats](crates/holos-stats) | Characteristic sets, cardinality estimation, and the measurement against the reused optimiser |
+| [crates/holos-shacl](crates/holos-shacl) | Store bridge, incremental planner, native evaluator, `Validate` trait |
+| [crates/holos-shacl-engine](crates/holos-shacl-engine) | [SHACL_Engine](https://github.com/pwin/SHACL_Engine), vendored and adapted — see its [PROVENANCE.md](crates/holos-shacl-engine/PROVENANCE.md) |
+| [crates/holos-holon](crates/holos-holon) | Holons: scene, boundary, event log, the tick |
+| [crates/holos-server](crates/holos-server) | SPARQL 1.2 Protocol over HTTP, YASGUI console |
+| [crates/holos-cli](crates/holos-cli) | The `holos` binary |
+| [crates/holos-conformance](crates/holos-conformance) | W3C test-suite harness, with the oracle differential |
+
+## Licence
+
+MIT OR Apache-2.0.
+
+Reuses Oxigraph crates (`oxrdf`, `oxttl`, `oxrdfio`, `spargebra`, `spareval`, `sparesults`,
+`spargeo`) under the same terms, and vendors
+[pwin/SHACL_Engine](https://github.com/pwin/SHACL_Engine), also MIT OR Apache-2.0 — see
+[crates/holos-shacl-engine/PROVENANCE.md](crates/holos-shacl-engine/PROVENANCE.md) for the
+commit it was taken from and every change made to it.
+
+YASGUI is loaded from a CDN by the console page and is not vendored; it carries its own
+licence.

@@ -1,0 +1,6 @@
+# sparql12 — tests known to fail. Regenerate with HOLOS_UPDATE_CONFORMANCE=1.
+# 262/266 passed, 4 failed, 3 skipped
+https://w3c.github.io/rdf-tests/sparql/sparql12/grouping/manifest#select-variable-reuse	upstream: query did not parse: error at 4:1: expected one of The SELECT contains an expression with a variable that is unbound, [_]
+https://w3c.github.io/rdf-tests/sparql/sparql12/syntax-triple-terms-negative/manifest#tripleterm-subject-03	upstream: invalid query was accepted by the parser
+https://w3c.github.io/rdf-tests/sparql/sparql12/syntax-triple-terms-negative/manifest#tripleterm-subject-06	upstream: invalid query was accepted by the parser
+https://w3c.github.io/rdf-tests/sparql/sparql12/syntax/manifest#nested-aggregate-functions	upstream: invalid query was accepted by the parser

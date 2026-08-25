@@ -1,0 +1,22 @@
+[package]
+name = "holos-store"
+description = "HOLOS L2 — term dictionary and the nine-order quad index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+holos-core.workspace = true
+oxrdf.workspace = true
+rustc-hash.workspace = true
+thiserror.workspace = true
+rocksdb = { workspace = true, optional = true }
+
+[features]
+default = []
+rocksdb = ["dep:rocksdb"]
+
+[dev-dependencies]
+tempfile.workspace = true

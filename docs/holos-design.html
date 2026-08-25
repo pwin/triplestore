@@ -1,0 +1,2198 @@
+<title>HOLOS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap">
+
+<style>
+:root{
+  --ground:#E8EAED;
+  --surface:#F6F7F9;
+  --surface-2:#DEE3E8;
+  --ink:#15181C;
+  --ink-2:#3C444D;
+  --muted:#5C646E;
+  --rule:#C8CFD6;
+  --rule-soft:#DCE1E6;
+  --accent:#A21C4B;
+  --accent-ink:#8A1740;
+  --accent-wash:#F1DBE3;
+  --ax-s:#0D6E7C;
+  --ax-p:#7A5E00;
+  --ax-o:#544697;
+  --stratum-1:#D3D9DF;
+  --stratum-2:#C7CFD6;
+  --stratum-3:#BCC5CD;
+  --stratum-4:#B1BBC4;
+  --stratum-5:#A6B1BB;
+  --stratum-6:#9AA7B2;
+  --stratum-7:#8E9CA8;
+  --stratum-ink:#15181C;
+  --shadow:0 1px 2px rgba(20,26,33,.06), 0 8px 24px -16px rgba(20,26,33,.28);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0F1215;
+    --surface:#171B20;
+    --surface-2:#1F252B;
+    --ink:#E3E7EB;
+    --ink-2:#B6BEC6;
+    --muted:#8B949E;
+    --rule:#2B323A;
+    --rule-soft:#222932;
+    --accent:#F0517F;
+    --accent-ink:#F87CA0;
+    --accent-wash:#38101F;
+    --ax-s:#45BECB;
+    --ax-p:#D6AB3C;
+    --ax-o:#A296EE;
+    --stratum-1:#1C222A;
+    --stratum-2:#212933;
+    --stratum-3:#26303B;
+    --stratum-4:#2C3744;
+    --stratum-5:#323F4D;
+    --stratum-6:#384656;
+    --stratum-7:#3E4E5F;
+    --stratum-ink:#E3E7EB;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0F1215;
+  --surface:#171B20;
+  --surface-2:#1F252B;
+  --ink:#E3E7EB;
+  --ink-2:#B6BEC6;
+  --muted:#8B949E;
+  --rule:#2B323A;
+  --rule-soft:#222932;
+  --accent:#F0517F;
+  --accent-ink:#F87CA0;
+  --accent-wash:#38101F;
+  --ax-s:#45BECB;
+  --ax-p:#D6AB3C;
+  --ax-o:#A296EE;
+  --stratum-1:#1C222A;
+  --stratum-2:#212933;
+  --stratum-3:#26303B;
+  --stratum-4:#2C3744;
+  --stratum-5:#323F4D;
+  --stratum-6:#384656;
+  --stratum-7:#3E4E5F;
+  --stratum-ink:#E3E7EB;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+}
+
+*{box-sizing:border-box;}
+
+body{
+  margin:0;
+  background:var(--ground);
+  color:var(--ink);
+  font-family:"Source Serif 4","Iowan Old Style",Georgia,serif;
+  font-size:17px;
+  line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+
+.wrap{
+  max-width:1180px;
+  margin:0 auto;
+  padding:0 28px 120px;
+}
+
+/* ---------- masthead ---------- */
+
+.masthead{
+  padding:64px 0 44px;
+  border-bottom:1px solid var(--rule);
+}
+.eyebrow{
+  font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11.5px;
+  font-weight:500;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+  color:var(--muted);
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px 14px;
+  align-items:center;
+}
+.eyebrow .dot{color:var(--rule);}
+h1{
+  font-family:Archivo,"Helvetica Neue",Arial,sans-serif;
+  font-weight:700;
+  font-size:clamp(52px,10vw,104px);
+  line-height:.92;
+  letter-spacing:-.035em;
+  margin:22px 0 0;
+  text-wrap:balance;
+}
+h1 .sub{
+  display:block;
+  font-size:clamp(17px,2.4vw,25px);
+  font-weight:500;
+  letter-spacing:-.012em;
+  line-height:1.28;
+  color:var(--ink-2);
+  margin-top:20px;
+  max-width:30ch;
+}
+.standfirst{
+  margin:30px 0 0;
+  max-width:64ch;
+  font-size:19.5px;
+  line-height:1.58;
+  color:var(--ink-2);
+}
+.meta{
+  margin-top:32px;
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px 26px;
+  font-family:"IBM Plex Mono",ui-monospace,monospace;
+  font-size:12px;
+  color:var(--muted);
+  letter-spacing:.02em;
+}
+.meta b{color:var(--ink-2);font-weight:500;}
+
+/* ---------- layout shell ---------- */
+
+.shell{
+  display:grid;
+  grid-template-columns:minmax(0,1fr);
+  gap:0;
+}
+@media (min-width:1000px){
+  .shell{grid-template-columns:170px minmax(0,1fr);gap:56px;}
+  .toc{display:block;}
+}
+.toc{
+  display:none;
+  align-self:start;
+  position:sticky;
+  top:0;
+  padding:56px 0 0;
+  font-family:"IBM Plex Mono",ui-monospace,monospace;
+  font-size:11.5px;
+  line-height:1.5;
+}
+.toc ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px;}
+.toc a{
+  color:var(--muted);
+  text-decoration:none;
+  display:grid;
+  grid-template-columns:24px 1fr;
+  gap:6px;
+  border-left:2px solid transparent;
+  padding-left:10px;
+  margin-left:-12px;
+}
+.toc a:hover,.toc a:focus-visible{color:var(--accent);border-left-color:var(--accent);}
+.toc .n{color:var(--rule);}
+.toc a:hover .n{color:var(--accent);}
+
+/* ---------- sections ---------- */
+
+section{padding:56px 0 8px;border-top:1px solid var(--rule-soft);}
+section:first-of-type{border-top:0;}
+
+h2{
+  font-family:Archivo,Arial,sans-serif;
+  font-size:clamp(26px,3.4vw,36px);
+  font-weight:600;
+  letter-spacing:-.024em;
+  line-height:1.12;
+  margin:0 0 6px;
+  text-wrap:balance;
+  display:grid;
+  grid-template-columns:auto 1fr;
+  gap:16px;
+  align-items:baseline;
+}
+h2 .num{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:12px;
+  font-weight:500;
+  letter-spacing:.1em;
+  color:var(--accent);
+  transform:translateY(-2px);
+}
+h3{
+  font-family:Archivo,Arial,sans-serif;
+  font-size:18px;
+  font-weight:600;
+  letter-spacing:-.012em;
+  margin:40px 0 10px;
+}
+h4{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:11.5px;
+  font-weight:600;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+  color:var(--muted);
+  margin:0 0 10px;
+}
+p{margin:0 0 18px;max-width:68ch;}
+.lede{font-size:19px;color:var(--ink-2);max-width:64ch;}
+strong{font-weight:600;color:var(--ink);}
+em{font-style:italic;}
+a{color:var(--accent);text-decoration:none;border-bottom:1px solid var(--accent-wash);}
+a:hover,a:focus-visible{border-bottom-color:var(--accent);}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:2px;}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.86em;}
+code{
+  background:var(--surface-2);
+  padding:.1em .34em;
+  border-radius:3px;
+  color:var(--ink);
+}
+ul,ol{max-width:68ch;padding-left:1.15em;margin:0 0 18px;}
+li{margin-bottom:9px;}
+li::marker{color:var(--muted);}
+
+/* ---------- verdict block ---------- */
+
+.verdict{
+  background:var(--surface);
+  border:1px solid var(--rule);
+  border-left:3px solid var(--accent);
+  padding:30px 32px 12px;
+  margin:8px 0 34px;
+  box-shadow:var(--shadow);
+}
+.verdict p:first-child{font-size:20px;}
+.four{
+  list-style:none;
+  padding:0;
+  margin:22px 0 26px;
+  display:grid;
+  gap:1px;
+  background:var(--rule);
+  border:1px solid var(--rule);
+  max-width:none;
+}
+@media (min-width:760px){.four{grid-template-columns:repeat(2,1fr);}}
+.four li{
+  margin:0;
+  background:var(--surface);
+  padding:18px 20px;
+  display:grid;
+  grid-template-columns:26px 1fr;
+  gap:12px;
+  align-items:start;
+}
+.four .k{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:11px;
+  font-weight:600;
+  color:var(--accent);
+  letter-spacing:.06em;
+  padding-top:4px;
+}
+.four .t{font-size:15.5px;line-height:1.5;}
+.four .t b{font-family:Archivo,Arial,sans-serif;font-weight:600;letter-spacing:-.01em;}
+.four .src{
+  display:block;
+  font-family:"IBM Plex Mono",monospace;
+  font-size:10.5px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--muted);
+  margin-top:6px;
+}
+
+/* ---------- stratigraphic stack ---------- */
+
+.stack{
+  margin:18px 0 30px;
+  border:1px solid var(--rule);
+  background:var(--surface);
+  box-shadow:var(--shadow);
+  overflow:hidden;
+}
+.stratum{
+  display:grid;
+  grid-template-columns:66px minmax(0,1fr);
+  border-bottom:1px solid var(--ground);
+  color:var(--stratum-ink);
+}
+.stratum:last-child{border-bottom:0;}
+.stratum .lv{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:12px;
+  font-weight:600;
+  letter-spacing:.06em;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:14px 0;
+  border-right:1px solid var(--ground);
+  opacity:.72;
+}
+.stratum .body{padding:14px 20px;}
+.stratum .nm{
+  font-family:Archivo,Arial,sans-serif;
+  font-weight:600;
+  font-size:15px;
+  letter-spacing:-.008em;
+  margin-bottom:3px;
+}
+.stratum .rl{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:11.5px;
+  line-height:1.55;
+  opacity:.78;
+}
+.s6{background:var(--stratum-7);}
+.s5{background:var(--stratum-6);}
+.s4{background:var(--stratum-5);}
+.s3{background:var(--stratum-4);}
+.s2{background:var(--stratum-3);}
+.s1{background:var(--stratum-2);}
+.s0{background:var(--stratum-1);}
+.tiers{display:grid;grid-template-columns:1fr;gap:10px;margin-top:12px;}
+@media (min-width:640px){.tiers{grid-template-columns:1fr 1fr;}}
+.tier{padding:11px 14px;border:1px dashed currentColor;border-radius:2px;}
+.tier .tt{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:10.5px;
+  font-weight:600;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  margin-bottom:4px;
+}
+.stackcap{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:11px;
+  color:var(--muted);
+  letter-spacing:.03em;
+  margin:-16px 0 34px;
+  max-width:70ch;
+}
+
+/* ---------- take / leave cards ---------- */
+
+.sources{display:grid;gap:20px;margin:26px 0 10px;}
+@media (min-width:900px){.sources{grid-template-columns:1fr 1fr;}}
+.srccard{
+  border:1px solid var(--rule);
+  background:var(--surface);
+  padding:22px 24px 6px;
+}
+.srccard .hd{
+  font-family:Archivo,Arial,sans-serif;
+  font-size:17px;
+  font-weight:700;
+  letter-spacing:-.015em;
+  margin-bottom:16px;
+  padding-bottom:12px;
+  border-bottom:1px solid var(--rule-soft);
+}
+.tl{margin-bottom:18px;}
+.tl .lbl{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:10.5px;
+  font-weight:600;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+  display:inline-block;
+  margin-bottom:5px;
+}
+.take .lbl{color:var(--accent);}
+.leave .lbl{color:var(--muted);}
+.tl p{font-size:15px;line-height:1.55;margin:0;max-width:none;}
+.leave{padding-left:14px;border-left:2px solid var(--rule);color:var(--ink-2);}
+
+/* ---------- generic table ---------- */
+
+.tablewrap{overflow-x:auto;margin:22px 0 26px;border:1px solid var(--rule);background:var(--surface);}
+table{border-collapse:collapse;width:100%;min-width:520px;font-size:14.5px;}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--rule-soft);vertical-align:top;}
+th{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:10.5px;
+  font-weight:600;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  color:var(--muted);
+  background:var(--surface-2);
+  border-bottom:1px solid var(--rule);
+  white-space:nowrap;
+}
+tr:last-child td{border-bottom:0;}
+td.k{font-family:"IBM Plex Mono",monospace;font-size:13px;white-space:nowrap;color:var(--accent-ink);font-weight:500;}
+.tabnum{font-variant-numeric:tabular-nums;}
+
+/* ---------- termid bitfield ---------- */
+
+.bitfield{
+  display:flex;
+  margin:24px 0 8px;
+  border:1px solid var(--rule);
+  font-family:"IBM Plex Mono",monospace;
+  overflow:hidden;
+}
+.bitfield div{padding:12px 10px;font-size:11px;letter-spacing:.04em;}
+.bf-tag{
+  flex:0 0 22%;
+  background:var(--accent-wash);
+  color:var(--accent-ink);
+  font-weight:600;
+  border-right:1px solid var(--rule);
+  text-align:center;
+}
+.bf-pay{flex:1;background:var(--surface);color:var(--muted);text-align:center;}
+.bitcap{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--muted);margin:0 0 26px;}
+
+/* ---------- axis chips ---------- */
+
+.chips{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 24px;}
+.chip{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:11.5px;
+  font-weight:500;
+  letter-spacing:.09em;
+  text-transform:uppercase;
+  padding:5px 10px;
+  border:1px solid currentColor;
+  border-radius:2px;
+}
+.chip.s{color:var(--ax-s);}
+.chip.p{color:var(--ax-p);}
+.chip.o{color:var(--ax-o);}
+.chip.n{color:var(--muted);}
+
+/* ---------- tick stepper ---------- */
+
+.tick{
+  list-style:none;
+  padding:0;
+  margin:24px 0 28px;
+  counter-reset:tk;
+  border-left:2px solid var(--rule);
+  max-width:66ch;
+}
+.tick li{
+  counter-increment:tk;
+  position:relative;
+  padding:0 0 18px 26px;
+  margin:0;
+  font-size:15.5px;
+  line-height:1.5;
+}
+.tick li::before{
+  content:counter(tk);
+  position:absolute;
+  left:-11px;
+  top:1px;
+  width:20px;
+  height:20px;
+  border-radius:50%;
+  background:var(--accent);
+  color:var(--ground);
+  font-family:"IBM Plex Mono",monospace;
+  font-size:10.5px;
+  font-weight:600;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+/* ---------- roadmap ---------- */
+
+.phases{display:grid;gap:1px;background:var(--rule);border:1px solid var(--rule);margin:24px 0 22px;}
+.phase{
+  background:var(--surface);
+  display:grid;
+  grid-template-columns:58px minmax(0,1fr);
+  gap:0;
+}
+@media (min-width:820px){.phase{grid-template-columns:58px minmax(0,1.1fr) minmax(0,1.2fr);}}
+.phase .pid{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:13px;
+  font-weight:600;
+  color:var(--accent);
+  padding:16px 0 16px 18px;
+}
+.phase .pd{padding:16px 20px 16px 4px;font-size:15px;line-height:1.5;}
+.phase .px{
+  padding:0 20px 18px 22px;
+  font-size:14px;
+  line-height:1.5;
+  color:var(--ink-2);
+  border-top:1px dashed var(--rule-soft);
+  margin:0 20px 0 22px;
+  padding-top:12px;
+}
+@media (min-width:820px){
+  .phase .px{border-top:0;border-left:1px dashed var(--rule);padding:16px 20px;margin:0;}
+}
+.px .xl{
+  display:block;
+  font-family:"IBM Plex Mono",monospace;
+  font-size:10px;
+  font-weight:600;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+  color:var(--muted);
+  margin-bottom:4px;
+}
+.phase.research{background:var(--accent-wash);}
+.phase.research .pd,.phase.research .px{color:var(--ink);}
+.legend{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:11px;
+  color:var(--muted);
+  display:flex;
+  gap:18px;
+  flex-wrap:wrap;
+  margin-bottom:26px;
+}
+.legend span::before{
+  content:"";
+  display:inline-block;
+  width:10px;height:10px;
+  margin-right:7px;
+  border:1px solid var(--rule);
+  transform:translateY(1px);
+}
+.legend .lg-b::before{background:var(--surface);}
+.legend .lg-r::before{background:var(--accent-wash);}
+
+/* ---------- risks ---------- */
+
+.risks{border:1px solid var(--rule);background:var(--surface);margin:24px 0 20px;}
+.risk{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:4px;
+  padding:18px 22px;
+  border-bottom:1px solid var(--rule-soft);
+}
+@media (min-width:760px){
+  .risk{grid-template-columns:52px minmax(0,1fr);gap:0 18px;align-items:start;}
+}
+.risk:last-child{border-bottom:0;}
+.sev{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:13px;
+  letter-spacing:.12em;
+  color:var(--accent);
+  padding-top:3px;
+}
+.sev.med{color:var(--muted);}
+.risk .rt{
+  font-family:Archivo,Arial,sans-serif;
+  font-weight:600;
+  font-size:15.5px;
+  letter-spacing:-.008em;
+  margin-bottom:4px;
+}
+.risk .rm{font-size:14.5px;line-height:1.55;color:var(--ink-2);max-width:70ch;}
+.risk .rm b{color:var(--ink);font-weight:600;}
+
+/* ---------- open questions ---------- */
+
+.oq{list-style:none;padding:0;margin:24px 0 10px;counter-reset:oq;display:grid;gap:1px;background:var(--rule);border:1px solid var(--rule);max-width:none;}
+.oq li{
+  counter-increment:oq;
+  background:var(--surface);
+  margin:0;
+  padding:20px 24px;
+  display:grid;
+  grid-template-columns:30px 1fr;
+  gap:14px;
+}
+.oq li::before{
+  content:"Q" counter(oq);
+  font-family:"IBM Plex Mono",monospace;
+  font-size:11px;
+  font-weight:600;
+  letter-spacing:.06em;
+  color:var(--accent);
+  padding-top:4px;
+}
+.oq .qq{
+  font-family:Archivo,Arial,sans-serif;
+  font-weight:600;
+  font-size:15.5px;
+  letter-spacing:-.008em;
+  margin-bottom:6px;
+}
+.oq .qmk{
+  display:inline-block;margin-left:9px;vertical-align:2px;
+  font-family:"IBM Plex Mono",monospace;font-size:9.5px;font-weight:500;
+  letter-spacing:.11em;text-transform:uppercase;
+  color:var(--ax-s);border:1px solid var(--ax-s);padding:2px 6px;
+}
+.oq .qa{font-size:14.5px;line-height:1.55;color:var(--ink-2);}
+
+/* ---------- sources ---------- */
+
+.reflist{list-style:none;padding:0;margin:22px 0 0;max-width:none;display:grid;gap:14px;}
+.reflist li{
+  margin:0;
+  padding-left:16px;
+  border-left:2px solid var(--rule);
+  font-size:14.5px;
+  line-height:1.55;
+}
+.reflist .rl-h{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:10.5px;
+  font-weight:600;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+  color:var(--muted);
+  display:block;
+  margin-bottom:4px;
+}
+
+footer{
+  margin-top:64px;
+  padding-top:26px;
+  border-top:1px solid var(--rule);
+  font-family:"IBM Plex Mono",monospace;
+  font-size:11.5px;
+  color:var(--muted);
+  letter-spacing:.02em;
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px 24px;
+  justify-content:space-between;
+}
+
+/* ---------- build status strip ---------- */
+
+.status{
+  margin-top:34px;
+  border:1px solid var(--rule);
+  background:var(--surface);
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(132px,1fr));
+  gap:1px;
+  background:var(--rule);
+}
+.st{
+  background:var(--surface);
+  padding:13px 15px;
+  font-family:"IBM Plex Mono",monospace;
+}
+.st .k{
+  font-size:10px;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+  color:var(--muted);
+  display:block;
+  margin-bottom:5px;
+}
+.st .v{font-size:12.5px;font-weight:500;line-height:1.35;display:block;}
+.st.on .v{color:var(--accent);}
+.st.part .v{color:var(--ink);}
+.st.off .v{color:var(--muted);}
+.st .mk{font-size:11px;margin-right:5px;}
+
+/* ---------- formal property pull-quote ---------- */
+
+.property{
+  margin:26px 0 30px;
+  padding:26px 30px;
+  border:1px solid var(--accent);
+  background:var(--accent-wash);
+  max-width:none;
+}
+.property .lbl{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:10.5px;
+  font-weight:600;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+  color:var(--accent-ink);
+  display:block;
+  margin-bottom:10px;
+}
+.property p{
+  margin:0;
+  font-size:19px;
+  line-height:1.5;
+  max-width:58ch;
+  font-style:italic;
+}
+.property b{font-style:normal;}
+
+/* ---------- escape-hatch cards ---------- */
+
+/* --- q-error comparison (§16) ------------------------------------------- */
+.qe{margin:24px 0 26px;border:1px solid var(--rule);background:var(--surface);}
+.qe-hd{display:none;}
+.qe-hd .lbl{
+  font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--muted);
+}
+.qe-hd .lbl b{font-weight:600;color:var(--ink);letter-spacing:.09em;}
+.qe-row{
+  display:grid;grid-template-columns:1fr;gap:7px 16px;padding:13px 18px;
+  border-bottom:1px solid var(--rule-soft);align-items:center;
+}
+.qe-row:last-child{border-bottom:0;}
+.qe-row .shape{font-size:14px;color:var(--ink);line-height:1.35;}
+.qe-row .shape em{font-style:normal;color:var(--muted);font-size:12.5px;display:block;}
+.qe-bar{display:flex;align-items:center;gap:9px;min-width:0;}
+/* Below the breakpoint the column headers are gone, so each bar names itself. */
+.qe-bar::before{
+  content:attr(data-l);flex:0 0 auto;width:74px;
+  font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--muted);
+}
+.qe-bar .track{flex:1;height:7px;background:var(--rule-soft);min-width:40px;}
+.qe-bar .fill{display:block;height:100%;}
+.qe-bar.bad .fill{background:var(--accent);}
+.qe-bar.good .fill{background:var(--ax-s);}
+.qe-bar .n{
+  font-family:"IBM Plex Mono",monospace;font-size:12px;font-variant-numeric:tabular-nums;
+  white-space:nowrap;color:var(--muted);min-width:62px;text-align:right;
+}
+.qe-bar.good .n{color:var(--ax-s);font-weight:600;}
+.qe-foot{
+  padding:12px 18px;border-top:1px solid var(--rule);background:var(--ground);
+  font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--muted);
+}
+/* Wide enough for three real columns: the header returns and the per-bar
+   labels it duplicates go away. Placed after the base rules so it wins. */
+@media (min-width:820px){
+  .qe-hd{
+    display:grid;grid-template-columns:minmax(150px,1.05fr) 1fr 1fr;
+    gap:16px;align-items:end;padding:14px 18px 11px;
+    border-bottom:1px solid var(--rule);
+  }
+  .qe-row{grid-template-columns:minmax(150px,1.05fr) 1fr 1fr;gap:16px;padding:11px 18px;}
+  .qe-bar::before{display:none;}
+}
+.escapes{display:grid;gap:1px;background:var(--rule);border:1px solid var(--rule);margin:24px 0 26px;}
+@media (min-width:900px){.escapes{grid-template-columns:repeat(3,1fr);}}
+.esc{background:var(--surface);padding:20px 22px;}
+.esc .h{
+  font-family:Archivo,Arial,sans-serif;
+  font-weight:600;
+  font-size:15.5px;
+  letter-spacing:-.008em;
+  margin-bottom:8px;
+}
+.esc .b{font-size:14.5px;line-height:1.55;color:var(--ink-2);}
+.esc .b b{color:var(--ink);font-weight:600;}
+.esc .tag{
+  font-family:"IBM Plex Mono",monospace;
+  font-size:10px;
+  font-weight:600;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  color:var(--muted);
+  display:block;
+  margin-top:12px;
+}
+
+/* ---------- done markers on the roadmap ---------- */
+
+.phase .pid .mk{
+  display:block;
+  font-size:10px;
+  letter-spacing:.06em;
+  margin-top:3px;
+  font-weight:500;
+}
+.phase.done .pid .mk{color:var(--accent);}
+.phase.partial .pid .mk{color:var(--muted);}
+
+/* ---------- motion ---------- */
+
+.stratum{animation:rise .5s cubic-bezier(.22,.61,.36,1) backwards;}
+.stratum:nth-child(1){animation-delay:.28s}
+.stratum:nth-child(2){animation-delay:.24s}
+.stratum:nth-child(3){animation-delay:.20s}
+.stratum:nth-child(4){animation-delay:.16s}
+.stratum:nth-child(5){animation-delay:.12s}
+.stratum:nth-child(6){animation-delay:.08s}
+.stratum:nth-child(7){animation-delay:.04s}
+@keyframes rise{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:none;}}
+@media (prefers-reduced-motion:reduce){
+  .stratum{animation:none;}
+  *{transition:none!important;}
+}
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <div class="eyebrow">
+    <span>Design study</span><span class="dot">/</span>
+    <span>RDF 1.2 &middot; SPARQL 1.2 &middot; SHACL 1.2</span><span class="dot">/</span>
+    <span>22 August 2026</span><span class="dot">/</span>
+    <span>No code yet</span>
+  </div>
+  <h1>HOLOS
+    <span class="sub">A triplestore built from the four things that exist separately and nowhere together.</span>
+  </h1>
+  <p class="standfirst">
+    Worst-case-optimal joins, a durable RDF-1.2-native transactional store, SHACL enforced on the
+    write path, and versioned shape-governed graph partitions with incrementally maintained views.
+    Each one shipped somewhere. Their combination is the thesis.
+  </p>
+  <p class="standfirst" style="font-size:17px">
+P0 and the security layer are built. <strong>2,876 of 3,014 W3C tests pass, and every one
+    of the 138 failures is upstream</strong> &mdash; not one is a HOLOS bug
+    (<a href="#s15">&sect;15</a>). Everything above L3 is still design.
+    Storage has two backends behind one trait; SHACL_Engine is vendored and fed from the
+    store <strong>3.6&times; cheaper than parsing</strong>, with a native evaluator alongside
+    it for incremental revalidation at <strong>161&times;</strong> a full pass. GeoSPARQL and
+    a SPARQL-over-HTTP server with a YASGUI console are up, and access policy covers both
+    with no extra code. <strong>Holons tick</strong>: a boundary enforced on the write path,
+    per-triple provenance through RDF 1.2 reifiers, and a validated commit costing
+    <strong>41&times; less than a full pass</strong>.
+    <a href="#s14">&sect;14</a> is the security argument, <a href="#s16">&sect;16</a> the
+    measurements, and <a href="#s11">&sect;11</a> marks where the line falls.
+  </p>
+  <div class="meta">
+    <span>Working name <b>HOLOS</b></span>
+    <span>Substrate <b>RocksDB</b></span>
+    <span>Language <b>Rust</b></span>
+    <span>Scope <b>single node, embeddable</b></span>
+  </div>
+
+  <div class="status">
+    <div class="st on"><span class="k">L1 Term ids</span><span class="v"><span class="mk">&#9679;</span>built</span></div>
+    <div class="st part"><span class="k">L2 Storage</span><span class="v"><span class="mk">&#9681;</span>+ RocksDB</span></div>
+    <div class="st part"><span class="k">L3 Query</span><span class="v"><span class="mk">&#9681;</span>evaluates, measured</span></div>
+    <div class="st on"><span class="k">Security</span><span class="v"><span class="mk">&#9679;</span>built</span></div>
+    <div class="st on"><span class="k">L4 SHACL</span><span class="v"><span class="mk">&#9679;</span>engine vendored</span></div>
+    <div class="st on"><span class="k">GeoSPARQL</span><span class="v"><span class="mk">&#9679;</span>43 functions</span></div>
+    <div class="st part"><span class="k">L6 Server</span><span class="v"><span class="mk">&#9681;</span>SPARQL + UI</span></div>
+    <div class="st part"><span class="k">L5 Holon</span><span class="v"><span class="mk">&#9681;</span>ticks</span></div>
+    <div class="st off"><span class="k">Tier B trie</span><span class="v"><span class="mk">&#9675;</span>gated on P2</span></div>
+    <div class="st on"><span class="k">W3C suites</span><span class="v"><span class="mk">&#9679;</span>0 own bugs</span></div>
+  </div>
+</header>
+
+<div class="shell">
+
+  <nav class="toc" aria-label="Sections">
+    <ol>
+      <li><a href="#s1"><span class="n">01</span><span>Verdict</span></a></li>
+      <li><a href="#s2"><span class="n">02</span><span>Inputs</span></a></li>
+      <li><a href="#s3"><span class="n">03</span><span>Non-goals</span></a></li>
+      <li><a href="#s4"><span class="n">04</span><span>The stack</span></a></li>
+      <li><a href="#s5"><span class="n">05</span><span>Term IDs</span></a></li>
+      <li><a href="#s6"><span class="n">06</span><span>Storage</span></a></li>
+      <li><a href="#s7"><span class="n">07</span><span>Query engine</span></a></li>
+      <li><a href="#s8"><span class="n">08</span><span>SHACL</span></a></li>
+      <li><a href="#s9"><span class="n">09</span><span>Holon layer</span></a></li>
+      <li><a href="#s10"><span class="n">10</span><span>Interfaces</span></a></li>
+      <li><a href="#s11"><span class="n">11</span><span>Roadmap</span></a></li>
+      <li><a href="#s12"><span class="n">12</span><span>Risks</span></a></li>
+      <li><a href="#s13"><span class="n">13</span><span>Open questions</span></a></li>
+      <li><a href="#s14"><span class="n">14</span><span>Security</span></a></li>
+      <li><a href="#s15"><span class="n">15</span><span>Conformance</span></a></li>
+      <li><a href="#s16"><span class="n">16</span><span>Measurements</span></a></li>
+      <li><a href="#s18"><span class="n">18</span><span>Holon skeleton</span></a></li>
+      <li><a href="#s17"><span class="n">17</span><span>Geospatial</span></a></li>
+      <li><a href="#refs"><span class="n">&mdash;</span><span>Sources</span></a></li>
+    </ol>
+  </nav>
+
+  <main>
+
+  <section id="s1">
+    <h2><span class="num">01</span><span>Verdict</span></h2>
+    <div class="verdict">
+      <p><strong>Yes &mdash; and the reason it is worth doing is not &ldquo;a faster triplestore&rdquo;.</strong>
+      There are already fast triplestores. Rebuilding one of those is a losing race.</p>
+      <p>What does not exist as a single system, as of August 2026, is the combination of four things:</p>
+      <ul class="four">
+        <li><span class="k">01</span><span class="t"><b>Worst-case-optimal join execution</b> over a tensor-shaped index that slices on any dimension.<span class="src">from Tentris</span></span></li>
+        <li><span class="k">02</span><span class="t">A <b>durable, transactional, RDF-1.2-native store</b> with a conformant SPARQL front end.<span class="src">from Oxigraph &amp; Jena TDB2</span></span></li>
+        <li><span class="k">03</span><span class="t"><b>SHACL as a write-path subsystem</b>, not a batch library that reloads the graph.<span class="src">from SHACL_Engine, generalised</span></span></li>
+        <li><span class="k">04</span><span class="t"><b>Versioned, shape-governed partitions</b> with incrementally maintained views.<span class="src">from the Holon model</span></span></li>
+      </ul>
+      <p>Everything below is subordinate to that. If a design decision does not serve one of the four,
+      take the boring option and reuse someone else&rsquo;s code.</p>
+    </div>
+    <p>The honest counter-position &mdash; every way this fails &mdash; is in <a href="#s12">&sect;12</a>.
+    The five decisions still genuinely open are in <a href="#s13">&sect;13</a>.</p>
+  </section>
+
+  <section id="s2">
+    <h2><span class="num">02</span><span>What each input actually contributes</span></h2>
+    <p class="lede">Read as a pair of columns: what to take, and what to consciously leave. The second
+    column is the more useful one &mdash; every system on this list has a limitation that is an artefact
+    of its own scope rather than a mistake.</p>
+
+    <div class="sources">
+      <article class="srccard">
+        <div class="hd">Oxigraph</div>
+        <div class="tl take"><span class="lbl">Take</span>
+          <p>The crate decomposition &mdash; <code>oxrdf</code>, <code>oxttl</code>, <code>oxrdfio</code>,
+          <code>oxjsonld</code>, <code>spargebra</code>, <code>sparesults</code>, <code>oxsdatatypes</code>.
+          Conformance-heavy, boring, already correct, MIT/Apache-2.0. The 6&nbsp;+&nbsp;3 column-family
+          index layout. Preliminary RDF 1.2 and SPARQL 1.2 support already in tree.</p></div>
+        <div class="tl leave"><span class="lbl">Leave</span>
+          <p>The evaluator. The project says plainly that SPARQL query evaluation has not been optimised
+          yet: tuple-at-a-time iterators, pairwise index-nested-loop joins, 128-bit <code>StrHash</code>
+          term keys, no cost model.</p></div>
+      </article>
+
+      <article class="srccard">
+        <div class="hd">pwin/SHACL_Engine</div>
+        <div class="tl take"><span class="lbl">Take</span>
+          <p>Interned terms as integers; three fully sorted flat arrays (SPO/POS/OSP) with binary search
+          instead of hash maps; <strong>compile shapes once into flat IR</strong>; deterministic,
+          byte-reproducible reports; 418 of 426 W3C conformance tests passing.</p></div>
+        <div class="tl leave"><span class="lbl">Leave</span>
+          <p>Its structural limits, all artefacts of being a library rather than part of a store: whole
+          graph must be resident; loading dominates runtime (validation is under a quarter of wall clock
+          at 100k instances); named graphs flattened into one; single-pass rules needing
+          <code>--iterate-rules&nbsp;N</code>. A store fixes all four for free.</p></div>
+      </article>
+
+      <article class="srccard">
+        <div class="hd">Apache Jena 5.5</div>
+        <div class="tl take"><span class="lbl">Take</span>
+          <p>The RDF 1.2 model decisions: <code>StatementTerm</code> as a distinct <code>RDFNode</code>;
+          triple terms permitted in <strong>object position only</strong>, narrower than the old RDF-star
+          CG; reifiers as ordinary terms. Also the Graph/DatasetGraph/Model layering, ARQ&rsquo;s extension
+          points, and TDB2&rsquo;s MVCC &mdash; single writer, many readers.</p></div>
+        <div class="tl leave"><span class="lbl">Leave</span>
+          <p>The JVM, and the object-per-term memory model.</p></div>
+      </article>
+
+      <article class="srccard">
+        <div class="hd">Tentris</div>
+        <div class="tl take"><span class="lbl">Take</span>
+          <p>RDF as a sparse order-3/4 boolean tensor; the <strong>hypertrie</strong>, which slices in
+          constant time on any dimension combination and therefore subsumes all six permutation indexes
+          in one structure; BGP &rarr; Einstein summation &rarr; worst-case-optimal multi-join;
+          hash-consing of identical subtries (2022); incremental insert and delete (ISWC 2025), which
+          removes the historical bulk-load-only objection.</p></div>
+        <div class="tl leave"><span class="lbl">Leave</span>
+          <p>The research prototype&rsquo;s scope: <code>SELECT</code>, <code>SELECT DISTINCT</code> and
+          <code>ASK</code> over well-designed BGP&nbsp;+&nbsp;<code>OPTIONAL</code> patterns only. Full
+          SPARQL lives in the commercial fork. The papers are freely implementable; verify the licence of
+          any code you actually vendor.</p></div>
+      </article>
+
+      <article class="srccard">
+        <div class="hd">Holon CG &amp; &ldquo;What is a Holon&rdquo;</div>
+        <div class="tl take"><span class="lbl">Take</span>
+          <p>The four-layer decomposition &mdash; <strong>Scene</strong> (mutable current state),
+          <strong>Boundary</strong> (SHACL shapes and rules as the legal transitions),
+          <strong>Event</strong> (append-only provenance and causality), <strong>Projection</strong>
+          (the externally visible view). And the framing of a graph as a state machine that ticks, where
+          agents read projections and never touch the scene.</p></div>
+        <div class="tl leave"><span class="lbl">Leave</span>
+          <p>The Game-of-Life metaphor as an implementation guide, and any commitment to a vocabulary that
+          is still a CG draft. Build the mechanism; keep the vocabulary swappable.</p></div>
+      </article>
+
+      <article class="srccard">
+        <div class="hd">RocksDB</div>
+        <div class="tl take"><span class="lbl">Take</span>
+          <p>The LSM substrate, used fully: column families, prefix bloom filters,
+          <code>SstFileWriter</code> + <code>IngestExternalFile</code> for bulk load, merge operators for
+          counters, checkpoints for cheap consistent snapshots and branches, BlobDB value separation, and
+          user-defined timestamps for MVCC and time travel.</p></div>
+        <div class="tl leave"><span class="lbl">Leave</span>
+          <p>The assumption that RocksDB should hold the <em>hot join structure</em>. An LSM is excellent
+          as a system of record and poor at the pointer-chasing random access a WCO trie join needs.
+          See <a href="#s6">&sect;6.2</a>.</p></div>
+      </article>
+    </div>
+  </section>
+
+  <section id="s3">
+    <h2><span class="num">03</span><span>Non-goals</span></h2>
+    <p>Naming these now is what prevents scope collapse later.</p>
+    <ul>
+      <li><strong>Not distributed.</strong> Single node, embeddable, with an HTTP server on top. Sharding
+      an RDF graph well is a research programme of its own; the holon partitioning in
+      <a href="#s9">&sect;9</a> is the eventual seam if it is ever wanted, but v1 is one node.</li>
+      <li><strong>Not a new data model.</strong> Everything, including all holon metadata, is plain
+      RDF 1.2 in system named graphs. The moment holons need a non-RDF representation, the project has
+      failed its own premise.</li>
+      <li><strong>Not OWL-DL reasoning.</strong> RDFS and OWL-RL through the rule engine, materialised.
+      No tableau reasoner.</li>
+      <li><strong>Not a property-graph database.</strong> RDF 1.2 triple terms give an edge-property model
+      that is good enough; a native LPG view can be a later projection type.</li>
+    </ul>
+  </section>
+
+  <section id="s4">
+    <h2><span class="num">04</span><span>The stack</span></h2>
+    <p class="lede">Seven layers, read bottom-up. The bottom two are reused or conventional; the risk and
+    the contribution both sit in the middle and the top.</p>
+
+    <div class="stack">
+      <div class="stratum s6">
+        <div class="lv">L6</div>
+        <div class="body">
+          <div class="nm">Interfaces</div>
+          <div class="rl">embedded Rust API &middot; SPARQL 1.2 Protocol + Graph Store Protocol &middot; PyO3 &middot; WASM &middot; optional text + vector index</div>
+        </div>
+      </div>
+      <div class="stratum s5">
+        <div class="lv">L5</div>
+        <div class="body">
+          <div class="nm">Holon layer</div>
+          <div class="rl">holon registry &middot; tick transaction &middot; event log &middot; incremental projection maintenance (Z-sets) &middot; time travel &middot; branch</div>
+        </div>
+      </div>
+      <div class="stratum s4">
+        <div class="lv">L4</div>
+        <div class="body">
+          <div class="nm">Validation &amp; inference</div>
+          <div class="rl">compiled SHACL IR &middot; incremental revalidation &middot; semi-naive rules to fixpoint &middot; DRed on delete &middot; RDFS / OWL-RL</div>
+        </div>
+      </div>
+      <div class="stratum s3">
+        <div class="lv">L3</div>
+        <div class="body">
+          <div class="nm">Query engine</div>
+          <div class="rl">spargebra parse &rarr; cost-based optimiser (characteristic sets + HLL sketches) &rarr; hybrid plan: vectorised binary joins &times; WCO multi-join &rarr; morsel-driven parallel execution</div>
+        </div>
+      </div>
+      <div class="stratum s2">
+        <div class="lv">L2</div>
+        <div class="body">
+          <div class="nm">Storage</div>
+          <div class="tiers">
+            <div class="tier">
+              <div class="tt">Tier A &mdash; system of record</div>
+              <div class="rl">RocksDB. Six quad orders, three default-graph orders, MVCC, durable.</div>
+            </div>
+            <div class="tier">
+              <div class="tt">Tier B &mdash; derived</div>
+              <div class="rl">Hash-consed hypertrie per hot graph. In memory, lazy, disposable.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="stratum s1">
+        <div class="lv">L1</div>
+        <div class="body">
+          <div class="nm">Term dictionary</div>
+          <div class="rl">dense tagged 64-bit TermIds &middot; order-preserving numeric and temporal encoding &middot; inline small values &middot; recursive triple terms</div>
+        </div>
+      </div>
+      <div class="stratum s0">
+        <div class="lv">L0</div>
+        <div class="body">
+          <div class="nm">Terms &amp; I/O &mdash; reused wholesale</div>
+          <div class="rl">oxrdf &middot; oxsdatatypes &middot; oxttl &middot; oxrdfxml &middot; oxjsonld &middot; oxrdfio &middot; sparesults &middot; spargebra</div>
+        </div>
+      </div>
+    </div>
+    <p class="stackcap">L0 is reuse, not construction. Do not rewrite parsers, term models or result
+    serialisers &mdash; they are conformance-critical, tedious, and already correct under a permissive licence.</p>
+  </section>
+
+  <section id="s5">
+    <h2><span class="num">05</span><span>Term identifiers</span></h2>
+    <p>This is the first place to deliberately diverge from Oxigraph, and the divergence sets up everything
+    above it. Oxigraph keys quads by a 128-bit <code>StrHash</code> per term, so a quad key runs to about
+    64 bytes and there is no dense integer space. SHACL_Engine interns to <code>u32</code> and gets integer
+    comparisons in its inner loops.</p>
+    <p>A WCO trie index needs the SHACL_Engine property &mdash; <strong>dense, small, ordered
+    identifiers</strong> &mdash; because trie fan-out is stored as sorted arrays or roaring bitmaps of
+    child ids, which a 128-bit hash makes impossible.</p>
+
+    <div class="bitfield">
+      <div class="bf-tag">4-bit tag</div>
+      <div class="bf-pay">60-bit payload &mdash; dense id, or the value itself</div>
+    </div>
+    <p class="bitcap">TermId &mdash; 64 bits. Tag decides whether the payload is a dictionary index, an
+    inline value, or a triple-term handle.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Tag</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td class="k">0x0</td><td>Dictionary-backed IRI &mdash; 60-bit dense monotonic id</td></tr>
+          <tr><td class="k">0x1</td><td>Dictionary-backed literal</td></tr>
+          <tr><td class="k">0x2</td><td>Blank node, graph-scoped</td></tr>
+          <tr><td class="k">0x3</td><td><strong>Well-known vocabulary</strong> &mdash; static compile-time constants for <code>rdf:</code>, <code>rdfs:</code>, <code>owl:</code>, <code>xsd:</code>, <code>sh:</code>, <code>prov:</code>. <code>rdf:type</code> becomes a constant the optimiser can pattern-match on.</td></tr>
+          <tr><td class="k">0x4</td><td>Inline <code>xsd:integer</code> &mdash; 60-bit, order-preserving two&rsquo;s-complement bias</td></tr>
+          <tr><td class="k">0x5</td><td>Inline <code>xsd:decimal</code> / <code>xsd:double</code> &mdash; order-preserving IEEE-754 flip</td></tr>
+          <tr><td class="k">0x6</td><td>Inline <code>xsd:date</code> / <code>xsd:dateTime</code> &mdash; order-preserving, UTC-normalised</td></tr>
+          <tr><td class="k">0x7</td><td>Inline <code>xsd:boolean</code>, and strings of 7 bytes or fewer</td></tr>
+          <tr><td class="k">0x8</td><td><strong>Triple term</strong> &mdash; index into the triple-term side table</td></tr>
+          <tr><td class="k">0x9&ndash;0xF</td><td>Reserved &mdash; vector-embedding handles, geometry handles</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Two consequences are worth stating outright. <strong>Order-preserving encodings turn
+    <code>FILTER(?d &gt; "2020-01-01"^^xsd:date)</code> into an index range scan</strong> &mdash; the
+    cheapest large win available, and one most stores decline to take. And <strong>inline values never
+    enter the dictionary</strong>, so a dataset of measurements pays no dictionary cost for its numbers.</p>
+
+    <h3>Triple terms, and why RDF 1.2 is cheap</h3>
+    <p>A triple term resolves to an <code>(s, p, o)</code> triple of TermIds in a <code>tt</code> column
+    family: deduplicated, recursive. Because RDF 1.2 restricts triple terms to object position &mdash;
+    Jena&rsquo;s <code>StatementTerm</code> enforces exactly this &mdash; the index burden is bounded:
+    no permutation index has to handle a triple term in subject position. Reifiers are ordinary IRIs or
+    blank nodes and <code>rdf:reifies</code> is an ordinary predicate, so the Turtle sugar
+    <code>&lt;&lt; :s :p :o ~ :r &gt;&gt;</code> decomposes into two entirely conventional triples plus one
+    triple term.</p>
+    <p><strong>RDF 1.2 costs one term tag and one side table, not a redesign.</strong> It is nonetheless the
+    single most important thing to get right early, because retrofitting it later touches every index.</p>
+  </section>
+
+  <section id="s6">
+    <h2><span class="num">06</span><span>Storage</span></h2>
+
+    <h3>6.1 &nbsp;Tier A &mdash; RocksDB, used properly</h3>
+    <p>Keep Oxigraph&rsquo;s layout, which is already the right answer:</p>
+    <div class="chips">
+      <span class="chip s">spog</span><span class="chip p">posg</span><span class="chip o">ospg</span>
+      <span class="chip s">gspo</span><span class="chip p">gpos</span><span class="chip o">gosp</span>
+      <span class="chip n">dspo</span><span class="chip n">dpos</span><span class="chip n">dosp</span>
+      <span class="chip n">graphs</span><span class="chip n">id2str</span><span class="chip n">str2id</span>
+      <span class="chip n">tt</span><span class="chip n">stats</span>
+    </div>
+    <p>Six quad orders, three default-graph triple orders that avoid paying for a graph column, and the
+    dictionary, triple-term and statistics families. What changes is how much of RocksDB gets used:</p>
+    <ul>
+      <li><strong>Prefix extractor and prefix bloom filter per index family.</strong> A
+      <code>?s :p :o</code> lookup becomes a bloom-filtered prefix seek instead of an iterator walk.</li>
+      <li><strong><code>SstFileWriter</code> + <code>IngestExternalFile</code> for bulk load.</strong>
+      External-merge-sort the encoded quads, write SSTs directly, ingest them. This is the difference
+      between a billion triples in minutes and in hours &mdash; and it is the only thing that makes the
+      load-time problem dominating SHACL_Engine&rsquo;s benchmarks go away.</li>
+      <li><strong>Merge operators</strong> for dictionary refcounts and statistics counters, so the write
+      path never does read-modify-write.</li>
+      <li><strong>Checkpoints</strong> for consistent backups, and for holon branching &mdash; a checkpoint
+      is a cheap hard-linked fork of a dataset.</li>
+      <li><strong>User-defined timestamps</strong> for MVCC and time travel. Stated plainly: UDT is still
+      marked experimental upstream. The designed-in fallback is a monotonic version suffix in the key, the
+      TiKV approach, at the cost of writing your own GC.</li>
+      <li><strong>Value separation (BlobDB)</strong> for literals above a size threshold.</li>
+    </ul>
+    <p>Delta-encode successive keys within an index family. With dense ids and sorted order this is very
+    effective &mdash; which is why dense ids matter for the cold tier too, not only the hot one.</p>
+
+    <h3>6.2 &nbsp;Tier B &mdash; the hypertrie hot tier</h3>
+    <p><strong>The central architectural bet.</strong> Worst-case-optimal joins need trie-shaped structures
+    with constant-time slicing on arbitrary dimension subsets and heavy random access. LSM-trees are the
+    wrong shape for that. Rather than compromise, run both.</p>
+    <p>Tier A is the system of record: durable, transactional, complete. Tier B is a hash-consed hypertrie
+    per hot graph &mdash; built lazily the first time a graph is queried, evicted under memory pressure,
+    kept live by the ISWC-2025 incremental insert/delete algorithm, and stamped with the same MVCC version
+    as Tier A.</p>
+    <p>Tier B is <em>derived state</em>. It is never the authority; it can always be dropped and rebuilt.
+    That property is what makes the correctness argument tractable: the two tiers can be differentially
+    fuzz-tested against each other, and any divergence is a bug in Tier B, never a data-loss event.</p>
+    <p>Hash-consing &mdash; the &ldquo;Hashing the Hypertrie&rdquo; result &mdash; is not optional here. It
+    is what makes the memory cost of a second full index survivable, because in real RDF the same subtries
+    recur constantly.</p>
+    <p><strong>Cost, honestly:</strong> roughly a doubling of resident memory for hot graphs, plus a second
+    update path. Mitigations are laziness, per-graph granularity, eviction, and disposability. If the
+    memory numbers come in badly at P3, the fallback is to keep the hypertrie only for graphs under a size
+    threshold and serve everything else from Tier A with binary joins &mdash; degraded, not broken.</p>
+  </section>
+
+  <section id="s7">
+    <h2><span class="num">07</span><span>Query engine</span></h2>
+    <p>Reuse <code>spargebra</code> for parsing and <code>sparesults</code> for result serialisation. Start
+    with <code>sparopt</code>; replace it once statistics exist.</p>
+
+    <h3>Statistics</h3>
+    <p>The highest-leverage estimator for RDF is <strong>characteristic sets</strong> (Neumann &amp;
+    Moerkotte): the distinct predicate-sets occurring on subjects. They give accurate cardinality estimates
+    for star patterns, which is what RDF queries mostly are, and they are what separates engines that plan
+    from engines that guess. Maintain alongside them per-predicate triple counts, distinct-subject and
+    distinct-object counts via HyperLogLog sketches updated through RocksDB merge operators, and per-graph
+    totals.</p>
+    <p><strong>Built and measured</strong>, and the claim above holds by a wider margin than expected:
+    characteristic sets estimate six of seven query shapes exactly, for a mean q-error of
+    <span class="tabnum">1.1</span> against the reused optimiser's <span class="tabnum">2&times;10<sup>8</sup></span>.
+    The counts are exact rather than sketched for now &mdash; HyperLogLog's couple of percent of error
+    would have muddied the very accuracy measurement it exists to support, and it is a drop-in swap once
+    that question is settled. See <a href="#s16">&sect;16</a>.</p>
+
+    <h3>Planning is hybrid, and that is the point</h3>
+    <p>&ldquo;WCO everywhere&rdquo; is a trap. WCO joins win on cyclic and join-heavy patterns; binary hash
+    and merge joins win on selective chains and stars. The 2025 SPARQLoscope results are the cautionary
+    evidence &mdash; MillenniumDB leans hard on WCO and is not automatically fast, while QLever, with
+    conventional but well-tuned joins, is fastest on basic graph patterns. So: decompose each BGP into
+    connected components, estimate each, and choose per component. The planner must be able to pick either.</p>
+
+    <h3>Execution</h3>
+    <p>Morsel-driven parallelism over columnar batches of TermIds, Arrow-shaped, rather than tuple-at-a-time
+    iterators. This is the other place Oxigraph&rsquo;s ceiling is structural rather than incidental.
+    Operators spill to disk for large <code>ORDER BY</code>, <code>GROUP BY</code> and hash builds.</p>
+    <p><strong>Property paths</strong> get dedicated operators &mdash; bitmap-visited BFS for <code>*</code>
+    and <code>+</code>, with a transitive-closure cache keyed by predicate, direction and version. Property
+    paths are where most engines fall over on real workloads, and where a new engine can win visibly.</p>
+    <p><strong>SPARQL 1.2 surface:</strong> the <code>VERSION</code> declaration; <code>TRIPLE()</code>,
+    <code>SUBJECT()</code>, <code>PREDICATE()</code>, <code>OBJECT()</code>, <code>isTRIPLE()</code>;
+    <code>@en--ltr</code> base-direction literals; and the tightened <code>OPTIONAL</code> /
+    <code>MINUS</code> / <code>NOT EXISTS</code> semantics. Note the asymmetry in specification maturity:
+    RDF 1.2 Concepts is a Candidate Recommendation (7 April 2026) while SPARQL 1.2 Query is still a Working
+    Draft (20 August 2026). Pin to RDF 1.2 semantics; treat the SPARQL surface as movable until CR.</p>
+  </section>
+
+  <section id="s8">
+    <h2><span class="num">08</span><span>SHACL as a subsystem, not a library</span></h2>
+    <p>Take the SHACL_Engine design wholesale &mdash; compile-once flat IR, integer-interned terms, sorted
+    index access, deterministic reports &mdash; and change exactly one thing: <strong>it reads the
+    store&rsquo;s own dictionary and indexes instead of loading its own copy.</strong></p>
+    <p>That single change deletes the dominant cost in its current benchmarks, where loading exceeds
+    validation by roughly threefold at 100k instances. It also fixes the named-graph flattening limitation,
+    because the store already holds per-graph indexes; validation gains an explicit data-graph selector:
+    <em>this named graph</em>, <em>the union</em>, or <em>the whole dataset</em>.</p>
+
+    <h3>Incremental revalidation</h3>
+    <p>Build a shape&nbsp;&rarr;&nbsp;predicate/class dependency index at compile time. On commit, intersect
+    the delta&rsquo;s predicates with that index to derive the affected focus-node set, and revalidate only
+    those. Without this, SHACL on the write path is unaffordable; with it, cost is roughly proportional to
+    the size of the change. This is the enabling mechanism for the holon Boundary layer.</p>
+
+    <h3>Rules to fixpoint</h3>
+    <p>Semi-naive evaluation to a genuine fixpoint rather than a single pass with an
+    <code>--iterate-rules N</code> escape hatch, plus DRed-style incremental maintenance on delete. Keep
+    SHACL_Engine&rsquo;s honesty about the caveats &mdash; rules using negation-as-failure are non-monotonic
+    under iteration, and <code>sh:closed</code> interacts badly with inference &mdash; but move them earlier:
+    those conditions should be <strong>diagnosed by the shape compiler</strong>, rejected or warned at
+    compile time, rather than silently producing wrong answers, which is the current failure mode.</p>
+  </section>
+
+  <section id="s9">
+    <h2><span class="num">09</span><span>The holon layer</span></h2>
+    <p class="lede">This is the differentiator, and where the modelling ideas stop being conventions and
+    become storage primitives.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Holon layer</th><th>Engine primitive</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Scene</td><td>A named graph, versioned. The unit of transaction.</td></tr>
+          <tr><td class="k">Boundary</td><td>A compiled shapes graph and rule set bound to that scene, enforced on commit.</td></tr>
+          <tr><td class="k">Event</td><td>Append-only versioned delta log, PROV-O shaped, with RDF 1.2 reifiers annotating individual triples with who, when and why.</td></tr>
+          <tr><td class="k">Projection</td><td>Registered SPARQL queries maintained as materialised views.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>A commit is a tick</h3>
+    <p>One MVCC transaction, five steps:</p>
+    <ol class="tick">
+      <li>Apply the delta to the scene.</li>
+      <li>Run boundary rules to fixpoint.</li>
+      <li>Validate against boundary shapes &mdash; on violation, abort or admit-and-record, per holon policy.</li>
+      <li>Append the event, with reifier-annotated provenance.</li>
+      <li>Incrementally refresh the affected projections.</li>
+    </ol>
+
+    <p><strong>Projections are incrementally maintained</strong> using Z-set and differential-dataflow
+    techniques &mdash; the DBSP line of work. This is the piece that makes the holon story a database
+    contribution rather than a naming scheme: agents query projections, projections are cheap because they
+    are maintained by delta rather than recomputed, and the scene is never exposed. The Holon article&rsquo;s
+    &ldquo;clean architectural separation between reading state and triggering transitions&rdquo; is, in
+    database terms, precisely <em>read from an incrementally maintained view, write through a validated
+    transaction</em>.</p>
+
+    <p><strong>The honest restriction:</strong> general SPARQL is not incrementally maintainable. Restrict
+    registered projections to a maintainable fragment &mdash; BGP, filters, projection, distinct, simple
+    aggregation over that. Anything outside the fragment is accepted but recomputed on read, and the
+    registry says which regime a projection is in. Pretending otherwise would be this design&rsquo;s worst
+    possible lie.</p>
+
+    <p><strong>Time travel and branching</strong> fall out of the substrate: <code>AT VERSION n</code> and
+    <code>AT TIME t</code> reads use RocksDB user-defined timestamps or version-suffixed keys, and a branch
+    is a checkpoint plus a fresh event-log head. Auditability &mdash; which the Holon article flags as an
+    explicit architectural choice &mdash; becomes a per-holon retention policy rather than a schema decision.</p>
+
+    <p>All holon metadata is itself RDF, in a system graph, queryable with ordinary SPARQL. No new model.</p>
+  </section>
+
+  <section id="s10">
+    <h2><span class="num">10</span><span>Interfaces</span></h2>
+    <p>Embedded Rust API first. Then SPARQL 1.2 Protocol and Graph Store Protocol over HTTP &mdash; the
+    Fuseki-equivalent. Then PyO3 and WASM bindings, following the pattern both Oxigraph and SHACL_Engine
+    already use.</p>
+    <p>One optional module earns its place: text and vector indexes exposed as SPARQL service or property
+    functions, for hybrid retrieval. This is the concrete reason an LLM-agent system would choose this store
+    over an incumbent, and it aligns with the Holon CG&rsquo;s stated interest in grounding conversational
+    and computational systems.</p>
+  </section>
+
+  <section id="s11">
+    <h2><span class="num">11</span><span>Roadmap</span></h2>
+    <p class="lede">Each phase ends in something demonstrable and measurable. Do not proceed to the next
+    phase without the measurement.</p>
+
+    <div class="legend">
+      <span class="lg-b">P0&ndash;P2 &mdash; conventional, low risk</span>
+      <span class="lg-r">P3&ndash;P5 &mdash; the research content</span>
+    </div>
+
+    <div class="phases">
+      <div class="phase done">
+        <div class="pid">P0<span class="mk">DONE</span></div>
+        <div class="pd">Oxigraph crates + store + evaluator</div>
+        <div class="px"><span class="xl">Where it stands</span>SPARQL 1.2 and RDF 1.2 triple terms evaluate end to end, and the W3C suites pass with no HOLOS-attributable failure (<a href="#s15">&sect;15</a>). Still owes the RocksDB substrate.</div>
+      </div>
+      <div class="phase partial">
+        <div class="pid">P1<span class="mk">PART</span></div>
+        <div class="pd">Dense TermId dictionary, order-preserving encodings, SST-ingest bulk loader</div>
+        <div class="px"><span class="xl">Where it stands</span>Encoding and the RocksDB tier built. Measured <span class="tabnum">41k</span> quads/s persistent, <span class="tabnum">208k</span>/s in memory. Owes <code>SstFileWriter</code> ingestion. The original <span class="tabnum">500k</span>/s criterion was set before any measurement and is <strong>withdrawn</strong> &mdash; see <a href="#s16">&sect;16</a>.</div>
+      </div>
+      <div class="phase partial">
+        <div class="pid">P2<span class="mk">PART</span></div>
+        <div class="pd">Characteristic-set statistics, cost-based optimiser, vectorised binary joins</div>
+        <div class="px"><span class="xl">Where it stands</span>Statistics built and measured. Characteristic sets estimate six of seven query shapes <em>exactly</em> &mdash; mean q-error <span class="tabnum">1.1</span> against the reused optimiser's <span class="tabnum">2&times;10<sup>8</sup></span> &mdash; and bad estimates cost a measured <span class="tabnum">3&times;</span> (<a href="#s16">&sect;16</a>). Owes the optimiser itself: the reused one has no injection point, so consuming these statistics means owning the planner.</div>
+      </div>
+      <div class="phase research">
+        <div class="pid">P3</div>
+        <div class="pd">Hypertrie hot tier, WCO multi-join, hybrid planner</div>
+        <div class="px"><span class="xl">Exit criterion</span>Wins on cyclic and join-heavy queries without regressing star and chain queries; memory overhead measured and within budget. <strong>Gated on P2's planner</strong>, not just its statistics &mdash; <a href="#s13">&sect;13 Q2</a> compares against a <em>well-planned</em> binary join, which does not exist yet.</div>
+      </div>
+      <div class="phase research partial">
+        <div class="pid">P4<span class="mk">PART</span></div>
+        <div class="pd">SHACL subsystem on native indexes, incremental revalidation</div>
+        <div class="px"><span class="xl">Where it stands</span>Core built. <span class="tabnum">92/97</span> W3C SHACL Core (<a href="#s15">&sect;15</a>); revalidation measured at <span class="tabnum">161&times;</span> a full pass, so the cost does track the delta (<a href="#s16">&sect;16</a>). Owes SPARQL-based constraints, SHACL-AF rules and the 1.2 additions.</div>
+      </div>
+      <div class="phase research">
+        <div class="pid">P5<span class="mk">PART</span></div>
+        <div class="pd">Holon layer &mdash; versioned partitions, event log, IVM projections, time travel</div>
+        <div class="px"><span class="xl">Where it stands</span>Walking skeleton built: scene, boundary, event log and the tick, validated incrementally at <span class="tabnum">41&times;</span> a full pass (<a href="#s16">&sect;16</a>). Owes atomicity (needs &sect;6.1's MVCC), boundary rules to fixpoint, maintained projections, and time travel.</div>
+      </div>
+      <div class="phase">
+        <div class="pid">P6</div>
+        <div class="pd">HTTP protocol server, PyO3 and WASM bindings, text + vector module</div>
+        <div class="px"><span class="xl">Exit criterion</span>Drop-in for a Fuseki or Oxigraph deployment.</div>
+      </div>
+      <div class="phase done">
+        <div class="pid">S<span class="mk">DONE</span></div>
+        <div class="pd">Security &mdash; principals, compiled policy, classification lattice, audit</div>
+        <div class="px"><span class="xl">Why out of sequence</span>Built early on purpose. The enforcement point is the dataset view; retrofitting it once a query engine already existed would have meant retrofitting it wrongly. See <a href="#s14">&sect;14</a>.</div>
+      </div>
+    </div>
+    <p>Structure the work so that abandoning P3 or P5 still leaves a usable product. That is the main
+    insurance policy against everything in the next section.</p>
+  </section>
+
+  <section id="s12">
+    <h2><span class="num">12</span><span>Risks, and how each one kills the project</span></h2>
+    <p class="stackcap" style="margin-top:0">Severity: <span class="mono">&#9632;&#9632;&#9632;</span> fatal if unmanaged &nbsp;&middot;&nbsp; <span class="mono">&#9632;&#9632;&#9633;</span> serious &nbsp;&middot;&nbsp; <span class="mono">&#9632;&#9633;&#9633;</span> manageable</p>
+
+    <div class="risks">
+      <div class="risk">
+        <div class="sev" title="fatal if unmanaged">&#9632;&#9632;&#9632;</div>
+        <div>
+          <div class="rt">Two index tiers, two update paths</div>
+          <div class="rm">The most likely source of silent corruption. <b>Mitigation:</b> Tier B is strictly derived and disposable; differential property-based testing against Tier A on every commit in CI; a <code>VERIFY</code> operation that rebuilds and diffs.</div>
+        </div>
+      </div>
+      <div class="risk">
+        <div class="sev" title="fatal if unmanaged">&#9632;&#9632;&#9632;</div>
+        <div>
+          <div class="rt">&ldquo;Why does this exist?&rdquo;</div>
+          <div class="rm">The strongest risk of all. QLever is faster today; Oxigraph is more mature; RDFox reasons better; Fluree already ships versioning. <b>Mitigation:</b> the answer has to stay the four-way combination in &sect;1, and specifically the holon layer. The moment this becomes &ldquo;a slightly faster triplestore&rdquo;, it should stop.</div>
+        </div>
+      </div>
+      <div class="risk">
+        <div class="sev" title="serious">&#9632;&#9632;&#9633;</div>
+        <div>
+          <div class="rt">Hypertrie memory cost</div>
+          <div class="rm">Could make Tier B unusable on real datasets. <b>Mitigation:</b> hash-consing, per-graph laziness, eviction, size-threshold fallback. Measure at P3 before committing further.</div>
+        </div>
+      </div>
+      <div class="risk">
+        <div class="sev" title="serious">&#9632;&#9632;&#9633;</div>
+        <div>
+          <div class="rt">Incremental view maintenance for SPARQL</div>
+          <div class="rm">Only a fragment of the language is maintainable. <b>Mitigation:</b> state the fragment in the API, recompute outside it, never pretend.</div>
+        </div>
+      </div>
+      <div class="risk">
+        <div class="sev" title="serious">&#9632;&#9632;&#9633;</div>
+        <div>
+          <div class="rt">SPARQL conformance long tail</div>
+          <div class="rm">Chronically underestimated by everyone who has tried. <b>Mitigation:</b> P0 exists precisely to absorb it, and reusing <code>spargebra</code>, <code>sparesults</code> and <code>oxrdfio</code> removes most of it outright.</div>
+        </div>
+      </div>
+      <div class="risk">
+        <div class="sev med" title="manageable">&#9632;&#9633;&#9633;</div>
+        <div>
+          <div class="rt">RocksDB user-defined timestamps are experimental</div>
+          <div class="rm">Time travel and MVCC depend on them. <b>Mitigation:</b> version-suffixed keys as a designed-in fallback, with the abstraction boundary placed so the swap stays local.</div>
+        </div>
+      </div>
+      <div class="risk">
+        <div class="sev med" title="manageable">&#9632;&#9633;&#9633;</div>
+        <div>
+          <div class="rt">Specifications in motion</div>
+          <div class="rm">SPARQL 1.2 Query is a Working Draft; SHACL 1.2 Core is a Working Draft (3 August 2026); the Holon CG has published no specification yet. <b>Mitigation:</b> pin to RDF 1.2 Concepts (CR, 7 April 2026), keep the SPARQL surface behind a version flag &mdash; the <code>VERSION</code> declaration exists for exactly this &mdash; and treat holon vocabulary as configuration.</div>
+        </div>
+      </div>
+      <div class="risk">
+        <div class="sev med" title="manageable">&#9632;&#9633;&#9633;</div>
+        <div>
+          <div class="rt">Licensing</div>
+          <div class="rm">Oxigraph is MIT/Apache-2.0 and the Tentris research repo is Apache-2.0/MIT, so both are reusable; Jena is Apache-2.0, readable as a reference. <b>Mitigation:</b> the hypertrie library&rsquo;s own licence needs checking separately, and a commercial Tentris exists &mdash; implement from the papers rather than vendoring code unless the licence is verified.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="s13">
+    <h2><span class="num">13</span><span>Open questions</span></h2>
+    <p class="lede">Five decisions this study does not settle. Each one is a fork, not a detail. One of them &mdash; Q2 &mdash; has since been narrowed by measurement rather than argument.</p>
+    <ol class="oq">
+      <li><div><div class="qq">Quads or holons as the storage primitive?</div>
+        <div class="qa">This design keeps quads and layers holons above. The radical alternative makes the
+        holon the primitive and derives the dataset view &mdash; buying tighter versioning and cleaner
+        isolation, costing interoperability with every existing RDF tool. The conservative choice is taken
+        here; it should be a conscious decision, not a default.</div></div></li>
+      <li><div><div class="qq">Is the hypertrie worth it given a good cost-based optimiser?
+        <span class="qmk">partly answered</span></div>
+        <div class="qa">The precondition holds: characteristic sets cut mean q-error from
+        2&times;10<sup>8</sup> to <strong>1.1</strong>, and mis-estimation costs a measured
+        <strong>3&times;</strong> on a five-pattern query (<a href="#s16">&sect;16</a>). So accurate
+        planning is both achievable and worth having. Still open is Q2 proper &mdash; whether a
+        <em>well-planned</em> binary join leaves anything for a worst-case-optimal join to win. That
+        needs a planner consuming the statistics, and the reused optimiser offers no injection point,
+        so P3 is now gated on a build decision rather than on enthusiasm.</div></div></li>
+      <li><div><div class="qq">How do blank nodes scope across holon versions and branches?</div>
+        <div class="qa">Skolemise on write, or carry graph-scoped labels? Skolemisation is simpler and makes
+        diffs meaningful; it changes what round-trips.</div></div></li>
+      <li><div><div class="qq">Does the Boundary layer double as the authorization surface?</div>
+        <div class="qa">If agents only ever read projections, it can. That is an attractive property, and it
+        needs a security review before anything relies on it.</div></div></li>
+      <li><div><div class="qq">Which benchmark is the target?</div>
+        <div class="qa">SPARQLoscope is the most comprehensive current option and should be the reported
+        number, with WatDiv and the Wikidata query logs alongside for join-heavy and real-world coverage
+        respectively.</div></div></li>
+    </ol>
+  </section>
+
+
+  <section id="s14">
+    <h2><span class="num">14</span><span>Security</span></h2>
+    <p class="lede">&sect;13 Q4 asked whether the holon Boundary layer could double as the
+    authorization surface. It can &mdash; but only if enforcement sits in one specific place,
+    and only if three other subsystems are given their own rule.</p>
+
+    <h3>14.1&nbsp; Enforce at the scan, never in a query rewrite</h3>
+    <p>Every read reaches data through one function &mdash; <code>quads_for_pattern</code>,
+    wrapped by the dataset view. Policy is applied there and nowhere else. That yields a
+    property worth stating formally, because it is the entire security argument:</p>
+
+    <div class="property">
+      <span class="lbl">The property</span>
+      <p>For a principal <b>A</b> under policy <b>P</b>, the answer to any query <b>Q</b> equals
+      the answer to <b>Q</b> evaluated over the sub-dataset that <b>A</b> is permitted to see.</p>
+    </div>
+
+    <p>The usual alternative &mdash; rewriting the SPARQL algebra to insert authorization filters
+    &mdash; is a leak generator. There is always an operator the rewrite forgot: a property path,
+    a <code>MINUS</code>, a <code>NOT EXISTS</code>, a subquery, an aggregate that counts a row it
+    may not display. Filtering at the scan cannot be routed around, because nothing above the scan
+    has another source of quads. The implementation carries a test named for exactly that
+    &mdash; <code>policy_survives_every_operator_that_defeats_query_rewriting</code>.</p>
+
+    <h3>14.2&nbsp; Granularity</h3>
+    <p>Five levels. The one that matters most is the second: a named graph is already a column in
+    every index key and a first-class filter, so per-graph authorization costs almost nothing
+    &mdash; and a named graph <em>is</em> a holon&rsquo;s scene.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Level</th><th>Governs</th><th>Cost</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Dataset</td><td>Whether this principal may open the store at all</td><td>free</td></tr>
+          <tr><td class="k">Named graph</td><td><strong>The holon-shaped unit.</strong> Read, write, validate, administer &mdash; per graph</td><td>one integer lookup</td></tr>
+          <tr><td class="k">Predicate</td><td>Hiding a sensitive column across every graph</td><td>one integer lookup</td></tr>
+          <tr><td class="k">Graph &times; predicate</td><td>The exception case: HR may see salaries, but only in the HR graph</td><td>one integer lookup</td></tr>
+          <tr><td class="k">Label</td><td>A lattice of level + compartments, against the principal&rsquo;s clearance</td><td>one integer lookup</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Specificity decides, and at equal specificity <strong>deny wins</strong>. Exceptions
+    therefore live in the principal match rather than in a competing allow &mdash; a
+    <code>Not</code> combinator exists because &ldquo;deny this to everyone except role R&rdquo;
+    is the commonest shape a real policy takes, and specificity cannot express it. Clearance is
+    checked <em>before</em> the rules and is not overridable by them: a label says the principal
+    may not know the data exists, and no allow rule elsewhere should be able to undo that.</p>
+
+    <h3>14.3&nbsp; Why it is affordable</h3>
+    <p>Evaluating rules per quad would be hopeless. A policy is <em>compiled</em> against a store
+    and a principal into sets of dense <code>TermId</code>s, so a per-quad check is a couple of
+    integer lookups. This is the <a href="#s5">&sect;5</a> dense-identifier decision paying off a
+    second time; a 128-bit hashed term key would make these sets far more expensive.</p>
+    <p>Compilation introduces one hazard, and it fails in the dangerous direction. A rule naming
+    an IRI the dictionary has never seen cannot resolve to an id, so it enforces nothing &mdash;
+    and if that IRI later arrives in the data, the compiled policy is <strong>less restrictive
+    than the policy it came from</strong>. Compiled policies therefore record the dictionary size
+    they were built against and report themselves stale, and a session recompiles rather than
+    trusting a cached decision.</p>
+
+    <h3>14.4&nbsp; Filter or fail</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Semantics</th><th>Behaviour</th><th>The cost</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Filter</td><td>Hidden quads simply do not exist for this principal. Safe, composable, and what makes &sect;14.1 true.</td><td>A principal cannot tell an incomplete answer from a complete one</td></tr>
+          <tr><td class="k">Fail</td><td>Touching forbidden data raises an error. For cases where a partial answer is worse than none &mdash; reconciliation, regulatory reporting.</td><td>Reveals that hidden data exists</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>14.5&nbsp; Enterprise interoperability</h3>
+    <p>HOLOS authenticates nobody. Verification &mdash; OIDC/OAuth2 signatures, Kerberos/SPNEGO,
+    mTLS, SAML &mdash; belongs at the edge: an HTTP front door, a sidecar, or the embedding
+    application. What crosses the boundary is an <strong>already-verified</strong> claim set. That
+    keeps cryptography off the query path, and it means HOLOS interoperates with whatever identity
+    system is already deployed rather than competing with it.</p>
+    <p>The translation is the interesting part: <strong>a principal is RDF</strong>. Claims become
+    triples in a system graph, so an access rule can be written against a principal using the same
+    vocabulary as everything else. There is no second policy language to learn, or to get wrong.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Enterprise concern</th><th>How it lands</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Identity</td><td>Verified claims become a principal: id, roles or groups, arbitrary attributes</td></tr>
+          <tr><td class="k">RBAC</td><td>Match on role</td></tr>
+          <tr><td class="k">ABAC</td><td>Match on any attribute the identity provider emits</td></tr>
+          <tr><td class="k">Classification / MLS</td><td>Level plus compartments, with lattice dominance</td></tr>
+          <tr><td class="k">External PDP</td><td>A policy-provider seam for OPA, XACML or Cedar &mdash; consulted per session, not per quad</td></tr>
+          <tr><td class="k">Audit / SIEM</td><td>An audit sink. The holon Event graph is already an append-only PROV-O log</td></tr>
+          <tr><td class="k">Encryption at rest</td><td>Platform and storage layer. Per-holon keys would additionally make crypto-shredding a holon a real erasure mechanism</td></tr>
+          <tr><td class="k">Encryption in transit</td><td>TLS at the protocol server</td></tr>
+          <tr><td class="k">Least privilege in-process</td><td>A session is a capability. No API reads quads without one, so no future code path can quietly acquire ambient authority</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>One escaping detail worth naming: a subject claim is attacker-influenced text, and it is
+    concatenated into a principal IRI. It is percent-escaped, and there is a test that a subject
+    containing IRI syntax cannot forge another principal&rsquo;s identifier.</p>
+
+    <h3>14.6&nbsp; The three places information escapes the scan</h3>
+    <p>&sect;14.1 holds only because every read goes through one door. Three subsystems can carry
+    information around it. <strong>None of these is implemented yet</strong> &mdash; they are
+    constraints on P4 and P5, recorded here so they are not discovered later.</p>
+
+    <div class="escapes">
+      <div class="esc">
+        <div class="h">Statistics</div>
+        <div class="b">Predicate counts, HLL sketches and characteristic sets are computed over the
+        whole store. A global count tells a principal about data they cannot read.
+        <b>Rule:</b> statistics are policy-scoped or operator-only, and never reach a
+        principal-visible <code>EXPLAIN</code>.</div>
+        <span class="tag">constrains P2</span>
+      </div>
+      <div class="esc">
+        <div class="h">Materialised inference</div>
+        <div class="b">A rule deriving a visible triple from hidden premises leaks the premises.
+        <b>Rule:</b> a derived fact carries the least upper bound of its premises&rsquo; labels.
+        A rule engine that ignores this launders restricted data into an unrestricted
+        conclusion.</div>
+        <span class="tag">constrains P4</span>
+      </div>
+      <div class="esc">
+        <div class="h">Projections</div>
+        <div class="b">A view computed with elevated privilege and read by a low-privilege agent is
+        a <em>declassification</em>. That is a feature &mdash; it is how an agent-facing surface is
+        made safe &mdash; but <b>it must be explicit:</b> a projection declares its own label and
+        someone with admin authority signs it off.</div>
+        <span class="tag">constrains P5</span>
+      </div>
+    </div>
+
+    <h3>14.7&nbsp; Write-side authority</h3>
+    <ul>
+      <li><strong>Deleting requires read as well as write.</strong> Otherwise &ldquo;did the delete
+      succeed&rdquo; is an oracle for whether hidden data exists.</li>
+      <li><strong>Administer is a separate mode from write.</strong> Authority to change the shapes,
+      rules or policy is not authority to change the data; conflating them turns a data-entry role
+      into a privilege-escalation path.</li>
+      <li><strong>The event log is append-only.</strong> No mode grants the right to rewrite
+      history &mdash; auditability a sufficiently privileged principal can erase is not
+      auditability.</li>
+      <li><strong>Boundary shapes gate what may be written; policy gates who may write it.</strong>
+      Both run inside the same commit.</li>
+    </ul>
+
+    <h3>14.8&nbsp; What is not claimed</h3>
+    <ul>
+      <li><strong>No covert-channel resistance.</strong> Timing and resource-exhaustion channels are
+      not addressed. A principal who can measure query latency can probably learn something about
+      the volume of data they cannot read.</li>
+      <li><strong>No cell-level redaction.</strong> A quad is visible or it is not; there is no
+      &ldquo;return the row with the object masked&rdquo;. That is expressible as a projection and
+      belongs there.</li>
+      <li><strong>No formal verification.</strong> The &sect;14.1 property is argued from the
+      chokepoint and tested against the operators known to defeat rewriting. It is not proved.</li>
+      <li><strong>No encryption.</strong> Deliberately out of scope for this layer &mdash; see
+      &sect;14.5.</li>
+    </ul>
+  </section>
+
+
+  <section id="s15">
+    <h2><span class="num">15</span><span>Conformance</span></h2>
+    <p class="lede">&sect;11 gave P0 an exit criterion that hand-written tests do not meet.
+    This is the run.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Suite</th><th>Passing</th><th>Failing</th><th>Skipped</th><th>HOLOS bugs</th></tr></thead>
+        <tbody>
+          <tr><td class="k">RDF 1.1</td><td class="tabnum">987 / 1041</td><td class="tabnum">54</td><td class="tabnum">0</td><td class="tabnum"><strong>0</strong></td></tr>
+          <tr><td class="k">RDF 1.2</td><td class="tabnum">1326 / 1406</td><td class="tabnum">80</td><td class="tabnum">0</td><td class="tabnum"><strong>0</strong></td></tr>
+          <tr><td class="k">SPARQL 1.1</td><td class="tabnum">321 / 321</td><td class="tabnum">0</td><td class="tabnum">304</td><td class="tabnum"><strong>0</strong></td></tr>
+          <tr><td class="k">SPARQL 1.2</td><td class="tabnum">242 / 246</td><td class="tabnum">4</td><td class="tabnum">23</td><td class="tabnum"><strong>0</strong></td></tr>
+          <tr><td class="k">SHACL Core</td><td class="tabnum">92 / 97</td><td class="tabnum">5</td><td class="tabnum">1</td><td class="tabnum">5</td></tr>
+          <tr><td class="k">SHACL 1.2 Core <span class="mono" style="font-size:10px">native</span></td><td class="tabnum">94 / 138</td><td class="tabnum">44</td><td class="tabnum">0</td><td class="tabnum">44</td></tr>
+          <tr><td class="k">SHACL Core <span class="mono" style="font-size:10px">vendored</span></td><td class="tabnum">90 / 98</td><td class="tabnum">8</td><td class="tabnum">0</td><td class="tabnum">8</td></tr>
+          <tr><td class="k">SHACL 1.2 Core <span class="mono" style="font-size:10px">vendored</span></td><td class="tabnum"><strong>127 / 138</strong></td><td class="tabnum">11</td><td class="tabnum">0</td><td class="tabnum">11</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>What is actually under test</h3>
+    <p><code>spargebra</code>, <code>oxttl</code> and <code>spareval</code> are reused from
+    Oxigraph and already conformance-tested upstream. Running the suites straight would mostly
+    re-measure someone else&rsquo;s work. What is new is everything between &mdash; the term
+    encoding, the nine-order index, the dataset view &mdash; so the suites are run in a shape
+    that isolates exactly that.</p>
+
+    <div class="escapes">
+      <div class="esc">
+        <div class="h">RDF suites: round-trip</div>
+        <div class="b">Parse the input, load it into the store, read it back, compare up to
+        blank-node isomorphism. A difference is a HOLOS bug: a literal the inline codec mangled,
+        a triple term the dictionary lost, a quad an index dropped. <b>2,447 tests round-trip
+        with no change.</b></div>
+        <span class="tag">tests &sect;5 and &sect;6</span>
+      </div>
+      <div class="esc">
+        <div class="h">SPARQL suites: an oracle</div>
+        <div class="b">When a query test fails, the same query is re-run through the same
+        evaluator over an <code>oxrdf::Dataset</code> &mdash; the reference storage
+        <code>spareval</code> ships with. Agreement means the storage is faithful and the gap is
+        in the evaluator; divergence is a real bug. <b>All 25 SPARQL 1.1 mismatches agree with
+        the reference.</b></div>
+        <span class="tag">the &sect;12 differential rig, early</span>
+      </div>
+      <div class="esc">
+        <div class="h">The ratchet</div>
+        <div class="b">Each suite has a checked-in known-failure list. A run fails if a passing
+        test starts failing <b>and</b> if a listed test starts passing &mdash; the second
+        direction matters as much, because a stale list is a list nobody trusts.</div>
+        <span class="tag">guards every later phase</span>
+      </div>
+    </div>
+
+    <h3>SHACL is measured differently, and the failures are ours</h3>
+    <p>The RDF and SPARQL suites test storage under a reused front end, so a failure there is
+    usually upstream. SHACL is not like that: <code>holos-shacl</code> is new code all the way
+    down, so <strong>every SHACL failure is a HOLOS failure</strong>, and the table says so
+    rather than quietly reusing the &ldquo;0 own bugs&rdquo; column above it.</p>
+    <p>The five remaining SHACL Core failures are one ill-formed-literal edge case, two complex
+    property-path shapes, one numeric comparison and one <code>sh:lessThan</code>. The 44 SHACL
+    1.2 failures are 1.2 features never implemented &mdash; severity and message declared on
+    constraint components rather than shapes, the 1.2 deactivation rules, node expressions.</p>
+    <p>Getting from 4/97 to 92/97 took three fixes, and <em>two of them were in the harness,
+    not the validator</em>. The expected report was being extracted by following every object
+    from <code>mf:result</code>, which dragged each shape's whole definition &mdash; and then
+    each blank-node focus node's data &mdash; into the &ldquo;expected&rdquo; graph. Only blank
+    nodes reachable through report-structural predicates belong there. Both were found by
+    reading a failing diff rather than reasoning about what was probably wrong. The third was
+    real: <code>"aldi"^^xsd:integer</code> is a well-formed RDF term and not an integer, and
+    SHACL calls that a violation, so comparing datatype IRIs is not enough.</p>
+
+    <h3>The skips are not a hiding place</h3>
+    <p>304 SPARQL 1.1 tests are skipped, and each skip names a roadmap item rather than a
+    mystery: SPARQL Update and the Graph Store Protocol are L6; 42 entailment tests need the
+    reasoner that is L4; federated queries need a service handler; a handful encode their
+    expected results in the old DAWG <code>rs:ResultSet</code> RDF vocabulary, which the harness
+    does not read. Counting any of those as failures would bury the ones that are actually
+    broken.</p>
+
+    <p>The strongest single result is the one the round-trip gives: the canonicality rule from
+    <a href="#s5">&sect;5</a> &mdash; inline only when the lexical form is already canonical, so
+    <code>"1"^^xsd:integer</code> and <code>"01"^^xsd:integer</code> stay distinct terms &mdash;
+    holds across the whole literal zoo, not just the cases someone thought to write down.</p>
+  </section>
+
+
+  <section id="s16">
+    <h2><span class="num">16</span><span>What the store measures</span></h2>
+    <p class="lede">One million triples, eight predicates, 489,479 distinct dictionary terms,
+    on a Windows laptop. Release build. Numbers include parsing.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Configuration</th><th>Throughput</th><th>On disk</th></tr></thead>
+        <tbody>
+          <tr><td class="k">In memory</td><td class="tabnum">208,161 quads/s</td><td>&mdash;</td></tr>
+          <tr><td class="k">RocksDB, bulk</td><td class="tabnum">40,782 quads/s</td><td class="tabnum">48 MB</td></tr>
+          <tr><td class="k">RocksDB, no bulk</td><td class="tabnum">17,782 quads/s</td><td>&mdash;</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>The P1 target was wrong, and here is the evidence</h3>
+    <p><a href="#s11">&sect;11</a> set P1&rsquo;s exit criterion at 500k triples/s. That number
+    was written before anything had been measured. It is roughly <strong>12&times; the
+    persistent path&rsquo;s actual rate</strong>, and it is withdrawn rather than left standing
+    as an unearned claim.</p>
+
+    <p>Three measurements locate the cost and rule out the obvious explanations:</p>
+
+    <div class="escapes">
+      <div class="esc">
+        <div class="h">Not the dictionary</div>
+        <div class="b">Re-loading the same file into an <em>already-populated</em> store runs at
+        45k quads/s &mdash; only <b>11% faster</b> than cold, despite allocating no ids and
+        writing no dictionary rows.</div>
+        <span class="tag">warm vs cold</span>
+      </div>
+      <div class="esc">
+        <div class="h">Not an algorithmic defect</div>
+        <div class="b">100k and 1M load at <b>the same rate</b>. The cost is linear in the data;
+        there is no super-linear behaviour hiding at scale.</div>
+        <span class="tag">100k vs 1M</span>
+      </div>
+      <div class="esc">
+        <div class="h">Partly the log</div>
+        <div class="b">Buffering writes and skipping the write-ahead log is <b>2.4&times;</b>
+        faster (43k vs 18k). Real, and already taken.</div>
+        <span class="tag">bulk vs not</span>
+      </div>
+    </div>
+
+    <p>What remains is the per-quad cost of pushing three to six index keys through the
+    memtable &mdash; the same whether a key is new or an overwrite. That is precisely the work
+    <code>SstFileWriter</code> ingestion skips, handing sorted SST files to the LSM directly.
+    <a href="#s6">&sect;6.1</a> named it; it is not built.</p>
+
+    <p><strong>The replacement criterion:</strong> P1 exits when SST ingestion lands and the
+    persistent path is measured again, against this 41k/s baseline, on a dataset too large to
+    hold in memory. A target is worth setting once there is a measurement to set it against.</p>
+
+    <p>Three tuning attempts did <em>not</em> move the number, recorded so they are not
+    repeated: disabling auto-compaction during the load, enlarging the memtables, and removing
+    the allocations on the term-lookup path. The first two stay in the code because they are
+    correct on their own terms. None of them was the bottleneck.</p>
+
+    <h3>SHACL, and the claim &sect;8 rests on</h3>
+    <p>400,000 triples, 100,000 instances, four shapes, 10% of instances seeded to violate.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Phase</th><th>Time</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Load into the store</td><td class="tabnum">2.218s</td></tr>
+          <tr><td class="k">Compile the shapes</td><td class="tabnum">0.0005s</td></tr>
+          <tr><td class="k">Full validation</td><td class="tabnum">0.812s &mdash; 20,000 results, exactly the seeded violations</td></tr>
+          <tr><td class="k">Full validation after a one-triple change</td><td class="tabnum">0.975s</td></tr>
+          <tr><td class="k"><strong>Incremental revalidation of that change</strong></td><td class="tabnum"><strong>0.006s &mdash; 1 result</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="property">
+      <span class="lbl">The result &sect;8 predicted</span>
+      <p><b>161&times;.</b> That is what makes SHACL affordable on the write path, and
+      therefore what lets the holon Boundary gate every commit rather than run as a nightly
+      batch.</p>
+    </div>
+
+    <p>Two smaller results are worth keeping. <strong>Compiling the shapes costs half a
+    millisecond</strong> — the compile-once property doing its job, so holding compiled shapes
+    and validating repeatedly is free. And <strong>validation does no loading at all</strong>:
+    the 2.2s load is the store's, paid once and shared with the query engine and the policy
+    layer. A validator that is a library pays it again into its own structures, and deleting
+    that is what &sect;8 set out to do.</p>
+
+    <p>The honest qualifier: this is not a like-for-like benchmark against SHACL_Engine. It
+    measures the mechanism the design predicted, on a workload chosen to exercise it. A
+    comparison on identical inputs is still owed.</p>
+
+    <h3>Does the bridge earn its keep?</h3>
+    <p>The vendored engine keeps its own <code>Graph</code>, so &sect;8's claim reduces to a
+    measurable question: is feeding it from a populated store cheaper than letting it parse
+    the file?</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Path</th><th>Time</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Engine parses the file itself</td><td class="tabnum">1.625s</td></tr>
+          <tr><td class="k">Bridge from a live store</td><td class="tabnum"><strong>0.446s &mdash; 3.6&times; cheaper</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Both produce the same 400,000 triples. Parsing was the dominant term and the bridge
+    removes it. What it does <em>not</em> remove is a second term table: the engine's
+    <code>TermId</code> is a dense <code>u32</code> index into its own interner while HOLOS's
+    is a sparse tagged <code>u64</code>, so each <strong>distinct</strong> term is decoded
+    once and re-interned once. That is the honest limit of &ldquo;reads the store's own
+    dictionary&rdquo; &mdash; parsing goes, the term table does not.</p>
+
+    <p>End to end on the same graph, both finding exactly the same 20,000 violations:</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Validator</th><th>Prepare</th><th>Validate</th><th>Total</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Native, live store</td><td class="tabnum">0.001s</td><td class="tabnum">0.823s</td><td class="tabnum">0.824s</td></tr>
+          <tr><td class="k">Vendored, bridged</td><td class="tabnum">0.522s</td><td class="tabnum"><strong>0.224s</strong></td><td class="tabnum">0.746s</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>The engine validates <strong>3.7&times; faster</strong> &mdash; flat sorted arrays of
+    <code>u32</code> beat a store-backed scan &mdash; and spends the difference on bridging.
+    It wins on total time <em>and</em> on coverage, which is why it is the default for a full
+    validation. The native evaluator stays because it is the only one that can revalidate a
+    delta.</p>
+
+    <h3>What a holon tick costs</h3>
+    <p>100,000 instances, 300,000 triples in the scene, a four-shape boundary. Validation
+    runs inside <em>every</em> commit.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Operation</th><th>Time</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Full validation of the scene</td><td class="tabnum">0.250s</td></tr>
+          <tr><td class="k">One tick</td><td class="tabnum">0.0076s</td></tr>
+          <tr><td class="k"><strong>200 ticks, per commit</strong></td><td class="tabnum"><strong>0.0061s &mdash; 165 commits/s</strong></td></tr>
+          <tr><td class="k">A <em>rejected</em> tick</td><td class="tabnum">0.0101s</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="property">
+      <span class="lbl">Why this ratio decides &sect;9</span>
+      <p><b>41&times; cheaper than a full pass.</b> Validation inside every commit is only
+      sane if a commit costs the size of its own change. At full-pass cost a Boundary would
+      be a nightly batch job wearing a transaction's clothes, and the holon model would
+      collapse back into &ldquo;validate the warehouse overnight and hope&rdquo;.</p>
+    </div>
+
+    <p>A refusal costs slightly <em>more</em> than an acceptance, because it also undoes what
+    it applied. That is the right way round: the system pays for rejecting bad data, not for
+    accepting it.</p>
+
+    <p>The honest reading of 165 commits/s: it is not a high-throughput write path and is not
+    meant to be. It is the cost of a fully validated, fully attributed commit against a
+    non-trivial scene &mdash; the alternative being 4/s if every commit revalidated
+    everything.</p>
+
+    <h3>What the planner is flying blind on</h3>
+    <p><a href="#s7">&sect;7</a> claims characteristic sets are what separates engines that
+    plan well from engines that guess, and <a href="#s13">&sect;13 Q2</a> makes P3 conditional
+    on that claim. Both were assertions until this.</p>
+
+    <p>The reused optimiser reorders joins with an estimator that is a <strong>fixed lookup
+    table</strong>: <code>?s &lt;p&gt; ?o</code> is estimated at 1,000,000 rows whether that
+    predicate occurs three times or three million. It has no access to the data at all &mdash;
+    which is not a criticism, since an optimiser shipped as a library without a store has
+    nothing to consult. But it is exactly the gap a store-aware estimator fills, so both were
+    run against the same queries and the same ground truth. 20,000 people and 100
+    organisations; 86,967 triples; three distinct subject shapes.</p>
+
+    <div class="qe">
+      <div class="qe-hd">
+        <div class="lbl">Query shape</div>
+        <div class="lbl"><b>Constant table</b> &mdash; q-error, log scale</div>
+        <div class="lbl"><b>Characteristic sets</b></div>
+      </div>
+
+      <div class="qe-row">
+        <div class="shape">One common predicate<em>20,000 answers</em></div>
+        <div class="qe-bar bad" data-l="constants"><span class="track"><span class="fill" style="width:18.9%"></span></span><span class="n">50</span></div>
+        <div class="qe-bar good" data-l="char. sets"><span class="track"><span class="fill" style="width:3px"></span></span><span class="n">1.0</span></div>
+      </div>
+      <div class="qe-row">
+        <div class="shape">One rare predicate<em>100 answers</em></div>
+        <div class="qe-bar bad" data-l="constants"><span class="track"><span class="fill" style="width:44.4%"></span></span><span class="n">10,000</span></div>
+        <div class="qe-bar good" data-l="char. sets"><span class="track"><span class="fill" style="width:3px"></span></span><span class="n">1.0</span></div>
+      </div>
+      <div class="qe-row">
+        <div class="shape">Two-predicate star<em>20,000 answers</em></div>
+        <div class="qe-bar bad" data-l="constants"><span class="track"><span class="fill" style="width:52.2%"></span></span><span class="n">50,000</span></div>
+        <div class="qe-bar good" data-l="char. sets"><span class="track"><span class="fill" style="width:3px"></span></span><span class="n">1.0</span></div>
+      </div>
+      <div class="qe-row">
+        <div class="shape">Star with a rarer arm<em>6,667 answers</em></div>
+        <div class="qe-bar bad" data-l="constants"><span class="track"><span class="fill" style="width:57.5%"></span></span><span class="n">149,993</span></div>
+        <div class="qe-bar good" data-l="char. sets"><span class="track"><span class="fill" style="width:3px"></span></span><span class="n">1.0</span></div>
+      </div>
+      <div class="qe-row">
+        <div class="shape">Four-predicate star<em>20,000 answers</em></div>
+        <div class="qe-bar bad" data-l="constants"><span class="track"><span class="fill" style="width:96.6%"></span></span><span class="n">5&times;10<sup>8</sup></span></div>
+        <div class="qe-bar good" data-l="char. sets"><span class="track"><span class="fill" style="width:3.3%"></span></span><span class="n">2.0</span></div>
+      </div>
+      <div class="qe-row">
+        <div class="shape">Star that never co-occurs<em>zero answers</em></div>
+        <div class="qe-bar bad" data-l="constants"><span class="track"><span class="fill" style="width:100%"></span></span><span class="n">10<sup>9</sup></span></div>
+        <div class="qe-bar good" data-l="char. sets"><span class="track"><span class="fill" style="width:3px"></span></span><span class="n">1.0</span></div>
+      </div>
+      <div class="qe-row">
+        <div class="shape">Organisation star<em>100 answers</em></div>
+        <div class="qe-bar bad" data-l="constants"><span class="track"><span class="fill" style="width:77.8%"></span></span><span class="n">10<sup>7</sup></span></div>
+        <div class="qe-bar good" data-l="char. sets"><span class="track"><span class="fill" style="width:3px"></span></span><span class="n">1.0</span></div>
+      </div>
+
+      <div class="qe-foot">Mean q-error &mdash; constants 215,744,292 &nbsp;&middot;&nbsp; characteristic sets 1.1</div>
+    </div>
+
+    <p class="stackcap" style="margin-top:-14px">q-error is
+    <span class="mono">max(est/actual, actual/est)</span>, so being 100&times; over and
+    100&times; under both score 100. A perfect estimate is 1.</p>
+
+    <div class="property">
+      <span class="lbl">The row that matters most</span>
+      <p>A star over two predicates that <b>never occur on the same subject</b>. It has
+      <b>zero</b> answers, and the constant table predicts a billion rows &mdash; the single
+      worst thing an estimator can do, because a planner told to expect a billion rows will
+      build for a billion rows. Characteristic sets return 0, because they record which
+      predicates actually co-occur rather than assuming predicates are independent. In real
+      RDF they are strongly correlated: entities of the same kind carry the same properties,
+      which is exactly why the naive product of selectivities goes wrong.</p>
+    </div>
+
+    <p><strong>The one case this gets wrong, and why.</strong> The four-predicate star scores
+    2.0 &mdash; 10,000 estimated against 20,000 actual. Its <code>rdf:type ex:Person</code> arm
+    has a bound object, and the estimator divides by the number of distinct objects for
+    <code>rdf:type</code>, which is 2, assuming subjects split evenly between them. They do
+    not: 20,000 of 20,100 are people. The standard fix is a most-common-values list per
+    predicate, which every mature optimiser keeps. It is deliberately not implemented, because
+    tuning until the benchmark reads 1.0 would be fitting the estimator to its own test.</p>
+
+    <h3>Does being wrong cost anything?</h3>
+    <p>A badly <em>calibrated</em> estimator can still rank alternatives correctly, in which
+    case the numbers above are ugly and the plans are fine. So: the same five-pattern query,
+    returning the same single answer, with its most selective pattern written first and then
+    last. One pattern matches exactly 1 triple in 150,021; the others match 50,000 each.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Written order</th><th>Rows</th><th>Time</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Most selective pattern first</td><td class="tabnum">1</td><td class="tabnum">0.0777s</td></tr>
+          <tr><td class="k">Most selective pattern last</td><td class="tabnum">1</td><td class="tabnum"><strong>0.2352s &mdash; 3.0&times;</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Written order survives into the plan. The estimator cannot tell a 1-row pattern from a
+    50,000-row one, so it cannot fix a bad order, and the query pays 3&times; for how it
+    happened to be typed. Five patterns is a small query; the penalty grows with the number of
+    orderings available.</p>
+
+    <div class="property">
+      <span class="lbl">What this settles, and what it does not</span>
+      <p>It settles the <b>precondition</b> for <a href="#s13">&sect;13 Q2</a>: accurate
+      estimates over RDF are cheap and available, and inaccurate ones cost real time. It does
+      not answer Q2 itself, which asks whether the hypertrie beats a <em>well-planned</em>
+      binary join. That needs a planner consuming these statistics &mdash; and there is no
+      injection point, since <code>Optimizer::optimize_graph_pattern</code> is a free function
+      the evaluator calls internally. So P3 is now gated on a build decision, <b>own the
+      planner</b>, rather than on enthusiasm. Deliberately not claimed: this measures
+      estimation quality and one plan-order penalty, not query throughput.</p>
+    </div>
+
+    <h3>Two other numbers worth keeping</h3>
+    <p><strong>489,479 dictionary terms for a million triples.</strong> Every
+    <code>xsd:integer</code>, every <code>xsd:float</code> and every city name of six bytes or
+    fewer inlined into its id and never reached storage &mdash; the
+    <a href="#s5">&sect;5</a> encoding doing exactly what it was designed to do.</p>
+    <p><strong>48 MB on disk from a 90 MB source</strong>, carrying three index copies of every
+    triple. Dense 64-bit ids plus LZ4 are why; a 128-bit hashed key would roughly double the
+    index.</p>
+  </section>
+
+
+
+  <section id="s18">
+    <h2><span class="num">18</span><span>The holon skeleton</span></h2>
+    <p class="lede">The point the rest of the project was aimed at. Nothing else in the
+    workspace does this: a named graph whose invariants are enforced <em>on the write
+    path</em>, with per-statement provenance, at a cost proportional to the change.</p>
+
+    <h3>A commit is a tick</h3>
+    <ol class="tick">
+      <li>Apply the delta to the scene &mdash; a named graph, authorised per quad through the
+      same <code>Session</code> everything else uses.</li>
+      <li>Run boundary rules to fixpoint. <strong>Not built</strong> &mdash; left visible in
+      the code rather than quietly skipped.</li>
+      <li>Validate against the boundary, <em>incrementally</em>. This is what
+      <a href="#s8">&sect;8</a>'s revalidation was built for.</li>
+      <li>Append the event, with reifier-annotated provenance &mdash; written whether or not
+      the commit was admitted.</li>
+      <li>Refresh projections. Recomputed, not maintained.</li>
+    </ol>
+
+    <h3>Where RDF 1.2 stops being a checkbox</h3>
+    <p>Provenance about a <em>statement</em> has always been awkward in RDF: standard
+    reification is four triples with no semantics, and a named graph per statement does not
+    scale. A reifier plus a triple term says it in two triples and says it exactly:</p>
+
+    <div class="tablewrap">
+      <table>
+        <tbody>
+          <tr><td class="k">_:change</td><td><code>rdf:reifies &lt;&lt;( ex:alice ex:email "new@example.com" )&gt;&gt; ;<br>holos:inTick _:tick ; holos:operation holos:Added .</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>The tick node carries who and when once; each change points at it. And because
+    <a href="#s5">&sect;5</a> already made a triple term cost one term id, the log is not
+    expensive to keep.</p>
+
+    <h3>Three refusals worth naming</h3>
+    <div class="escapes">
+      <div class="esc">
+        <div class="h">A tick is not atomic</div>
+        <div class="b">A refused commit is undone by a <b>compensating write</b>, not a
+        rollback. A crash between applying the delta and writing the event leaves the two
+        disagreeing. This is the honest limit of a skeleton &mdash; it shows the shape, it is
+        not yet a thing to put a ledger in.</div>
+        <span class="tag">needs &sect;6.1 MVCC</span>
+      </div>
+      <div class="esc">
+        <div class="h">Rules do not fire</div>
+        <div class="b">SHACL-AF fixpoint evaluation exists in the vendored engine, but only
+        over a bridged snapshot &mdash; so firing rules per tick would mean re-bridging per
+        tick. Exactly the gap the immutable engine graph leaves.</div>
+        <span class="tag">needs a merge-in-place</span>
+      </div>
+      <div class="esc">
+        <div class="h">Maintained projections are refused</div>
+        <div class="b"><code>Regime::Maintained</code> returns an error rather than silently
+        recomputing. Claiming a guarantee the build does not provide would be worse than
+        declining it, and a caller that asked for incremental maintenance deserves to know it
+        did not get it.</div>
+        <span class="tag">needs Z-set IVM</span>
+      </div>
+    </div>
+  </section>
+
+  <section id="s17">
+    <h2><span class="num">17</span><span>Geospatial, and the web layer</span></h2>
+    <p class="lede">Two additions that both turned out to inherit more from the layers below
+    them than they added of their own.</p>
+
+    <h3>GeoSPARQL</h3>
+    <p><code>spargeo</code> supplies 43 GeoSPARQL functions &mdash; the topological relations
+    of all three families (Simple Features, Egenhofer, RCC8), plus distance, buffer, convex
+    hull, envelope, boundary and the WKT/GeoJSON accessors. Registered on the evaluator, so
+    they compose with the rest of SPARQL and with everything underneath: a WKT literal is a
+    typed literal taking the dictionary path like any other, and <strong>access policy
+    applies to geometry</strong> &mdash; denying <code>geo:asWKT</code> makes a spatial join
+    find nothing, because <a href="#s14">&sect;14</a>'s property gets no geospatial
+    exemption.</p>
+
+    <div class="escapes">
+      <div class="esc">
+        <div class="h">What is missing</div>
+        <div class="b">These are <b>filter</b> functions. <code>geof:sfWithin</code> scans
+        every candidate geometry rather than probing an index. Fine on a small dataset, not
+        on a national gazetteer.</div>
+        <span class="tag">honest limit</span>
+      </div>
+      <div class="esc">
+        <div class="h">Where the index goes</div>
+        <div class="b">An <b>R-tree over geometry literals</b>. <a href="#s5">&sect;5</a>
+        already reserves term tags <code>0x9</code>&ndash;<code>0xF</code> for geometry
+        handles, so a geometry can carry an index handle in its id.</div>
+        <span class="tag">designed, not built</span>
+      </div>
+      <div class="esc">
+        <div class="h">Why it waits</div>
+        <div class="b">Routing to that index is a cost-based decision, so it needs the
+        optimiser P2 will build. An index nothing knows how to use is not a feature.</div>
+        <span class="tag">gated on P2</span>
+      </div>
+    </div>
+
+    <h3>The HTTP layer</h3>
+    <p><code>holos-server</code> serves the SPARQL 1.2 Protocol with a YASGUI console. What
+    is interesting is how little of it is server code.</p>
+
+    <p><strong>Access policy came for free.</strong> Every request opens a
+    <code>Session</code>, and no path from a request to the data avoids one, so
+    <a href="#s14">&sect;14</a>'s chokepoint covers HTTP without a line of policy code in the
+    server. Start it with <code>--deny-predicate</code> and that predicate vanishes from
+    every query the endpoint answers; a classified graph disappears from
+    <code>SELECT DISTINCT ?g</code> as well as from its own contents.</p>
+
+    <p><strong>Identity stays at the edge.</strong> The server reads already-verified claims
+    from forwarded headers &mdash; and <em>refuses to read them at all</em> unless started
+    with <code>--trust-forwarded-identity</code>. Trusting those headers on an open port
+    would let any client name its own roles, which is the exact inverse of what &sect;14 is
+    for.</p>
+
+    <p><strong>Threading forced a change three layers down.</strong> Serving reads from many
+    threads needs <code>Storage: Sync</code>, and the RocksDB backend was holding a
+    <code>WriteBatch</code> across calls &mdash; a raw pointer inside it made the whole store
+    un-shareable. The buffer now holds owned bytes and builds the batch at flush. A web
+    server is not usually where you discover a storage-layer constraint, but the
+    <code>&amp;self</code>/<code>&amp;mut self</code> split is exactly what made it a compile
+    error rather than a race.</p>
+
+    <p>YASGUI itself is loaded from a CDN rather than vendored &mdash; a large minified
+    bundle in an RDF engine's tree makes that tree harder to audit. The consequence is stated
+    rather than hidden: the console needs network access, the endpoints do not, and
+    <code>--no-ui</code> removes it entirely.</p>
+  </section>
+
+  <section id="refs">
+    <h2><span class="num">&mdash;</span><span>Sources</span></h2>
+    <ul class="reflist">
+      <li><span class="rl-h">Engines</span>
+        <a href="https://github.com/oxigraph/oxigraph">Oxigraph</a> &mdash; crates, RocksDB column families, stated optimisation status &middot;
+        <a href="https://github.com/pwin/SHACL_Engine">pwin/SHACL_Engine</a> &mdash; interned terms, flat indexes, compiled IR, conformance and limitations &middot;
+        <a href="https://jena.apache.org/documentation/rdf-star/">Apache Jena RDF-star / RDF 1.2</a> and the <a href="https://www.mail-archive.com/users@jena.apache.org/msg21156.html">Jena 5.5.0 announcement</a></li>
+      <li><span class="rl-h">Tensors &amp; worst-case-optimal joins</span>
+        <a href="http://dice-research.org/Tentris/">Tentris</a> &middot;
+        <a href="https://papers.dice-research.org/2020/ISWC_Tentris/iswc2020_tentris_public.pdf">Tentris &mdash; A Tensor-Based Triple Store (ISWC 2020)</a> &middot;
+        <a href="https://link.springer.com/chapter/10.1007/978-3-031-19433-7_4">Hashing the Hypertrie (2022)</a> &middot;
+        <a href="https://papers.dice-research.org/2025/ISWC_Tentris-WCOJ-Update/public.pdf">Efficient Updates for Worst-Case Optimal Join Triple Stores (ISWC 2025)</a> &middot;
+        <a href="https://github.com/dice-group/tentris">research repository</a></li>
+      <li><span class="rl-h">Modelling</span>
+        <a href="https://www.w3.org/groups/cg/holon/">W3C Holon Graph Community Group</a> &middot;
+        <a href="https://inferenceengineer.substack.com/p/what-is-a-holon-part-1-the-graph">What Is a Holon, Part 1: The Graph</a></li>
+      <li><span class="rl-h">Specifications</span>
+        <a href="https://www.w3.org/TR/rdf12-concepts/">RDF 1.2 Concepts</a> (CR, 7 Apr 2026) &middot;
+        <a href="https://www.w3.org/TR/rdf12-turtle/">RDF 1.2 Turtle</a> &middot;
+        <a href="https://www.w3.org/TR/sparql12-query/">SPARQL 1.2 Query</a> (WD, 20 Aug 2026) &middot;
+        <a href="https://www.w3.org/TR/shacl12-core/">SHACL 1.2 Core</a> (WD, 3 Aug 2026)</li>
+      <li><span class="rl-h">Substrate &amp; evaluation</span>
+        <a href="https://rocksdb.org/">RocksDB</a> &middot;
+        <a href="https://github.com/facebook/rocksdb/wiki/User-defined-Timestamp">User-defined timestamps</a> &middot;
+        <a href="https://github.com/facebook/rocksdb/wiki/Creating-and-Ingesting-SST-files">Creating and ingesting SST files</a> &middot;
+        <a href="https://ad-publications.cs.uni-freiburg.de/ISWC_sparqloscope_BKTU_2025.pdf">Sparqloscope (ISWC 2025)</a></li>
+    </ul>
+  </section>
+
+  <footer>
+    <span>HOLOS &mdash; design and implementation notes, 22 August 2026</span>
+    <span>Companion to DESIGN.md &middot; 114 unit tests, 3,062 W3C tests passing</span>
+  </footer>
+
+  </main>
+</div>
+</div>

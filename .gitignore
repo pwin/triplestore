@@ -1,0 +1,120 @@
+# =============================================================================
+# Build output
+# =============================================================================
+# 32 GB at the time of writing, and entirely reproducible.
+/target/
+**/target/
+
+# =============================================================================
+# Third-party test suites — fetched, deliberately not vendored
+# =============================================================================
+# `scripts/fetch-testsuites.sh` clones the W3C RDF and SPARQL suites here. They are
+# ~64 MB of third-party fixtures under a different licence, and each carries its own
+# nested `.git` — committing them would either bloat the tree or leave a dangling
+# submodule reference. Without them the conformance tests skip rather than fail, so a
+# fresh checkout still builds and tests green.
+/testsuites/
+
+# =============================================================================
+# Local configuration and secrets
+# =============================================================================
+# `deploy/holos.env` is committed as the documented template; the `.local` override is
+# where a deployment puts its own values and must never be.
+deploy/holos.env.local
+*.env.local
+.env
+.env.*
+!.env.example
+
+# TLS material. `deploy/nginx.conf` references certificate and key paths, and a private
+# key reaching a remote is unrecoverable — rotation is the only remedy.
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Credentials that tend to appear beside a deployment.
+*credentials*
+*secret*
+!**/*secrets*.md
+.htpasswd
+.netrc
+
+# =============================================================================
+# Store data and runtime state
+# =============================================================================
+# The default store directory in `deploy/holos.env`, plus the backup destination.
+/var/
+**/var/store/
+**/var/backups/
+
+# RocksDB leaves these wherever a store was opened. Listing them by name catches a store
+# created outside the conventional directory — including by a test run that was
+# interrupted before it could clean up.
+LOCK
+CURRENT
+IDENTITY
+MANIFEST-*
+OPTIONS-*
+*.sst
+*.ldb
+LOG
+LOG.old.*
+
+# =============================================================================
+# Benchmark working files
+# =============================================================================
+# `holos-bench` generates these; they are large and reproducible from the harness.
+bench-*.nt
+bench-*.nq
+/bench/
+holos-bench/
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+build/
+dist/
+wheels/
+*.egg-info/
+.venv/
+venv/
+.Python
+
+# =============================================================================
+# Editors and operating systems
+# =============================================================================
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# =============================================================================
+# Deliberately NOT ignored — listed so nobody adds them by reflex
+# =============================================================================
+# Cargo.lock         — this workspace ships binaries (`holos`, `holos-server`), so the
+#                      lock file is part of what makes a build reproducible.
+# conformance/*.failures
+#                    — the ratchet baselines. Ignoring them would silence the thing that
+#                      catches a conformance regression.
+# deploy/holos.env   — the documented template, with no values in it.
+# docs/*.html        — the published design study and manual.

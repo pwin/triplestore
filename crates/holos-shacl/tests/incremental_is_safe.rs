@@ -1,0 +1,206 @@
+//! Incremental revalidation must not miss a violation a full validation would find.
+//!
+//! `DESIGN.md` §8 makes incremental revalidation the mechanism that lets the holon
+//! Boundary (§9) gate every commit. That only works if it is *safe*: over-reporting costs
+//! time, under-reporting lets an invalid graph through, which is the whole point of having
+//! a Boundary at all.
+//!
+//! The property checked here is the safety direction:
+//!
+//! > every violation a full validation finds after a change, at a focus node the change
+//! > touched, is also found by revalidating that change alone.
+
+use holos_shacl::incremental::Change;
+use holos_shacl::{CompiledShapes, Options, ValidationResult};
+use holos_store::{GraphFilter, Store};
+use oxrdfio::{RdfFormat, RdfParser};
+
+const SHAPES_AND_DATA: &str = r#"
+@prefix ex:   <http://example.com/> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+ex:Person a rdfs:Class .
+
+ex:PersonShape a sh:NodeShape ;
+    sh:targetClass ex:Person ;
+    sh:property [ sh:path ex:name  ; sh:minCount 1 ; sh:datatype xsd:string ] ;
+    sh:property [ sh:path ex:age   ; sh:maxCount 1 ; sh:datatype xsd:integer ;
+                  sh:minInclusive 0 ; sh:maxInclusive 150 ] ;
+    sh:property [ sh:path ex:email ; sh:pattern "^[^@]+@[^@]+$" ] ;
+    sh:property [ sh:path ex:knows ; sh:nodeKind sh:IRI ] .
+
+ex:alice a ex:Person ; ex:name "Alice" ; ex:age 30 ; ex:email "alice@example.com" .
+ex:bob   a ex:Person ; ex:name "Bob"   ; ex:age 41 ; ex:email "bob@example.com" .
+ex:carol a ex:Person ; ex:name "Carol" ; ex:age 28 ; ex:email "carol@example.com" .
+"#;
+
+fn load(store: &mut Store, turtle: &str) {
+    let parser = RdfParser::from_format(RdfFormat::Turtle)
+        .with_base_iri("http://example.com/")
+        .expect("base");
+    for quad in parser.for_reader(turtle.as_bytes()) {
+        store.insert(quad.expect("parse").as_ref()).expect("insert");
+    }
+}
+
+fn key(r: &ValidationResult) -> (u64, Option<u64>, Option<u64>, u64, u64) {
+    (
+        r.focus_node.to_raw(),
+        r.path.map(holos_core::TermId::to_raw),
+        r.value.map(holos_core::TermId::to_raw),
+        r.source_shape.to_raw(),
+        r.component.to_raw(),
+    )
+}
+
+/// Applies a change and checks the safety property.
+fn check_change(turtle_delta: &str, label: &str) {
+    let mut store = Store::new();
+    load(&mut store, SHAPES_AND_DATA);
+    let options = Options {
+        data_graph: GraphFilter::Default,
+        shapes_graph: GraphFilter::Default,
+    };
+    let shapes = CompiledShapes::compile(&store, options).expect("compile");
+    let before: Vec<_> = shapes
+        .validate(&store)
+        .expect("validate before")
+        .results
+        .iter()
+        .map(key)
+        .collect();
+
+    // Apply the delta, recording exactly which quads changed.
+    let mut changes = Vec::new();
+    let parser = RdfParser::from_format(RdfFormat::Turtle)
+        .with_base_iri("http://example.com/")
+        .expect("base");
+    for quad in parser.for_reader(turtle_delta.as_bytes()) {
+        let quad = quad.expect("parse");
+        let encoded = store.encode_quad(quad.as_ref()).expect("encode");
+        store.insert_encoded(encoded).expect("insert");
+        changes.push(Change::added(encoded));
+    }
+
+    let after = shapes.validate(&store).expect("validate after").results;
+    let incremental = shapes
+        .revalidate(&store, &changes)
+        .expect("revalidate")
+        .results;
+
+    let after_keys: Vec<_> = after.iter().map(key).collect();
+    let incremental_keys: Vec<_> = incremental.iter().map(key).collect();
+
+    // Safety: every violation the change introduced must be caught incrementally.
+    for k in &after_keys {
+        if before.contains(k) {
+            continue;
+        }
+        assert!(
+            incremental_keys.contains(k),
+            "{label}: incremental revalidation missed a new violation {k:?}\n\
+             full-after found {} results, incremental found {}",
+            after.len(),
+            incremental.len()
+        );
+    }
+
+    // Soundness: it must not invent violations a full validation does not find.
+    for k in &incremental_keys {
+        assert!(
+            after_keys.contains(k),
+            "{label}: incremental revalidation reported {k:?}, which a full validation does not"
+        );
+    }
+}
+
+#[test]
+fn a_new_violating_value_is_caught() {
+    check_change(
+        r#"@prefix ex: <http://example.com/> .
+           ex:alice ex:email "not-an-email" ."#,
+        "bad email",
+    );
+}
+
+#[test]
+fn a_second_value_breaching_max_count_is_caught() {
+    check_change(
+        r#"@prefix ex: <http://example.com/> .
+           @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+           ex:bob ex:age 42 ."#,
+        "duplicate age",
+    );
+}
+
+#[test]
+fn an_out_of_range_value_is_caught() {
+    check_change(
+        r#"@prefix ex: <http://example.com/> .
+           ex:carol ex:age 900 ."#,
+        "age out of range",
+    );
+}
+
+#[test]
+fn a_wrong_datatype_is_caught() {
+    check_change(
+        r#"@prefix ex: <http://example.com/> .
+           ex:alice ex:name 42 ."#,
+        "numeric name",
+    );
+}
+
+#[test]
+fn a_literal_where_an_iri_belongs_is_caught() {
+    check_change(
+        r#"@prefix ex: <http://example.com/> .
+           ex:bob ex:knows "not an iri" ."#,
+        "literal in an IRI slot",
+    );
+}
+
+/// A brand-new node only becomes a focus node because its `rdf:type` arrived, which is the
+/// case the predicate index alone would miss.
+#[test]
+fn a_newly_typed_node_becomes_a_focus_node() {
+    check_change(
+        r#"@prefix ex: <http://example.com/> .
+           ex:dave a ex:Person ; ex:email "dave-at-example" ."#,
+        "new person",
+    );
+}
+
+/// Compiling once and validating twice must give the same answer, byte for byte.
+#[test]
+fn reports_are_deterministic() {
+    let mut store = Store::new();
+    load(&mut store, SHAPES_AND_DATA);
+    load(
+        &mut store,
+        r#"@prefix ex: <http://example.com/> .
+           ex:alice ex:email "bad" . ex:bob ex:age 900 ."#,
+    );
+    let options = Options {
+        data_graph: GraphFilter::Default,
+        shapes_graph: GraphFilter::Default,
+    };
+    let shapes = CompiledShapes::compile(&store, options).expect("compile");
+
+    let render = || {
+        let report = shapes.validate(&store).expect("validate");
+        let mut lines: Vec<String> = shapes
+            .report_to_quads(&store, &report)
+            .expect("render")
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        lines.sort();
+        lines
+    };
+    assert_eq!(render(), render(), "two runs must render identically");
+    assert!(!render().is_empty());
+}

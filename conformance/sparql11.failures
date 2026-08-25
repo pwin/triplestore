@@ -1,0 +1,2 @@
+# sparql11 — tests known to fail. Regenerate with HOLOS_UPDATE_CONFORMANCE=1.
+# 470/470 passed, 0 failed, 155 skipped

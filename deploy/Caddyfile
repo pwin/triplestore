@@ -1,0 +1,57 @@
+# The front door.
+#
+# holos-server authenticates nobody by design (DESIGN.md §14.5). It reads already-verified
+# claims from three headers, and only when started with --trust-forwarded-identity. That
+# makes this file part of the security boundary, not just a convenience.
+#
+#   caddy run --config deploy/Caddyfile
+#
+# Caddy is the recommended front door here because it obtains and renews TLS certificates
+# on its own, which removes the single most commonly skipped deployment step.
+
+holos.example.com {
+	# TLS is automatic. The service behind this speaks plain HTTP on loopback.
+
+	# ---- the part that matters ------------------------------------------
+	# Delete anything the client sent under these names BEFORE any handler can
+	# forward it. Without this, --trust-forwarded-identity means a caller can add
+	# `X-Holos-Roles: admin` to a curl command and be believed.
+	request_header -X-Holos-Principal
+	request_header -X-Holos-Roles
+	request_header -X-Holos-Clearance
+
+	# ---- authenticate ----------------------------------------------------
+	# Hand the request to your identity service, which validates whatever the
+	# enterprise already uses — an OIDC token, a Kerberos ticket, a client
+	# certificate — and answers 200 with the resolved claims, or 401.
+	forward_auth localhost:9000 {
+		uri /verify
+		copy_headers X-Holos-Principal X-Holos-Roles X-Holos-Clearance
+	}
+
+	# ---- forward ---------------------------------------------------------
+	reverse_proxy 127.0.0.1:7878 {
+		header_up X-Real-IP {remote_host}
+	}
+
+	log {
+		output file /var/log/caddy/holos.log
+		format json
+	}
+}
+
+# A read-only public endpoint on the same instance: no identity at all, so every request
+# is anonymous and sees exactly what policy grants to PrincipalMatch::Everyone.
+sparql.example.com {
+	request_header -X-Holos-Principal
+	request_header -X-Holos-Roles
+	request_header -X-Holos-Clearance
+
+	# /update is already 501, but refusing it here keeps the surface honest.
+	handle /update* {
+		respond "read-only endpoint" 405
+	}
+	handle {
+		reverse_proxy 127.0.0.1:7878
+	}
+}

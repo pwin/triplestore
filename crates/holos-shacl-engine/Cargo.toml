@@ -1,0 +1,34 @@
+[package]
+name = "holos-shacl-engine"
+description = "SHACL constraint evaluation — an adaptation of pwin/SHACL_Engine for the HOLOS store"
+version.workspace = true
+# Upstream is edition 2024 and uses let-chains. Kept as-is so the vendored source
+# stays diffable against upstream; the rest of the workspace is 2021.
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Splits a Turtle parse across worker threads. Off by default here: HOLOS feeds
+# this engine from a populated store rather than from files, so the parallel
+# parser is dead weight in the common path. `holos-shacl-engine`'s own file
+# loader still works with it on.
+parallel = ["dep:rayon"]
+
+[dependencies]
+oxrdf.workspace = true
+oxrdfio.workspace = true
+oxttl = { version = "0.2", features = ["rdf-12"] }
+oxsdatatypes.workspace = true
+spargebra.workspace = true
+spareval.workspace = true
+rayon = { version = "1.12", optional = true }
+hashbrown = "0.16"
+regex = "1"
+foldhash = "0.2"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[dev-dependencies]
+anyhow.workspace = true
