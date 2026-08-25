@@ -108,14 +108,73 @@ pub fn update(
     update: &str,
     base_iri: Option<&str>,
 ) -> Result<UpdateOutcome, EngineError> {
+    let parsed = parse(update, base_iri)?;
+    apply(engine, session, &parsed)
+}
+
+/// Parses an update without applying it.
+///
+/// Separate so a caller that has to adjust the parsed form first — the SPARQL Protocol's
+/// `using-graph-uri`, which names a dataset outside the update text — can do so without
+/// reaching for string surgery on the request.
+///
+/// # Errors
+///
+/// [`EngineError::Syntax`] for an unparseable update, or an unusable base IRI.
+pub fn parse(update: &str, base_iri: Option<&str>) -> Result<Update, EngineError> {
     let mut parser = SparqlParser::new();
     if let Some(base) = base_iri {
         parser = parser
             .with_base_iri(base)
             .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
     }
-    let parsed = parser.parse_update(update)?;
-    apply(engine, session, &parsed)
+    Ok(parser.parse_update(update)?)
+}
+
+/// Applies the protocol's `using-graph-uri` / `using-named-graph-uri` to a parsed update.
+///
+/// The SPARQL Protocol lets a client name the dataset an update's `WHERE` runs against in
+/// the request rather than the update text. Since that is exactly what `USING` does, this
+/// sets `USING` on every operation that has a `WHERE` to run.
+///
+/// # Both at once is an error
+///
+/// The protocol says so in as many words: a request carrying these parameters *and* an
+/// update carrying `USING` or `WITH` is a client error, not something to resolve by
+/// preferring one. Silently overriding would run the update over a dataset the author of
+/// the text did not choose.
+///
+/// Operations with no `WHERE` — `INSERT DATA`, `LOAD`, `CLEAR` — have no dataset to name
+/// and are left alone.
+///
+/// # Errors
+///
+/// [`EngineError::Syntax`] when an operation already names its own dataset.
+pub fn with_protocol_dataset(
+    parsed: &mut Update,
+    default_graphs: Vec<NamedNode>,
+    named_graphs: Vec<NamedNode>,
+) -> Result<(), EngineError> {
+    if default_graphs.is_empty() && named_graphs.is_empty() {
+        return Ok(());
+    }
+    let dataset = spargebra::algebra::QueryDataset {
+        default: default_graphs,
+        named: (!named_graphs.is_empty()).then_some(named_graphs),
+    };
+    for operation in &mut parsed.operations {
+        if let GraphUpdateOperation::DeleteInsert { using, .. } = operation {
+            if using.is_some() {
+                return Err(EngineError::BadRequest(
+                    "the request names a dataset with using-graph-uri and the update also \
+                     names one with USING or WITH; the protocol permits only one"
+                        .to_owned(),
+                ));
+            }
+            *using = Some(dataset.clone());
+        }
+    }
+    Ok(())
 }
 
 /// Applies an already-parsed update.

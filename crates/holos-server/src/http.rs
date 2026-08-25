@@ -53,6 +53,24 @@ pub fn parse_form(body: &str) -> HashMap<String, String> {
     out
 }
 
+/// Whether a parameter is given more than once in an encoded parameter string.
+///
+/// [`parse_form`] keeps the first value of a non-repeatable key, so by the time a request
+/// has become a map the duplicate is gone. The protocol makes two `query` parameters a
+/// client error rather than a list, so the check has to happen on the text.
+#[must_use]
+pub fn given_more_than_once(encoded: &str, key: &str) -> bool {
+    encoded
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter(|pair| {
+            let name = pair.split_once('=').map_or(*pair, |(name, _)| name);
+            decode(name) == key
+        })
+        .count()
+        > 1
+}
+
 /// Every value given for a repeatable parameter.
 #[must_use]
 pub fn values(params: &HashMap<String, String>, key: &str) -> Vec<String> {
@@ -268,5 +286,28 @@ mod tests {
         assert_eq!(decode("%"), "%");
         assert_eq!(decode("%zz"), "%zz");
         assert_eq!(decode("a%2"), "a%2");
+    }
+
+    #[test]
+    fn a_duplicated_parameter_is_visible_in_the_text() {
+        // The protocol makes two `query` parameters a client error. `parse_form` keeps the
+        // first and drops the rest, so by the time a request is a map the duplicate is
+        // gone — which is why this reads the encoded text instead.
+        assert!(given_more_than_once("query=ASK%20%7B%7D&query=SELECT%20%2A%20%7B%7D", "query"));
+        assert!(!given_more_than_once("query=ASK%20%7B%7D&default-graph-uri=x", "query"));
+        assert!(!given_more_than_once("", "query"));
+    }
+
+    #[test]
+    fn a_parameter_whose_name_is_encoded_still_counts() {
+        // `%71uery` is `query`. A client that encodes the name is not thereby allowed two.
+        assert!(given_more_than_once("query=a&%71uery=b", "query"));
+    }
+
+    #[test]
+    fn a_repeatable_parameter_may_of_course_repeat() {
+        // The dataset parameters are the exception, and are joined rather than dropped.
+        let params = parse_form("default-graph-uri=http%3A%2F%2Fa&default-graph-uri=http%3A%2F%2Fb");
+        assert_eq!(values(&params, "default-graph-uri"), ["http://a", "http://b"]);
     }
 }

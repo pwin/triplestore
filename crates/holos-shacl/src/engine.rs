@@ -1,4 +1,4 @@
-//! Validation through the vendored SHACL_Engine.
+//! Validation through the adapted SHACL_Engine.
 //!
 //! `DESIGN.md` §8 says to take SHACL_Engine's design and change one thing. In practice the
 //! best of both turned out to be two validators, not one, and it is worth saying why
@@ -11,7 +11,7 @@
 //! | Cost to start | one pass over the graph, to bridge it | none |
 //! | Incremental revalidation | no | yes |
 //!
-//! The split is forced by one fact about the vendored engine: its `Graph` is **immutable**
+//! The split is forced by one fact about the adapted engine: its `Graph` is **immutable**
 //! — three sorted arrays, built once — and its rules engine rebuilds the whole thing when
 //! it adds a triple. So a delta cannot be pushed into a bridged graph cheaply, and a
 //! validator that has to re-bridge the graph on every commit is not an incremental
@@ -92,7 +92,7 @@ impl EngineRun {
 
     /// Validates a chosen set of (shape node, focus node) pairs, named by HOLOS ids.
     ///
-    /// Uses the `validate_nodes` entry point added to the vendored engine. Pairs naming
+    /// Uses the `validate_nodes` entry point added to the adapted engine. Pairs naming
     /// terms the bridge never saw are dropped: nothing in the engine's world refers to
     /// them, so there is nothing there to revalidate.
     pub fn validate_nodes(

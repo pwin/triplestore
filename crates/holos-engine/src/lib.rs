@@ -19,6 +19,7 @@
 // a length lint would make this code harder to check against the specs, not easier.
 #![allow(clippy::many_single_char_names)]
 
+pub mod functions;
 pub mod geo_ext;
 pub mod options;
 pub mod service;
@@ -60,6 +61,14 @@ pub enum EngineError {
     /// A read through the dataset view failed.
     #[error(transparent)]
     View(#[from] ViewError),
+    /// The request itself was wrong, in a way no amount of retrying fixes.
+    ///
+    /// Distinct from [`EngineError::Syntax`], which means the SPARQL text did not parse.
+    /// This is for a request that parsed and is still not answerable — the protocol naming
+    /// a dataset an update already names for itself, say. Both are 400s over HTTP; keeping
+    /// them apart keeps the message accurate about which one happened.
+    #[error("{0}")]
+    BadRequest(String),
     /// The policy refused a write.
     #[error("access denied by policy")]
     AccessDenied,
@@ -249,6 +258,12 @@ impl Engine {
         // anything checked, so they are implemented here rather than quietly dropped.
         for (name, function) in geo_ext::EXTRA_GEOSPARQL_FUNCTIONS {
             evaluator = evaluator.with_custom_function(name.into_owned(), function);
+        }
+        // fn:, afn: and spif: — the three extension libraries queries written for other
+        // stores reach for. Without them such a query fails with "not supported", which is
+        // accurate and unhelpful when the function has an exact equivalent here.
+        for (name, function) in functions::all() {
+            evaluator = evaluator.with_custom_function(name, function);
         }
         evaluator
     }

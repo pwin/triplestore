@@ -19,6 +19,7 @@
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
 pub mod manifest;
+pub mod protocol;
 pub mod resultset;
 pub mod shacl;
 
@@ -660,6 +661,70 @@ fn compare_results(
             compare_datasets(&expected, &got)
         }
     }
+}
+
+/// Compares a run against a checked-in baseline, failing on drift in either direction.
+///
+/// The query suites ratchet through their own `Report`; the protocol suites do not produce
+/// one, because a scripted conversation has no solutions to compare. This takes the
+/// failures directly so both kinds of suite are held to the same standard: a regression
+/// fails, and so does a test that started passing without the baseline being updated.
+///
+/// # Panics
+///
+/// Panics — which is how a test fails — when the failures differ from the baseline.
+pub fn ratchet_named(name: &str, failed: &[(String, String)]) {
+    use std::collections::BTreeSet;
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("the crate sits two levels below the workspace root")
+        .join("conformance")
+        .join(format!("{name}.failures"));
+
+    let actual: BTreeSet<String> = failed.iter().map(|(id, _)| id.clone()).collect();
+
+    if std::env::var("HOLOS_UPDATE_CONFORMANCE").is_ok() {
+        let mut body = format!(
+            "# {name} — tests known to fail. Regenerate with HOLOS_UPDATE_CONFORMANCE=1.\n"
+        );
+        for (id, why) in failed {
+            body.push_str(&format!("{id}\t{}\n", why.replace(['\n', '\t'], " ")));
+        }
+        std::fs::write(&path, body).expect("writing the baseline");
+        eprintln!("{name}: baseline updated ({} known failures)", failed.len());
+        return;
+    }
+
+    let expected: BTreeSet<String> = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+        .map(|l| l.split('\t').next().unwrap_or(l).to_owned())
+        .collect();
+
+    let regressed: Vec<_> = actual.difference(&expected).collect();
+    let fixed: Vec<_> = expected.difference(&actual).collect();
+
+    assert!(
+        regressed.is_empty(),
+        "{name}: {} test(s) regressed:\n  {}\n\nIf expected, re-baseline with \
+         HOLOS_UPDATE_CONFORMANCE=1.",
+        regressed.len(),
+        regressed
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+    assert!(
+        fixed.is_empty(),
+        "{name}: {} test(s) on the known-failure list now pass:\n  {}\n\nRe-baseline with \
+         HOLOS_UPDATE_CONFORMANCE=1 — a stale list is a list nobody trusts.",
+        fixed.len(),
+        fixed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n  ")
+    );
 }
 
 /// Marker for the one result encoding the harness cannot read: results serialised as RDF

@@ -135,8 +135,8 @@ fn parse_graph(path: &Path, base: &str) -> Result<Graph> {
 pub enum Engine {
     /// The native evaluator, reading the live store.
     Native,
-    /// The vendored SHACL_Engine, fed through the bridge.
-    Vendored,
+    /// The adapted SHACL_Engine, fed through the bridge.
+    Adapted,
 }
 
 /// Runs one SHACL test with the native evaluator.
@@ -205,8 +205,8 @@ fn run_inner(test: &ShaclTest, engine: Engine) -> Result<super::Outcome> {
         data_graph: GraphFilter::Default,
         shapes_graph: shapes_graph_name,
     };
-    if engine == Engine::Vendored {
-        return run_vendored(&store, options, &expected);
+    if engine == Engine::Adapted {
+        return run_adapted(&store, options, &expected);
     }
 
     let shapes = match CompiledShapes::compile(&store, options) {
@@ -231,8 +231,8 @@ fn run_inner(test: &ShaclTest, engine: Engine) -> Result<super::Outcome> {
     })
 }
 
-/// Runs a test through the vendored engine, bridged from the store.
-fn run_vendored(
+/// Runs a test through the adapted engine, bridged from the store.
+fn run_adapted(
     store: &Store,
     options: Options,
     expected: &Dataset,

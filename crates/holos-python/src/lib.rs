@@ -636,9 +636,9 @@ impl PyStore {
 
     /// Validate against SHACL shapes loaded from a file.
     ///
-    /// `engine="vendored"` covers considerably more of SHACL; `engine="native"` reads the
+    /// `engine="adapted"` covers considerably more of SHACL; `engine="native"` reads the
     /// live store and is the only one that can revalidate a delta.
-    #[pyo3(signature = (shapes, *, engine="vendored"))]
+    #[pyo3(signature = (shapes, *, engine="adapted"))]
     fn validate(&self, py: Python<'_>, shapes: &str, engine: &str) -> PyResult<Py<PyAny>> {
         let (conforms, count) =
             py.detach(|| validate_against(&self.engine, shapes, engine))?;
@@ -815,7 +815,8 @@ fn validate_against(
     };
 
     match which {
-        "vendored" => {
+        // "vendored" was the earlier spelling; still accepted.
+        "adapted" | "vendored" => {
             let mut run = holos_shacl::engine::EngineRun::prepare(guard.store(), options)
                 .map_err(|e| HolosError::new_err(e.to_string()))?;
             let report = run.validate().map_err(|e| HolosError::new_err(e.to_string()))?;
@@ -830,7 +831,7 @@ fn validate_against(
             Ok((report.conforms, report.results.len()))
         }
         other => Err(PyValueError::new_err(format!(
-            "unknown engine {other:?}; expected \"native\" or \"vendored\""
+            "unknown engine {other:?}; expected \"native\" or \"adapted\""
         ))),
     }
 }

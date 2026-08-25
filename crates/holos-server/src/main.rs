@@ -18,6 +18,7 @@
 //! A writer excludes readers for the update's duration, which is what makes the update's
 //! failure-atomicity also behave as isolation in this deployment.
 
+mod gsp;
 mod http;
 mod ui;
 
@@ -43,6 +44,13 @@ ENDPOINTS
     GET  /query?query=...    SPARQL 1.2 Protocol
     POST /query              SPARQL 1.2 Protocol (form-encoded or application/sparql-query)
     POST /update             SPARQL 1.1 Update (form-encoded or application/sparql-update)
+
+GRAPH STORE PROTOCOL      https://www.w3.org/TR/sparql11-http-rdf-update/
+    GET    /graph?graph=<IRI>    Serialise a graph (or ?default)
+    HEAD   /graph?graph=<IRI>    As GET, without the body
+    PUT    /graph?graph=<IRI>    Replace a graph with the request body
+    POST   /graph?graph=<IRI>    Merge the request body into a graph
+    DELETE /graph?graph=<IRI>    Remove a graph
     GET  /stats              Store statistics, as JSON
     GET  /health             Liveness
 
@@ -55,8 +63,15 @@ SERVER
                              Enforced while a query reads or streams rows; a query blocked
                              inside one in-memory step is not interruptible. See
                              OPERATIONS.md.
-    --read-only              Answer 403 to /update. The store is still opened writable, so
-                             a loader can use it; this refuses updates over HTTP only.
+    --read-only              Answer 403 to /update and to every writing Graph Store
+                             Protocol verb. The store is still opened writable, so a loader
+                             can use it; this refuses writes over HTTP only.
+    --gsp-path <PATH>        Where the Graph Store Protocol is served. Default /graph.
+    --gsp-base <IRI>         Enable *direct* graph identification, treating the request path
+                             under this base as the graph name. Off by default: a server
+                             behind a proxy does not know its own external base, and
+                             guessing would mint names that do not match what clients ask
+                             for later.
     --reorder                Order each basic graph pattern by estimated cardinality before
                              evaluating, making query cost independent of how the query was
                              written. Statistics are built once at start-up and rebuilt after
@@ -85,6 +100,8 @@ struct Config {
     timeout: Option<Duration>,
     read_only: bool,
     reorder: bool,
+    gsp_base: Option<String>,
+    gsp_path: String,
     data: Vec<String>,
     store: Option<String>,
     threads: usize,
@@ -106,6 +123,8 @@ impl Default for Config {
             timeout: None,
             read_only: false,
             reorder: false,
+            gsp_base: None,
+            gsp_path: "/graph".to_owned(),
             data: Vec::new(),
             store: None,
             threads: 8,
@@ -233,6 +252,12 @@ fn main() -> Result<()> {
 
 fn dispatch(state: &State, mut request: Request) -> Result<()> {
     let (path, params) = http::split_url(request.url());
+    // Kept in its encoded form as well: a duplicate parameter has to be spotted before the
+    // parser collapses it, and the protocol makes a duplicated `query` a client error.
+    let query_string = request
+        .url()
+        .split_once('?')
+        .map_or_else(String::new, |(_, q)| q.to_owned());
     let accept = header(&request, "accept");
     let content_type = header(&request, "content-type");
 
@@ -247,6 +272,9 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
             respond(request, 200, "application/json", body.into_bytes())
         }
         ("GET", "/query") => {
+            if let Some(why) = repeated(&query_string, "query") {
+                return respond(request, 400, "text/plain", why.into_bytes());
+            }
             let Some(query) = params.get("query") else {
                 return respond(
                     request,
@@ -258,6 +286,12 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
             answer(state, request, &query.clone(), accept.as_deref(), &params)
         }
         ("POST", "/query") => {
+            if let Some(why) = repeated(&query_string, "query") {
+                return respond(request, 400, "text/plain", why.into_bytes());
+            }
+            if let Some(why) = unusable_body(content_type.as_deref()) {
+                return respond(request, 400, "text/plain", why.into_bytes());
+            }
             let mut body = String::new();
             request.as_reader().read_to_string(&mut body)?;
             // Two POST encodings are allowed: the query directly, or form-encoded.
@@ -267,7 +301,11 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
             {
                 body
             } else {
-                match http::parse_form(&body).get("query") {
+                if let Some(why) = repeated(&body, "query") {
+                    return respond(request, 400, "text/plain", why.into_bytes());
+                }
+                let form = http::parse_form(&body);
+                match form.get("query") {
                     Some(q) => q.clone(),
                     None => {
                         return respond(
@@ -290,6 +328,12 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
                     b"this endpoint is read-only".to_vec(),
                 );
             }
+            if let Some(why) = repeated(&query_string, "update") {
+                return respond(request, 400, "text/plain", why.into_bytes());
+            }
+            if let Some(why) = unusable_body(content_type.as_deref()) {
+                return respond(request, 400, "text/plain", why.into_bytes());
+            }
             let mut body = String::new();
             request.as_reader().read_to_string(&mut body)?;
             let (update, form) = if content_type
@@ -298,6 +342,9 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
             {
                 (body, std::collections::HashMap::new())
             } else {
+                if let Some(why) = repeated(&body, "update") {
+                    return respond(request, 400, "text/plain", why.into_bytes());
+                }
                 let form = http::parse_form(&body);
                 match form.get("update") {
                     Some(u) => (u.clone(), form),
@@ -320,6 +367,12 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
             apply_update(state, request, &update, &merged)
         }
         ("OPTIONS", _) => respond(request, 204, "text/plain", Vec::new()),
+        (method, p)
+            if matches!(method, "GET" | "HEAD" | "PUT" | "POST" | "DELETE")
+                && is_graph_store_path(state, p) =>
+        {
+            graph_store(state, request, &params)
+        }
         _ => respond(request, 404, "text/plain", b"not found".to_vec()),
     }
 }
@@ -348,7 +401,8 @@ fn answer(
     let view = guard.view(&session);
 
     let options = match query_options(state, params) {
-        Ok(options) => options,
+        // A query may hold relative IRIs, which resolve against the endpoint.
+        Ok(options) => options.with_base_iri(base_iri(&request, "/query")),
         Err(e) => return respond(request, 400, "text/plain", e.into_bytes()),
     };
     let explain = options.explain;
@@ -377,6 +431,310 @@ fn answer(
     }
 
     serialise(request, results, accept)
+}
+
+/// Whether a path addresses the Graph Store Protocol.
+///
+/// The configured path exactly, and — when direct graph identification is on — anything
+/// beneath it. Direct identification names the graph *with the path itself*, so
+/// `/gsp/person/1.ttl` is a request about a different graph from `/gsp/person/2.ttl`, and
+/// matching only the exact prefix would 404 every one of them.
+///
+/// Without `--gsp-base` the sub-paths are not claimed, because nothing could resolve them
+/// to a graph name and answering 400 where a 404 belongs would be worse than not matching.
+fn is_graph_store_path(state: &State, path: &str) -> bool {
+    if path == state.config.gsp_path {
+        return true;
+    }
+    state.config.gsp_base.is_some()
+        && path.starts_with(&format!("{}/", state.config.gsp_path.trim_end_matches('/')))
+}
+
+/// The Graph Store Protocol.
+///
+/// One function for all five verbs because they share the target resolution, the policy
+/// session and the existence check, and splitting them would mean five copies of the part
+/// that has to agree.
+fn graph_store(
+    state: &State,
+    mut request: Request,
+    params: &std::collections::HashMap<String, String>,
+) -> Result<()> {
+    let method = request.method().as_str().to_owned();
+    let writing = matches!(method.as_str(), "PUT" | "POST" | "DELETE");
+
+    if writing && state.config.read_only {
+        return respond(request, 403, "text/plain", b"this endpoint is read-only".to_vec());
+    }
+
+    let path = request
+        .url()
+        .split('?')
+        .next()
+        .unwrap_or("/")
+        .to_owned();
+    // `POST` to the protocol endpoint itself, carrying neither `?graph` nor `?default`,
+    // is the specification's "create a graph and tell me its name" (§5.5). It has to be
+    // recognised before the ordinary rules run: with a base configured those would resolve
+    // the bare endpoint path by direct identification and name the new graph after the
+    // endpoint, which is not a graph.
+    let minting = method == "POST"
+        && path == state.config.gsp_path
+        && !params.contains_key("graph")
+        && !params.contains_key("default");
+
+    // Set only for a minted graph, and only so the response can carry `Location`.
+    let mut minted: Option<String> = None;
+
+    let target = if minting {
+        let Some(base) = state.config.gsp_base.as_deref() else {
+            return respond(
+                request,
+                400,
+                "text/plain",
+                b"creating a graph by POST needs --gsp-base, so the server can name it"
+                    .to_vec(),
+            );
+        };
+        let name = gsp::mint_graph_name(base, &path);
+        minted = Some(name.as_str().to_owned());
+        gsp::Target::Named(name)
+    } else {
+        match gsp::target(params, &path, state.config.gsp_base.as_deref()) {
+            Ok(target) => target,
+            Err(e) => return respond(request, 400, "text/plain", e.to_string().into_bytes()),
+        }
+    };
+
+    let accept = header(&request, "accept");
+    let content_type = header(&request, "content-type");
+    let mut body = Vec::new();
+    if writing {
+        request.as_reader().read_to_end(&mut body)?;
+    }
+
+    // What the body holds, worked out before any lock is taken so an unusable one costs
+    // nothing. Ordinarily this is one document; a graph submitted as a file upload arrives
+    // as `multipart/form-data` and carries one per part, each with its own prefixes.
+    let mut documents: Vec<(Vec<u8>, RdfFormat)> = Vec::new();
+    let mut unusable = false;
+    match content_type.as_deref().and_then(gsp::multipart_boundary) {
+        Some(boundary) => {
+            for (part, media) in gsp::multipart_parts(&body, &boundary) {
+                match rdf_format_of(Some(&media)) {
+                    Some(format) => documents.push((part.to_vec(), format)),
+                    // One part this store cannot read makes the whole upload a 415.
+                    // Merging the rest would leave the client holding a graph that is not
+                    // what it sent, under a status code saying it succeeded.
+                    None => unusable = true,
+                }
+            }
+        }
+        None => match rdf_format_of(content_type.as_deref()) {
+            Some(format) => documents.push((body, format)),
+            None => unusable = true,
+        },
+    }
+    let usable = !unusable && !documents.is_empty();
+
+    let principal = principal_for(state, &request);
+
+    // A read takes the read lock; a write takes the write lock. Sharing one path would
+    // mean every GET excluding every other request for no reason.
+    if writing {
+        let mut guard = state.engine.write().map_err(|_| anyhow::anyhow!("poisoned"))?;
+        let mut session = match Session::open(guard.store(), principal, state.policy.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                return respond(request, 500, "text/plain", format!("session: {e}").into_bytes())
+            }
+        };
+        let existed = match gsp::exists(&guard, &session, &target) {
+            Ok(existed) => existed,
+            Err(e) => return respond(request, 500, "text/plain", e.to_string().into_bytes()),
+        };
+
+        let outcome = match method.as_str() {
+            "DELETE" => {
+                if !existed {
+                    // Not an error: the client learns the graph was not there.
+                    return respond(request, 404, "text/plain", b"no such graph".to_vec());
+                }
+                // DELETE removes the graph, not just its contents — otherwise a second
+                // DELETE cannot answer 404.
+                gsp::drop_graph(&mut guard, &mut session, &target).map(|_| 204)
+            }
+            "PUT" | "POST" => {
+                if !usable {
+                    return respond(
+                        request,
+                        415,
+                        "text/plain",
+                        b"unsupported media type: send RDF with a content-type this \
+                          store parses".to_vec(),
+                    );
+                }
+                // PUT replaces, POST merges. That difference is the whole distinction
+                // between the two verbs here.
+                let mut result = if method == "PUT" {
+                    gsp::clear(&mut guard, &mut session, &target).map(|_| ())
+                } else {
+                    Ok(())
+                };
+                // Each document in turn. PUT cleared once above rather than once per
+                // document, so the parts of an upload accumulate into the replacement
+                // instead of replacing one another.
+                for (content, format) in &documents {
+                    if result.is_err() {
+                        break;
+                    }
+                    result = gsp::merge(&mut guard, &mut session, &target, content, *format, None)
+                        .map(|_| ());
+                }
+                result
+                    .and_then(|()| gsp::create(&mut guard, &target))
+                    // 201 tells the client it created the graph; 204 that it changed one.
+                    .map(|()| if existed { 204 } else { 201 })
+            }
+            _ => Ok(400),
+        };
+
+        drop(guard);
+        if matches!(method.as_str(), "PUT" | "POST" | "DELETE") {
+            state.refresh_statistics();
+        }
+
+        return match outcome {
+            // A graph the server named has to say the name, or the client has no way to
+            // address what it just asked to have created.
+            Ok(status) => match &minted {
+                Some(name) => respond_with(
+                    request,
+                    status,
+                    "text/plain",
+                    Vec::new(),
+                    &[("Location", name.as_str())],
+                ),
+                None => respond(request, status, "text/plain", Vec::new()),
+            },
+            Err(e) => {
+                let denied = e
+                    .downcast_ref::<holos_engine::EngineError>()
+                    .is_some_and(|e| matches!(e, holos_engine::EngineError::AccessDenied));
+                let status = if denied { 403 } else { 400 };
+                respond(request, status, "text/plain", e.to_string().into_bytes())
+            }
+        };
+    }
+
+    let guard = state.engine.read().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let session = match Session::open(guard.store(), principal, state.policy.clone()) {
+        Ok(s) => s,
+        Err(e) => return respond(request, 500, "text/plain", format!("session: {e}").into_bytes()),
+    };
+    match gsp::exists(&guard, &session, &target) {
+        Ok(false) => return respond(request, 404, "text/plain", b"no such graph".to_vec()),
+        Err(e) => return respond(request, 500, "text/plain", e.to_string().into_bytes()),
+        Ok(true) => {}
+    }
+
+    let format = http::negotiate_rdf(accept.as_deref());
+    match gsp::read(&guard, &session, &target, format) {
+        // HEAD is GET without the body, so the content-type still has to be right.
+        Ok(_) if method == "HEAD" => respond(request, 200, format.media_type(), Vec::new()),
+        Ok(body) => respond(request, 200, format.media_type(), body),
+        Err(e) => respond(request, 500, "text/plain", e.to_string().into_bytes()),
+    }
+}
+
+/// The RDF format a request body declares.
+/// Whether a protocol parameter was given more than once, as a message saying so.
+///
+/// The protocol allows a request to carry exactly one `query` or `update`. Two is a client
+/// error rather than a choice for the server to make: answering the first would run
+/// something the client did not unambiguously ask for.
+///
+/// Takes the *encoded* parameter string — a query string or a form body — because the
+/// parser keeps the first value of a non-repeatable key and drops the rest.
+fn repeated(encoded: &str, key: &str) -> Option<String> {
+    http::given_more_than_once(encoded, key)
+        .then(|| format!("the request carries more than one '{key}' parameter"))
+}
+
+/// Whether a POST body cannot be used, given its declared content type.
+///
+/// Two refusals the protocol requires:
+///
+/// * **No `Content-Type` at all.** A body that is form-encoded looks identical to one that
+///   is a query; guessing means running text the client never said was a query.
+/// * **A charset that is not UTF-8.** The protocol fixes the encoding of both media types
+///   at UTF-8, so a request declaring UTF-16 is asking for something the protocol does not
+///   offer, and decoding it as UTF-8 anyway would answer over mojibake.
+fn unusable_body(content_type: Option<&str>) -> Option<String> {
+    let Some(value) = content_type else {
+        return Some(
+            "a POST body needs a Content-Type: application/sparql-query, \
+             application/sparql-update, or application/x-www-form-urlencoded"
+                .to_owned(),
+        );
+    };
+    let charset = value.split(';').skip(1).find_map(|p| {
+        let (name, v) = p.split_once('=')?;
+        name.trim()
+            .eq_ignore_ascii_case("charset")
+            .then(|| v.trim().trim_matches('"').to_ascii_lowercase())
+    })?;
+    (charset != "utf-8" && charset != "utf8")
+        .then(|| format!("the protocol requires UTF-8; this request declares `{charset}`"))
+}
+
+/// The graphs `using-graph-uri` and `using-named-graph-uri` name.
+///
+/// Both are repeatable, and arrive newline-joined from the query-string parser.
+fn named_dataset(
+    params: &std::collections::HashMap<String, String>,
+) -> Result<(Vec<NamedNode>, Vec<NamedNode>), holos_engine::EngineError> {
+    let read = |key: &str| -> Result<Vec<NamedNode>, holos_engine::EngineError> {
+        http::values(params, key)
+            .into_iter()
+            .map(|iri| {
+                NamedNode::new(&iri).map_err(|e| {
+                    holos_engine::EngineError::BadRequest(format!("{key} `{iri}`: {e}"))
+                })
+            })
+            .collect()
+    };
+    Ok((read("using-graph-uri")?, read("using-named-graph-uri")?))
+}
+
+/// The base IRI a relative IRI in a request resolves against.
+///
+/// The protocol says a service *may* define one, and names the endpoint itself as the
+/// obvious candidate. Without it `CONSTRUCT { <s> <p> 1 }` cannot parse at all, so the
+/// choice is between having one and refusing a class of legal requests.
+///
+/// Built from the `Host` header so it matches the URI the client actually used, which is
+/// what makes the resolved IRIs meaningful to that client.
+fn base_iri(request: &Request, path: &str) -> String {
+    let host = header(request, "host").unwrap_or_else(|| "localhost".to_owned());
+    format!("http://{host}{path}")
+}
+
+fn rdf_format_of(content_type: Option<&str>) -> Option<RdfFormat> {
+    let value = content_type?;
+    let media = value.split(';').next()?.trim().to_ascii_lowercase();
+    match media.as_str() {
+        "text/turtle" | "application/x-turtle" => Some(RdfFormat::Turtle),
+        "application/n-triples" | "text/plain" => Some(RdfFormat::NTriples),
+        "application/trig" => Some(RdfFormat::TriG),
+        "application/n-quads" => Some(RdfFormat::NQuads),
+        "application/rdf+xml" => Some(RdfFormat::RdfXml),
+        "text/n3" => Some(RdfFormat::N3),
+        "application/ld+json" => Some(RdfFormat::JsonLd {
+            profile: oxrdfio::JsonLdProfileSet::empty(),
+        }),
+        _ => None,
+    }
 }
 
 /// Consumes a result stream for its side effect on the explanation's statistics.
@@ -438,6 +796,8 @@ fn apply_update(
     update: &str,
     params: &std::collections::HashMap<String, String>,
 ) -> Result<()> {
+    // Read before the request is consumed by a response, and before the lock is taken.
+    let base = base_iri(&request, "/update");
     let principal = principal_for(state, &request);
     let mut guard = state
         .engine
@@ -454,19 +814,15 @@ fn apply_update(
             )
         }
     };
-    // `using-graph-uri` is accepted and reported rather than silently dropped: honouring it
-    // needs the USING clause plumbed through spargebra's operation, and answering "not
-    // supported" beats answering over the wrong dataset.
-    if params.contains_key("using-graph-uri") || params.contains_key("using-named-graph-uri") {
-        return respond(
-            request,
-            400,
-            "text/plain",
-            b"using-graph-uri is not supported; put USING in the update text".to_vec(),
-        );
-    }
-
-    let outcome = sparql_update::update(&mut guard, &mut session, update, None);
+    // `using-graph-uri` names the dataset the update's WHERE runs against. It is applied
+    // to the parsed form rather than the text, so an update that names its own dataset can
+    // be told apart from one that does not — the protocol makes carrying both an error.
+    let outcome = named_dataset(params)
+        .and_then(|(default_graphs, named_graphs)| {
+            let mut parsed = sparql_update::parse(update, Some(&base))?;
+            sparql_update::with_protocol_dataset(&mut parsed, default_graphs, named_graphs)?;
+            sparql_update::apply(&mut guard, &mut session, &parsed)
+        });
     // Release the write lock before rebuilding: refresh_statistics takes a read lock, and
     // holding the write lock across it would deadlock.
     drop(guard);
@@ -484,7 +840,10 @@ fn apply_update(
         }
         Err(e) => {
             let status = match &e {
-                holos_engine::EngineError::Syntax(_) => 400,
+                // Both mean the client sent something unanswerable, which is a 400
+                // whether the SPARQL failed to parse or the request contradicted itself.
+                holos_engine::EngineError::Syntax(_)
+                | holos_engine::EngineError::BadRequest(_) => 400,
                 holos_engine::EngineError::AccessDenied => 403,
                 _ => 500,
             };
@@ -578,6 +937,17 @@ fn stats(state: &State) -> String {
 }
 
 fn respond(request: Request, status: u16, content_type: &str, body: Vec<u8>) -> Result<()> {
+    respond_with(request, status, content_type, body, &[])
+}
+
+/// `respond`, plus headers this particular answer needs — `Location`, so far.
+fn respond_with(
+    request: Request,
+    status: u16,
+    content_type: &str,
+    body: Vec<u8>,
+    extra: &[(&str, &str)],
+) -> Result<()> {
     let mut response = Response::from_data(body).with_status_code(status);
     for (name, value) in [
         ("Content-Type", content_type),
@@ -586,8 +956,15 @@ fn respond(request: Request, status: u16, content_type: &str, body: Vec<u8>) -> 
         // endpoint useless for its most common job.
         ("Access-Control-Allow-Origin", "*"),
         ("Access-Control-Allow-Headers", "content-type, accept"),
-        ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
-    ] {
+        // The Graph Store Protocol uses all five verbs, so a browser client that can only
+        // GET and POST cannot reach half of it.
+        ("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, DELETE, OPTIONS"),
+        // Without this a browser cannot read the name of a graph it just created.
+        ("Access-Control-Expose-Headers", "location"),
+    ]
+    .into_iter()
+    .chain(extra.iter().copied())
+    {
         if let Ok(header) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
             response.add_header(header);
         }
@@ -688,6 +1065,8 @@ fn parse_args(args: &[String]) -> Result<Config> {
             }
             "--read-only" => c.read_only = true,
             "--reorder" => c.reorder = true,
+            "--gsp-base" => c.gsp_base = Some(value(&mut i)?),
+            "--gsp-path" => c.gsp_path = value(&mut i)?,
             "--no-ui" => c.ui = false,
             "--trust-forwarded-identity" => c.trust_forwarded = true,
             "--role" => c.roles.push(value(&mut i)?),
@@ -708,4 +1087,55 @@ fn parse_args(args: &[String]) -> Result<Config> {
         i += 1;
     }
     Ok(c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_post_body_with_no_content_type_is_refused() {
+        // A form-encoded body and a query body are indistinguishable without one, and
+        // guessing means running text the client never said was a query.
+        assert!(unusable_body(None).is_some());
+    }
+
+    #[test]
+    fn a_charset_other_than_utf8_is_refused() {
+        // The protocol fixes both media types at UTF-8. Decoding UTF-16 as UTF-8 would
+        // answer over mojibake rather than say no.
+        assert!(unusable_body(Some("application/sparql-query; charset=UTF-16")).is_some());
+        assert!(unusable_body(Some("application/sparql-query; charset=utf-8")).is_none());
+        assert!(unusable_body(Some("application/sparql-query; charset=\"UTF-8\"")).is_none());
+        // No charset at all is the default, which is UTF-8.
+        assert!(unusable_body(Some("application/sparql-query")).is_none());
+    }
+
+    #[test]
+    fn a_duplicated_query_parameter_is_reported() {
+        assert!(repeated("query=a&query=b", "query").is_some());
+        assert!(repeated("query=a", "query").is_none());
+    }
+
+    #[test]
+    fn the_dataset_parameters_become_graph_names() {
+        let params = http::parse_form(
+            "using-graph-uri=http%3A%2F%2Fa&using-graph-uri=http%3A%2F%2Fb\
+             &using-named-graph-uri=http%3A%2F%2Fc",
+        );
+        let (default_graphs, named_graphs) = named_dataset(&params).expect("valid IRIs");
+        assert_eq!(default_graphs.len(), 2);
+        assert_eq!(named_graphs.len(), 1);
+    }
+
+    #[test]
+    fn a_dataset_parameter_that_is_not_an_iri_is_a_bad_request() {
+        // Not a 500: the client sent it, and the message should say which one.
+        let params = http::parse_form("using-graph-uri=not%20an%20iri");
+        let error = named_dataset(&params).expect_err("should refuse");
+        assert!(
+            matches!(error, holos_engine::EngineError::BadRequest(_)),
+            "got {error:?}"
+        );
+    }
 }

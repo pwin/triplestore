@@ -52,7 +52,34 @@ fn suite(label: &str, manifest_path: &Path) {
             .next()
             .unwrap_or(&test.kind)
             .to_owned();
-        let entry = by_kind.entry(kind).or_default();
+        let entry = by_kind.entry(kind.clone()).or_default();
+
+        // The protocol suites are scripted HTTP conversations, so `run_sparql_test` cannot
+        // answer for them — but they *are* run, by `cargo test -p holos-conformance --test
+        // protocol` and `--test sparql_protocol`. Counting them as skipped here would
+        // understate coverage by 47 tests. Their results come from the ratcheted baselines,
+        // which those runs keep honest: a test that starts or stops failing fails the run
+        // until the baseline is updated.
+        if let Some(baseline) = baseline_for(&kind) {
+            match known_failures(baseline) {
+                Some(failures) => {
+                    if failures.contains(test.short_id()) {
+                        entry.failed += 1;
+                    } else {
+                        entry.passed += 1;
+                    }
+                    continue;
+                }
+                None => {
+                    entry.skipped += 1;
+                    *skip_reasons
+                        .entry(format!("{kind}: no baseline — run the protocol harness"))
+                        .or_default() += 1;
+                    continue;
+                }
+            }
+        }
+
         match run_sparql_test(test) {
             Outcome::Passed => entry.passed += 1,
             Outcome::Failed(_) => entry.failed += 1,
@@ -118,6 +145,35 @@ fn suite(label: &str, manifest_path: &Path) {
             println!("    {n:>4}  {reason}");
         }
     }
+}
+
+/// Which ratcheted baseline holds the results for a test type, if it is run over HTTP.
+fn baseline_for(kind: &str) -> Option<&'static str> {
+    match kind {
+        "GraphStoreProtocolTest" => Some("graph-store-protocol"),
+        "ProtocolTest" => Some("sparql-protocol"),
+        _ => None,
+    }
+}
+
+/// The tests a suite's baseline records as failing, or `None` when there is no baseline.
+///
+/// An absent file means the harness has never been run, which is a skip rather than a pass:
+/// claiming coverage from a run that did not happen is exactly the dishonesty this example
+/// exists to prevent.
+fn known_failures(suite: &str) -> Option<std::collections::HashSet<String>> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .parent()?
+        .join("conformance")
+        .join(format!("{suite}.failures"));
+    let body = std::fs::read_to_string(path).ok()?;
+    Some(
+        body.lines()
+            .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+            .map(|l| l.split('\t').next().unwrap_or(l).trim().to_owned())
+            .collect(),
+    )
 }
 
 fn main() {

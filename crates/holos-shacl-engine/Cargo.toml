@@ -2,7 +2,7 @@
 name = "holos-shacl-engine"
 description = "SHACL constraint evaluation — an adaptation of pwin/SHACL_Engine for the HOLOS store"
 version.workspace = true
-# Upstream is edition 2024 and uses let-chains. Kept as-is so the vendored source
+# Upstream is edition 2024 and uses let-chains. Kept as-is so the adapted source
 # stays diffable against upstream; the rest of the workspace is 2021.
 edition = "2024"
 rust-version.workspace = true

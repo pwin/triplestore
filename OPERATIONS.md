@@ -270,6 +270,92 @@ setting for a public endpoint sharing a store with a separate loader.
 server-side request forgery primitive — it would make the server issue requests to hosts
 only the server can reach. `file:` URLs load; remote ones return an error saying so.
 
+### Naming the dataset from the request
+
+`using-graph-uri` and `using-named-graph-uri` say which graphs an update's `WHERE` matches
+against, without putting `USING` in the text:
+
+```sh
+curl -X POST -H 'Content-Type: application/sparql-update' \
+     --data 'DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }' \
+     'http://127.0.0.1:7878/update?using-graph-uri=http%3A%2F%2Fexample.com%2Fg1'
+```
+
+Both are repeatable. An update that **already** names its own dataset with `USING` or `WITH`
+and *also* carries these parameters is a **400**: the protocol makes carrying both a client
+error rather than a precedence question, and resolving it either way would run the update
+over a dataset its author did not choose.
+
+The query endpoint's equivalents are `default-graph-uri` and `named-graph-uri`, also
+repeatable.
+
+### What the endpoints refuse
+
+The protocol requires these, and each was a real gap until the W3C protocol suite was run
+against the server:
+
+| Request | Answer |
+|---|---|
+| Two `query=` or two `update=` parameters | **400** — ambiguous, not a list |
+| A POST body with no `Content-Type` | **400** — a form body and a query body are indistinguishable without one |
+| `charset=UTF-16` on either media type | **400** — the protocol fixes both at UTF-8 |
+
+Relative IRIs in a query or update resolve against a **service base URI** built from the
+`Host` header and the endpoint path, so `CONSTRUCT { <s> <p> 1 } WHERE {}` parses and its
+IRIs come back absolute and addressable by the client that sent them.
+
+## Graph Store Protocol
+
+REST verbs on whole graphs, for the jobs SPARQL Update makes awkward. **On by default at
+`/graph`**, using indirect identification — the graph named by a query parameter. Two flags
+change that:
+
+```sh
+holos-server --store ./db --gsp-path /gsp --gsp-base https://data.example.org
+```
+
+| Verb | Effect | Exists | Absent |
+|---|---|---|---|
+| `GET` / `HEAD` | Fetch the graph as a document | 200 | **404** |
+| `PUT` | Replace it wholesale | 204 | **201** |
+| `POST` | Merge into it | 204 | **201** |
+| `DELETE` | Remove it, not just its contents | 204 | **404** |
+
+```sh
+# indirect identification: the graph is a parameter
+curl -X PUT -H 'Content-Type: text/turtle' --data-binary @people.ttl \
+     'http://127.0.0.1:7878/graph?graph=http%3A%2F%2Fexample.org%2Fpeople'
+
+curl -H 'Accept: text/turtle' 'http://127.0.0.1:7878/graph?graph=http%3A%2F%2Fexample.org%2Fpeople'
+
+# the default graph
+curl -H 'Accept: application/n-triples' 'http://127.0.0.1:7878/graph?default'
+
+# let the server name a new graph; the name comes back in Location
+curl -i -X POST -H 'Content-Type: text/turtle' --data-binary @batch.ttl \
+     http://127.0.0.1:7878/graph
+```
+
+Four things worth knowing:
+
+- **`--gsp-base` is what enables *direct* identification**, where the request URI *is* the
+  graph name (`PUT /graph/people`). It is off without one because a server behind a reverse
+  proxy sees `/graph/people` while the world sees `https://data.example.org/graph/people`, and
+  guessing would mint graph names that do not match the ones clients later ask for. Set it
+  to the base the *outside* sees. It is also required for `POST` to the endpoint itself,
+  since the server has to name the graph it creates.
+- **`DELETE` removes the graph, not just its quads.** Otherwise a second `DELETE` could not
+  answer 404, and a client could not tell "I removed it" from "it was not there".
+- **A graph the principal may not read is 404 to them**, not 200-and-empty. Reporting it as
+  present-but-empty would confirm it exists, which is the thing the policy was withholding.
+  The same policy governs writes: a REST verb is not a way around it.
+- **File uploads work.** A `multipart/form-data` body carries one RDF document per part,
+  each with its own prefixes, and **all** of them are merged. One part this store cannot
+  parse makes the whole upload a 415 rather than a partial success reported as a 204.
+
+`PUT` is the operation people otherwise write as `DROP GRAPH … ; INSERT DATA { GRAPH … }`,
+which is two operations that can half-succeed where this is one that cannot.
+
 ## Monitoring
 
 | Endpoint | Use |
@@ -278,8 +364,9 @@ only the server can reach. `file:` URLs load; remote ones return an error saying
 | `GET /stats` | `{"quads":…, "dictionaryTerms":…, "namedGraphs":…}` |
 
 `deploy/smoke.sh` exits non-zero on the first failure, so it works as a deployment gate or a
-container health check. It checks eight things including that a syntax error is a 400 rather
-than a 500, and that `/update` still answers 501.
+container health check. It checks thirteen things and changes nothing: content negotiation on
+each endpoint, that a syntax error is a 400 rather than a 500, that the protocol's refusals
+are refusals, and that the graph store answers if it was configured.
 
 Memory goes to RocksDB's block cache plus the term dictionary. Size from `/stats` before
 setting a container limit — a store whose dictionary does not fit will thrash rather than
@@ -295,13 +382,13 @@ Stated plainly, because finding these out in production is worse.
 
 | Gap | Consequence | Workaround |
 |---|---|---|
-| **No Graph Store Protocol** | No REST graph verbs (`PUT /graph?graph=…`) | Use SPARQL Update, which is implemented |
 | **No TLS in the server** | Plain HTTP only | Terminate at the front door. Both configs do |
 | **Timeouts are not absolute** | `--timeout` stops a query that is reading or streaming rows; one blocked inside a single in-memory step is not interruptible | Bound the result size in the query |
 | **No online backup** | Backups need a stop | Above |
 | **Single process per store** | No read replicas over one directory | Run replicas over separate copies |
 | **CORS is `*`** | Any origin may query | Intentional — a SPARQL endpoint is routinely queried from a page elsewhere, and refusing that makes it useless for its most common job. Restrict at the proxy if you need to |
-| **No cost-based planner** | Query order matters: a measured **3×** on a five-pattern query | Write the most selective pattern first. See `DESIGN.md` §16 |
+| **Direct graph identification is off by default** | `PUT /graph/people` answers 400; the parameter form works | Set `--gsp-base` to the base URI the *outside* sees |
+| **No cost-based planner** | Query order matters: a measured **3×** on a five-pattern query | Reordering is applied automatically when statistics are built; write the most selective pattern first if they are not. See `DESIGN.md` §16 |
 | **`--data` reloads every start** | Slow restarts | Load once with `load.sh`, leave `HOLOS_DATA` empty |
 
 ---

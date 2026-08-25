@@ -5,7 +5,7 @@
 //! bypassable through the write path**. An update that could delete what a query could not
 //! see would make every guarantee in §14 conditional on nobody having update rights.
 
-use holos_engine::update::{apply, update, UpdateOutcome};
+use holos_engine::update::{apply, parse, update, with_protocol_dataset, UpdateOutcome};
 use holos_engine::{Engine, EngineError};
 use holos_security::{Modes, Policy, Principal, PrincipalMatch, Rule, Scope, Session};
 use oxrdf::{GraphName, NamedNode, Quad, Term};
@@ -478,4 +478,78 @@ fn remote_load_is_refused_with_a_reason() {
         message.contains("remote fetch is not enabled"),
         "unhelpful message: {message}"
     );
+}
+
+// ---------------------------------------------------------------------------------
+// the protocol's dataset
+// ---------------------------------------------------------------------------------
+
+/// `using-graph-uri` says which graphs the `WHERE` matches against.
+///
+/// Without it a client can only name the dataset inside the update text, which the SPARQL
+/// Protocol explicitly offers as an alternative.
+#[test]
+fn the_protocol_can_name_the_dataset_an_update_matches_against() {
+    let mut engine = engine_with(&[
+        ("alice", "knows", "bob", Some("g1")),
+        ("carol", "knows", "dave", Some("g2")),
+    ]);
+    let mut session = unrestricted(&engine);
+
+    // No graph named in the text: the dataset comes from the request.
+    let mut parsed = parse(
+        "INSERT { <http://example.com/found> <http://example.com/p> ?o } WHERE { ?s <http://example.com/knows> ?o }",
+        None,
+    )
+    .expect("parses");
+    with_protocol_dataset(&mut parsed, vec![ex("g1")], Vec::new()).expect("no conflict");
+
+    let outcome = apply(&mut engine, &mut session, &parsed).expect("applies");
+    assert_eq!(
+        outcome.inserted, 1,
+        "only g1 was in the dataset, so only bob should have been found"
+    );
+}
+
+#[test]
+fn naming_the_dataset_twice_is_refused() {
+    // The protocol says a request carrying both is an error rather than something to
+    // resolve by preferring one. Overriding the text silently would run the update over a
+    // dataset its author did not choose.
+    let mut parsed = parse(
+        "WITH <http://example.com/g1> DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }",
+        None,
+    )
+    .expect("parses");
+    let error = with_protocol_dataset(&mut parsed, vec![ex("g2")], Vec::new())
+        .expect_err("both at once must be refused");
+    assert!(
+        matches!(error, EngineError::BadRequest(_)),
+        "a client error, not a server one: {error:?}"
+    );
+}
+
+#[test]
+fn an_update_with_nothing_to_match_is_left_alone() {
+    // INSERT DATA has no WHERE, so there is no dataset for the parameters to name. The
+    // request is not thereby an error — the parameters simply do not apply.
+    let mut engine = Engine::new();
+    let mut session = unrestricted(&engine);
+    let mut parsed = parse(
+        "INSERT DATA { <http://example.com/a> <http://example.com/p> <http://example.com/b> }",
+        None,
+    )
+    .expect("parses");
+    with_protocol_dataset(&mut parsed, vec![ex("g1")], Vec::new()).expect("not a conflict");
+    assert_eq!(apply(&mut engine, &mut session, &parsed).expect("applies").inserted, 1);
+}
+
+#[test]
+fn no_parameters_change_nothing() {
+    let text = "WITH <http://example.com/g1> DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }";
+    let mut parsed = parse(text, None).expect("parses");
+    let before = format!("{parsed:?}");
+    // An empty dataset is not a conflict even against an update that names its own.
+    with_protocol_dataset(&mut parsed, Vec::new(), Vec::new()).expect("no conflict");
+    assert_eq!(format!("{parsed:?}"), before, "the update must be untouched");
 }

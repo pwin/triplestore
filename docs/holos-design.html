@@ -846,7 +846,7 @@ footer{
 P0 and the security layer are built. <strong>2,876 of 3,014 W3C tests pass, and every one
     of the 138 failures is upstream</strong> &mdash; not one is a HOLOS bug
     (<a href="#s15">&sect;15</a>). Everything above L3 is still design.
-    Storage has two backends behind one trait; SHACL_Engine is vendored and fed from the
+    Storage has two backends behind one trait; SHACL_Engine is adapted and fed from the
     store <strong>3.6&times; cheaper than parsing</strong>, with a native evaluator alongside
     it for incremental revalidation at <strong>161&times;</strong> a full pass. GeoSPARQL and
     a SPARQL-over-HTTP server with a YASGUI console are up, and access policy covers both
@@ -868,7 +868,7 @@ P0 and the security layer are built. <strong>2,876 of 3,014 W3C tests pass, and 
     <div class="st part"><span class="k">L2 Storage</span><span class="v"><span class="mk">&#9681;</span>+ RocksDB</span></div>
     <div class="st part"><span class="k">L3 Query</span><span class="v"><span class="mk">&#9681;</span>evaluates, measured</span></div>
     <div class="st on"><span class="k">Security</span><span class="v"><span class="mk">&#9679;</span>built</span></div>
-    <div class="st on"><span class="k">L4 SHACL</span><span class="v"><span class="mk">&#9679;</span>engine vendored</span></div>
+    <div class="st on"><span class="k">L4 SHACL</span><span class="v"><span class="mk">&#9679;</span>engine adapted</span></div>
     <div class="st on"><span class="k">GeoSPARQL</span><span class="v"><span class="mk">&#9679;</span>43 functions</span></div>
     <div class="st part"><span class="k">L6 Server</span><span class="v"><span class="mk">&#9681;</span>SPARQL + UI</span></div>
     <div class="st part"><span class="k">L5 Holon</span><span class="v"><span class="mk">&#9681;</span>ticks</span></div>
@@ -980,7 +980,7 @@ P0 and the security layer are built. <strong>2,876 of 3,014 W3C tests pass, and 
           <p>The research prototype&rsquo;s scope: <code>SELECT</code>, <code>SELECT DISTINCT</code> and
           <code>ASK</code> over well-designed BGP&nbsp;+&nbsp;<code>OPTIONAL</code> patterns only. Full
           SPARQL lives in the commercial fork. The papers are freely implementable; verify the licence of
-          any code you actually vendor.</p></div>
+          any code you actually adapt.</p></div>
       </article>
 
       <article class="srccard">
@@ -1442,7 +1442,7 @@ P0 and the security layer are built. <strong>2,876 of 3,014 W3C tests pass, and 
         <div class="sev med" title="manageable">&#9632;&#9633;&#9633;</div>
         <div>
           <div class="rt">Licensing</div>
-          <div class="rm">Oxigraph is MIT/Apache-2.0 and the Tentris research repo is Apache-2.0/MIT, so both are reusable; Jena is Apache-2.0, readable as a reference. <b>Mitigation:</b> the hypertrie library&rsquo;s own licence needs checking separately, and a commercial Tentris exists &mdash; implement from the papers rather than vendoring code unless the licence is verified.</div>
+          <div class="rm">Oxigraph is MIT/Apache-2.0 and the Tentris research repo is Apache-2.0/MIT, so both are reusable; Jena is Apache-2.0, readable as a reference. <b>Mitigation:</b> the hypertrie library&rsquo;s own licence needs checking separately, and a commercial Tentris exists &mdash; implement from the papers rather than copying code into this tree unless the licence is verified.</div>
         </div>
       </div>
     </div>
@@ -1659,8 +1659,8 @@ P0 and the security layer are built. <strong>2,876 of 3,014 W3C tests pass, and 
           <tr><td class="k">SPARQL 1.2</td><td class="tabnum">242 / 246</td><td class="tabnum">4</td><td class="tabnum">23</td><td class="tabnum"><strong>0</strong></td></tr>
           <tr><td class="k">SHACL Core</td><td class="tabnum">92 / 97</td><td class="tabnum">5</td><td class="tabnum">1</td><td class="tabnum">5</td></tr>
           <tr><td class="k">SHACL 1.2 Core <span class="mono" style="font-size:10px">native</span></td><td class="tabnum">94 / 138</td><td class="tabnum">44</td><td class="tabnum">0</td><td class="tabnum">44</td></tr>
-          <tr><td class="k">SHACL Core <span class="mono" style="font-size:10px">vendored</span></td><td class="tabnum">90 / 98</td><td class="tabnum">8</td><td class="tabnum">0</td><td class="tabnum">8</td></tr>
-          <tr><td class="k">SHACL 1.2 Core <span class="mono" style="font-size:10px">vendored</span></td><td class="tabnum"><strong>127 / 138</strong></td><td class="tabnum">11</td><td class="tabnum">0</td><td class="tabnum">11</td></tr>
+          <tr><td class="k">SHACL Core <span class="mono" style="font-size:10px">adapted</span></td><td class="tabnum">90 / 98</td><td class="tabnum">8</td><td class="tabnum">0</td><td class="tabnum">8</td></tr>
+          <tr><td class="k">SHACL 1.2 Core <span class="mono" style="font-size:10px">adapted</span></td><td class="tabnum"><strong>127 / 138</strong></td><td class="tabnum">11</td><td class="tabnum">0</td><td class="tabnum">11</td></tr>
         </tbody>
       </table>
     </div>
@@ -1827,7 +1827,7 @@ P0 and the security layer are built. <strong>2,876 of 3,014 W3C tests pass, and 
     comparison on identical inputs is still owed.</p>
 
     <h3>Does the bridge earn its keep?</h3>
-    <p>The vendored engine keeps its own <code>Graph</code>, so &sect;8's claim reduces to a
+    <p>The adapted engine keeps its own <code>Graph</code>, so &sect;8's claim reduces to a
     measurable question: is feeding it from a populated store cheaper than letting it parse
     the file?</p>
 
@@ -1855,7 +1855,7 @@ P0 and the security layer are built. <strong>2,876 of 3,014 W3C tests pass, and 
         <thead><tr><th>Validator</th><th>Prepare</th><th>Validate</th><th>Total</th></tr></thead>
         <tbody>
           <tr><td class="k">Native, live store</td><td class="tabnum">0.001s</td><td class="tabnum">0.823s</td><td class="tabnum">0.824s</td></tr>
-          <tr><td class="k">Vendored, bridged</td><td class="tabnum">0.522s</td><td class="tabnum"><strong>0.224s</strong></td><td class="tabnum">0.746s</td></tr>
+          <tr><td class="k">Adapted, bridged</td><td class="tabnum">0.522s</td><td class="tabnum"><strong>0.224s</strong></td><td class="tabnum">0.746s</td></tr>
         </tbody>
       </table>
     </div>
@@ -2074,7 +2074,7 @@ P0 and the security layer are built. <strong>2,876 of 3,014 W3C tests pass, and 
       </div>
       <div class="esc">
         <div class="h">Rules do not fire</div>
-        <div class="b">SHACL-AF fixpoint evaluation exists in the vendored engine, but only
+        <div class="b">SHACL-AF fixpoint evaluation exists in the adapted engine, but only
         over a bridged snapshot &mdash; so firing rules per tick would mean re-bridging per
         tick. Exactly the gap the immutable engine graph leaves.</div>
         <span class="tag">needs a merge-in-place</span>
@@ -2153,7 +2153,7 @@ P0 and the security layer are built. <strong>2,876 of 3,014 W3C tests pass, and 
     <code>&amp;self</code>/<code>&amp;mut self</code> split is exactly what made it a compile
     error rather than a race.</p>
 
-    <p>YASGUI itself is loaded from a CDN rather than vendored &mdash; a large minified
+    <p>YASGUI itself is loaded from a CDN rather than adapted &mdash; a large minified
     bundle in an RDF engine's tree makes that tree harder to audit. The consequence is stated
     rather than hidden: the console needs network access, the endpoints do not, and
     <code>--no-ui</code> removes it entirely.</p>

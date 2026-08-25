@@ -139,6 +139,9 @@ pub fn validate_in_with(
 /// Focus nodes are *not* re-derived from targets: the caller has already decided which
 /// nodes are stale, and re-resolving targets would walk the whole graph again and undo the
 /// point of asking.
+///
+// HOLOS change: this entry point is an addition, not upstream. Upstream validates every
+// target; incremental revalidation needs to validate a chosen subset. See PROVENANCE.md.
 pub fn validate_nodes(
     work: &[(ShapeId, TermId)],
     data: &Graph,

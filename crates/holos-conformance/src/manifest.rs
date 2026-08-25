@@ -69,6 +69,11 @@ pub struct TestEntry {
     pub result: Option<PathBuf>,
     /// `ut:request` — the update text, for `UpdateEvaluationTest`.
     pub update_request: Option<PathBuf>,
+    /// The scripted HTTP conversation, for the protocol suites.
+    ///
+    /// Present only on `GraphStoreProtocolTest` and `ProtocolTest`, whose `mf:action` is
+    /// an `ht:Connection` rather than a query.
+    pub script: Option<crate::protocol::Script>,
     /// `qt:serviceData` — federated endpoints, as `(endpoint IRI, local data file)`.
     ///
     /// The federated-query suite does not require a live endpoint: each `SERVICE` target
@@ -180,6 +185,7 @@ fn load_into(
             result: None,
             update_request: None,
             service_data: Vec::new(),
+            script: None,
             result_graph_data: Vec::new(),
             result_data: None,
             base: assumed_base.clone(),
@@ -205,11 +211,25 @@ fn load_into(
                     .and_then(|s| file_url_to_path(&s));
                 collect_graph_data(&graph, action, &assumed_base, &mut test.graph_data);
                 collect_service_data(&graph, action, &mut test.service_data);
+                // A protocol test's action is an ht:Connection. Reading it here keeps the
+                // runner from having to re-parse the manifest.
+                if object(&graph, action, &NamedNode::new_unchecked(
+                    "http://www.w3.org/2011/http#requests",
+                ))
+                .is_some()
+                {
+                    test.script = crate::protocol::read_script(&graph, action).ok();
+                }
                 test.needs_entailment =
                     object(&graph, action, &sd("entailmentRegime")).is_some();
             }
             _ => {}
         }
+        // A SPARQL Protocol test hangs its `ut:graphData` off the *test*, not the action:
+        // the graphs are the server's dataset, set up before the conversation starts,
+        // rather than an argument to any one request.
+        collect_graph_data(&graph, subject, &assumed_base, &mut test.graph_data);
+
         match object(&graph, subject, &mf("result")) {
             // A plain file: a result set or a graph.
             Some(Term::NamedNode(n)) => test.result = file_url_to_path(n.as_str()),

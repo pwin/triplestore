@@ -16,7 +16,7 @@ identical insertion sequence, and the RDF suites run through both.
 
 L4 validates against the store's own indexes, and **incremental revalidation is 161×
 faster than a full pass** on a 400k-triple graph — the mechanism §8 needs for the holon
-Boundary to gate a commit. SHACL_Engine itself is now vendored and adapted (§8), which is
+Boundary to gate a commit. SHACL_Engine itself is now adapted (§8), which is
 what §8 planned from the start.
 
 L6 is up: **SPARQL 1.2 over HTTP with a YASGUI console**, and access policy applies to it
@@ -65,7 +65,7 @@ The honest counter-position is in §12.
 | **Oxigraph** | Crate decomposition (`oxrdf`, `oxttl`, `oxrdfio`, `oxjsonld`, `spargebra`, `sparesults`, `oxsdatatypes`) — conformance-heavy, boring, already correct, MIT/Apache-2.0. The 6+3 column-family index layout. Preliminary RDF 1.2 / SPARQL 1.2 support already in tree. | The evaluator. The project says plainly that "SPARQL query evaluation has not been optimized yet": tuple-at-a-time iterators, pairwise index-nested-loop joins, 128-bit `StrHash` term keys, no cost model. |
 | **pwin/SHACL_Engine** | Interned terms as integers; three fully-sorted flat arrays (SPO/POS/OSP) with binary search instead of hash maps; **compile shapes once into flat IR**; deterministic, byte-reproducible reports; 418/426 W3C conformance. | Its structural limits, all of which are artefacts of being a *library* rather than part of a store: whole graph must be resident, loading dominates runtime (validation is under 25% of wall clock at 100k instances), named graphs flattened into one, single-pass rules needing `--iterate-rules N`. A store fixes all four for free. |
 | **Apache Jena 5.5** | The RDF 1.2 model decisions: `StatementTerm` as a distinct `RDFNode`; **triple terms permitted in object position only** (narrower than the old RDF-star CG); reifiers as ordinary terms via `Model.createReifier`. Also: the Graph/DatasetGraph/Model layering, ARQ's extension points, TDB2's MVCC (single writer, many readers). | The JVM, and the object-per-term memory model. |
-| **Tentris** | RDF as a sparse order-3/4 boolean tensor; the **hypertrie**, which gives constant-time slices on *any* dimension combination and therefore subsumes all six permutation indexes in one structure; BGP → Einstein summation → worst-case-optimal multi-join; hash-consing of identical subtries (2022); **incremental insert/delete** (ISWC 2025) which removes the historical "bulk-load only" objection. | The research prototype's scope: it answers `SELECT` / `SELECT DISTINCT` / `ASK` over well-designed BGP + `OPTIONAL` patterns only. Full SPARQL lives in the commercial fork. Papers are freely implementable; **verify the licence of any code you actually vendor**. |
+| **Tentris** | RDF as a sparse order-3/4 boolean tensor; the **hypertrie**, which gives constant-time slices on *any* dimension combination and therefore subsumes all six permutation indexes in one structure; BGP → Einstein summation → worst-case-optimal multi-join; hash-consing of identical subtries (2022); **incremental insert/delete** (ISWC 2025) which removes the historical "bulk-load only" objection. | The research prototype's scope: it answers `SELECT` / `SELECT DISTINCT` / `ASK` over well-designed BGP + `OPTIONAL` patterns only. Full SPARQL lives in the commercial fork. Papers are freely implementable; **verify the licence of any code you actually adapt**. |
 | **Holon CG / "What is a Holon"** | The four-layer decomposition — **Scene** (mutable current state), **Boundary** (SHACL shapes + rules = the legal transitions), **Event** (append-only provenance/causality), **Projection** (the externally visible view). And the framing of a graph as a *state machine that ticks*, where agents read projections and never touch the scene. | The Game-of-Life metaphor as an implementation guide, and any commitment to a vocabulary that is still a CG draft. Build the mechanism; keep the vocabulary swappable. |
 | **RocksDB** | LSM substrate: column families, prefix bloom filters, `SstFileWriter` + `IngestExternalFile` for bulk load, merge operators for counters, checkpoints for cheap consistent snapshots and branches, BlobDB value separation, and user-defined timestamps for MVCC + time travel. | The assumption that RocksDB should hold the *hot join structure*. An LSM is excellent as a system of record and poor at the pointer-chasing random access a WCO trie join needs. See §6.2. |
 
@@ -268,11 +268,11 @@ surface as movable until CR.
 > **Built, and it ended up as two validators rather than one.**
 >
 > `crates/holos-shacl-engine` is [pwin/SHACL_Engine](https://github.com/pwin/SHACL_Engine)
-> vendored and adapted — the plan this section always described. `crates/holos-shacl`
+> adapted — the plan this section always described. `crates/holos-shacl`
 > supplies the store bridge, the incremental planner, and a `Validate` trait that hides
 > which validator is in use.
 >
-> | | Vendored engine | Native evaluator |
+> | | Adapted engine | Native evaluator |
 > |---|---|---|
 > | Coverage | SHACL Core, SPARQL constraints, node expressions, SHACL-AF rules, inference | SHACL Core |
 > | W3C SHACL 1.2 Core | **127/138** | 94/138 |
@@ -280,7 +280,7 @@ surface as movable until CR.
 > | Reads | a bridged snapshot | the live store |
 > | Incremental revalidation | no | **yes, 161×** |
 >
-> The split is forced by one fact: the vendored engine's `Graph` is immutable, so a delta
+> The split is forced by one fact: the adapted engine's `Graph` is immutable, so a delta
 > cannot be pushed into it cheaply and a validator that re-bridges on every commit is not
 > incremental however good its coverage. Hence **the engine for coverage, the native
 > evaluator for the write path** — and a named gap, since the write path then checks fewer
@@ -331,7 +331,7 @@ answers, which is the current failure mode.
 > - **A tick is not atomic.** A refused commit is undone by a compensating write, not a
 >   rollback, and a crash between applying the delta and writing the event leaves the two
 >   disagreeing. Closing this is what §6.1's MVCC and checkpoints are for.
-> - **Boundary rules do not fire.** SHACL-AF fixpoint evaluation exists in the vendored
+> - **Boundary rules do not fire.** SHACL-AF fixpoint evaluation exists in the adapted
 >   engine but only over a bridged snapshot, so firing rules per tick would mean re-bridging
 >   per tick — the gap §8 names.
 > - **Projections recompute rather than maintain.** `Regime::Maintained` is *refused*, not
@@ -413,7 +413,7 @@ pointer in that type would have made the whole store un-shareable.
 
 ### The console
 
-YASGUI is loaded from a CDN rather than vendored: it is a large JavaScript bundle with its
+YASGUI is loaded from a CDN rather than adapted: it is a large JavaScript bundle with its
 own licence and release cadence, and a minified copy in an RDF engine's tree makes that tree
 harder to audit. The consequence is stated rather than hidden — **the console needs network
 access; the endpoints do not**, and `--no-ui` removes it entirely.
@@ -438,7 +438,7 @@ the measurement.
 | **P3** | Hypertrie hot tier + WCO multi-join + hybrid planner | Wins on cyclic and join-heavy queries without regressing star and chain queries; memory overhead measured and within budget. **Gated on P2's planner**, not just its statistics — §13 Q2 compares against a *well-planned* binary join, which does not exist yet. |
 | **P4** ◐ | SHACL subsystem on native indexes + incremental revalidation | *Core built.* 92/97 W3C SHACL Core (§15). Revalidation measured at **161×** a full pass, so the cost does track the delta (§16). Owes SPARQL-based constraints, SHACL-AF rules, and the SHACL 1.2 additions. |
 | **P5** ◐ | Holon layer: versioned partitions, event log, IVM projections, time travel | *Walking skeleton built.* Scene, boundary, event log and the tick all work, validated incrementally at 41× a full pass (§16). Owes: atomicity (needs §6.1's MVCC), boundary rules to fixpoint, incrementally maintained projections, and time travel. |
-| **P6** ◐ | HTTP protocol server, PyO3/WASM bindings, text + vector module | *Server built* — SPARQL 1.2 Protocol, YASGUI console, policy enforced per request (§10). Owes the Graph Store Protocol, SPARQL Update, bindings and the text/vector module. |
+| **P6** ◐ | HTTP protocol server, PyO3/WASM bindings, text + vector module | *Server built* — SPARQL 1.2 Protocol (**34/34**), Graph Store Protocol (**13/13**), SPARQL Update, YASGUI console, PyO3 bindings, policy enforced per request (§10). Owes WASM and the text/vector module. |
 
 P0–P2 is a conventional, low-risk, well-understood engine. P3–P5 is the research content. Structure
 the work so that abandoning P3 or P5 still leaves a usable product — that is the main insurance
@@ -471,9 +471,9 @@ Concepts (CR, 7 Apr 2026), keep the SPARQL surface behind a version flag — the
 declaration exists for exactly this — and treat holon vocabulary as configuration.
 
 **Licensing.** Oxigraph is MIT/Apache-2.0 and the Tentris research repo is Apache-2.0/MIT, so both
-are reusable; Jena is Apache-2.0 (readable as a reference, not vendorable into a differently
+are reusable; Jena is Apache-2.0 (readable as a reference, not reusable in-tree into a differently
 licensed codebase without care). The hypertrie library's own licence needs checking separately, and
-a commercial Tentris exists — **implement from the papers rather than vendoring code unless the
+a commercial Tentris exists — **implement from the papers rather than copying code into this tree unless the
 licence is verified.**
 
 **"Why does this exist?"** The strongest risk. QLever is faster today; Oxigraph is more mature;
@@ -666,19 +666,22 @@ Reads are only half of it.
 ## 15. Conformance
 
 `cargo test -p holos-conformance`, against the `w3c/rdf-tests` suites fetched by
-`scripts/fetch-testsuites.sh`. The suites are not vendored; without them these tests skip,
+`scripts/fetch-testsuites.sh`. The suites are not committed to this tree; without them these tests skip,
 so a fresh checkout still builds green.
 
 | Suite | Passing | Failing | Skipped | HOLOS bugs |
 |---|---|---|---|---|
 | RDF 1.1 | 987 / 1041 | 54 | 0 | **0** |
 | RDF 1.2 | 1326 / 1406 | 80 | 0 | **0** |
-| SPARQL 1.1 | 321 / 321 | 0 | 304 | **0** |
-| SPARQL 1.2 | 242 / 246 | 4 | 23 | **0** |
+| SPARQL 1.1 | 523 / 524 | 1 | 101 | **0** |
+| SPARQL 1.2 | 262 / 266 | 4 | 3 | **0** |
+| SPARQL 1.0 | 262 / 263 | 1 | 20 | **0** |
+| SPARQL Protocol | **34 / 34** | 0 | 0 | **0** |
+| Graph Store Protocol | **13 / 13** | 0 | 0 | **0** |
 | SHACL Core | 92 / 97 | 5 | 1 | 5 |
 | SHACL 1.2 Core (native) | 94 / 138 | 44 | 0 | 44 |
-| SHACL Core (vendored engine) | 90 / 98 | 8 | 0 | 8 |
-| SHACL 1.2 Core (vendored engine) | **127 / 138** | 11 | 0 | 11 |
+| SHACL Core (adapted engine) | 90 / 98 | 8 | 0 | 8 |
+| SHACL 1.2 Core (adapted engine) | **127 / 138** | 11 | 0 | 11 |
 
 ### What is actually under test
 
@@ -701,9 +704,77 @@ ships with — and compares HOLOS against it:
 - both give the same answer → the storage is faithful and the gap is in the evaluator
 - the answers differ → HOLOS lost or changed something, and that is a real bug
 
-All 25 SPARQL 1.1 tests that fail against their expected results agree with the reference
-storage, so all 25 are evaluator behaviour. This is the differential rig §12 asks for against
-the future Tier B hypertrie, built early because it is exactly as useful now.
+Every SPARQL 1.1 test that fails against its expected results agrees with the reference
+storage, so each is evaluator behaviour rather than a storage fault. This is the differential
+rig §12 asks for against the future Tier B hypertrie, built early because it is exactly as
+useful now.
+
+### The protocol suites need a server, so they get one
+
+`GraphStoreProtocolTest` and `ProtocolTest` are not queries. Each is a scripted HTTP
+conversation in the W3C `ht:` vocabulary — a list of requests with methods, paths, headers,
+bodies and sets of acceptable response statuses. Short-circuiting the socket and calling the
+handler directly would test the handler rather than the server, which is not what these
+tests are for.
+
+So `cargo test -p holos-conformance --test protocol` and `--test sparql_protocol` start the
+real `holos-server` binary on an ephemeral port, over an empty in-memory store, and replay
+each conversation against it. A fresh server per test: the scripts build on their own
+effects — `PUT` then `GET` then `DELETE` on one graph — so a store carried between tests
+would make results depend on execution order.
+
+Three things the manifests leave to the runner, each decided in `tests/sparql_protocol.rs`:
+
+* **The endpoint.** Every path starts `/sparql/`, and the manifest says in as many words
+  that a runner substitutes its own. This server splits query from update, so the choice
+  follows what the request carries — an `update` parameter or an update media type.
+* **The dataset.** `ut:graphData` names graphs the server must already hold. They are loaded
+  over the Graph Store Protocol, which is both convenient and one more exercise of it.
+* **The status.** Expectations are whole classes (`hts:StatusCode2xx`), because the protocol
+  leaves the choice within a class open.
+
+Both suites went from *nothing run* to fully passing, and getting there found real gaps
+rather than harness problems. What the Graph Store suite exposed: `DELETE` emptied a graph
+but left its catalogue entry, so a second `DELETE` could not answer 404; `POST` to the
+endpoint itself was rejected rather than minting a graph and returning `Location`; and a
+multipart upload stored only its first part — two documents in, one document stored, and a
+204 saying it had worked. What the SPARQL Protocol suite exposed is in the list below.
+
+### The protocol suite found six ways to be too permissive
+
+Twelve of the thirty-four failed on the first run. Four groups, all real:
+
+| What the server did | What the protocol requires |
+|---|---|
+| Refused `using-graph-uri` outright | Name the update's dataset from the request |
+| Could not parse `CONSTRUCT { <s> <p> 1 }` | Resolve relative IRIs against a service base URI |
+| Answered two `query=` parameters | 400 — the request is ambiguous, not a list |
+| Ran a POST body with no `Content-Type` | 400 — a form body and a query body are indistinguishable without one |
+| Decoded a `charset=UTF-16` body as UTF-8 | 400 — the protocol fixes both media types at UTF-8 |
+| Accepted `using-graph-uri` beside `WITH` | 400 — carrying both is a client error, not a precedence question |
+
+The first is the substantial one. `using-graph-uri` is applied to the *parsed* update rather
+than by editing its text, which is what makes the last row possible: an operation that
+already carries `USING` or `WITH` is visible as such, so the conflict can be reported instead
+of silently resolved. Overriding either way would run an update over a dataset its author did
+not choose.
+
+### A checkout can corrupt a test suite
+
+Worth recording because it cost a morning and would have gone on being invisible.
+
+Two Graph Store tests failed with 415 on a request whose `Content-Type` was plainly correct.
+The cause was neither the server nor the harness: Git for Windows ships with
+`core.autocrlf=true`, and the fixtures had been checked out with every LF rewritten to CRLF.
+The manifest bodies contain Turtle `\r` escapes — deliberate, because the multipart format
+requires CRLF — so each line ending arrived as **CR CR LF**, and the multipart parser could
+not find a header separator.
+
+The fixtures are byte-exact test data, and a checkout that rewrites them changes what the
+suite asserts. `scripts/fetch-testsuites.sh` and its PowerShell twin now pin
+`core.autocrlf=false` and `core.eol=lf`, re-checkout an existing clone under the new setting,
+and warn if a CR survives anyway. Re-running every suite afterwards showed no other result
+had been affected — but nothing had been *checking*, which was the actual problem.
 
 ### SHACL is measured differently, and the failures are ours
 
@@ -728,10 +799,20 @@ SHACL calls that a violation — a datatype IRI comparison alone is not enough.
 
 ### The skips are not a hiding place
 
-304 SPARQL 1.1 tests are skipped, and each skip names a roadmap item rather than a mystery:
-SPARQL Update and the Graph Store Protocol are L6; 42 entailment tests need the reasoner that
-is L4 (§8); federated queries need a service handler; a handful encode their expected results
-in the old DAWG `rs:ResultSet` RDF vocabulary, which the harness does not read.
+101 SPARQL 1.1 tests are skipped, down from 304, and each skip names a roadmap item rather
+than a mystery: **70** need an entailment regime, which is the reasoner at L4 (§8); **25**
+are upstream evaluator behaviour, confirmed by the oracle; **3** are `CSVResultFormatTest`
+and **3** `ServiceDescriptionTest`, neither of which the harness reads yet.
+
+The 203 that used to be skipped and now run are SPARQL Update (94), the two protocol suites
+(47), update syntax (55), and the DAWG `rs:ResultSet` result encoding — which took SPARQL 1.0
+from 45% coverage to 93% by itself.
+
+`cargo run --release -p holos-conformance --example coverage` prints coverage beside
+correctness, because a suite that skips 300 of 625 tests can still report 100%. It takes the
+protocol suites' results from their ratcheted baselines rather than re-running them, and says
+so; an absent baseline counts as a skip, since claiming coverage from a run that did not
+happen is the dishonesty the example exists to prevent.
 
 ### The ratchet
 
@@ -812,7 +893,7 @@ comparison against SHACL_Engine on identical inputs is still owed.
 
 ### Does the bridge earn its keep?
 
-The vendored engine keeps its own `Graph`, so §8's claim reduces to a measurable question:
+The adapted engine keeps its own `Graph`, so §8's claim reduces to a measurable question:
 is feeding it from a populated store cheaper than letting it parse the file?
 
 | | Time |
@@ -834,7 +915,7 @@ End to end on the same 400k graph, both finding exactly the same 20,000 violatio
 | | Prepare | Validate | Total |
 |---|---|---|---|
 | Native, live store | 0.001s | 0.823s | 0.824s |
-| Vendored, bridged | 0.522s | **0.224s** | 0.746s |
+| Adapted, bridged | 0.522s | **0.224s** | 0.746s |
 
 The engine validates **3.7× faster** — flat sorted arrays of `u32` beat a store-backed scan —
 and spends the difference on bridging. It wins on total time *and* on coverage, which is why

@@ -88,8 +88,8 @@ VALIDATE
     --shapes <FILE>          Read shapes from a separate file, kept in its own graph.
                              Without it the shapes are expected in the data itself.
     --report                 Print the validation report as N-Triples.
-    --engine <NAME>          native (default) or vendored. 'native' reads the live store and
-                             supports incremental revalidation; 'vendored' bridges the store
+    --engine <NAME>          native (default) or adapted. 'native' reads the live store and
+                             supports incremental revalidation; 'adapted' bridges the store
                              into the adapted SHACL_Engine, which covers far more of SHACL.
 
 OPTIONS
@@ -366,7 +366,9 @@ fn validate(engine: &mut Engine, opts: &Options) -> Result<()> {
         }
     };
 
-    if opts.engine.as_deref() == Some("vendored") {
+    // "vendored" was the earlier spelling; still accepted so a script written against it
+    // does not break on a wording change.
+    if matches!(opts.engine.as_deref(), Some("adapted" | "vendored")) {
         let started = std::time::Instant::now();
         let mut run = holos_shacl::engine::EngineRun::prepare(
             engine.store(),

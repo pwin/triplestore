@@ -14,6 +14,7 @@ members = [
     "crates/holos-conformance",
     "crates/holos-python",
     "crates/holos-bench",
+    "crates/holos-tabular",
 ]
 
 [workspace.package]
@@ -57,6 +58,7 @@ holos-shacl = { path = "crates/holos-shacl", version = "0.0.1" }
 holos-shacl-engine = { path = "crates/holos-shacl-engine", version = "0.0.1" }
 holos-holon = { path = "crates/holos-holon", version = "0.0.1" }
 holos-stats = { path = "crates/holos-stats", version = "0.0.1" }
+holos-tabular = { path = "crates/holos-tabular", version = "0.0.1" }
 
 # --- everything else
 anyhow = "1"

@@ -1,7 +1,7 @@
 //! Does feeding the engine from a populated store actually beat parsing the file?
 //!
 //! `DESIGN.md` §8 rests on the claim that a validator sharing the store's data does not
-//! pay the load cost again. The vendored engine still needs its own `Graph`, so the claim
+//! pay the load cost again. The adapted engine still needs its own `Graph`, so the claim
 //! reduces to a measurable question: is bridging from the store cheaper than the engine's
 //! own loader, and by how much?
 //!

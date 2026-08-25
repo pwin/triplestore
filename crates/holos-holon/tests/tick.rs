@@ -11,7 +11,7 @@ use holos_holon::{registry, tick, Admission, Delta, Holon};
 use holos_security::{Modes, Policy, Principal, PrincipalMatch, Rule, Scope, Session};
 use holos_store::{GraphFilter, Store};
 use oxrdf::vocab::{rdf, xsd};
-use oxrdf::{Literal, NamedNode, Quad, Triple};
+use oxrdf::{Literal, NamedNode, Triple};
 use oxrdfio::{RdfFormat, RdfParser};
 
 fn ex(name: &str) -> NamedNode {

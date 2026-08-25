@@ -632,7 +632,7 @@ SELECT ?site WHERE {
 
   <div class="grid g2">
     <div class="cell">
-      <div class="h">vendored &mdash; coverage</div>
+      <div class="h">adapted &mdash; coverage</div>
       <div class="b">An adaptation of <b>SHACL_Engine</b>, bridged onto the store's own
       dictionary so it never parses a file. <b>127/138</b> on SHACL 1.2 Core against the
       native evaluator's 94. Use it for a full validation.</div>
@@ -646,7 +646,7 @@ SELECT ?site WHERE {
   </div>
 
 <pre><code>holos validate --data data.nt --shapes shapes.ttl              # native
-holos validate --data data.nt --shapes shapes.ttl --engine vendored
+holos validate --data data.nt --shapes shapes.ttl --engine adapted
 holos validate --data data.nt --shapes shapes.ttl --report     # N-Triples report</code></pre>
 
   <h3>Incremental revalidation</h3>
@@ -848,7 +848,7 @@ GET  /health             liveness</code></pre>
         <tr><td class="k">holos query</td><td>Run SPARQL, with policy flags and <code>--audit</code></td></tr>
         <tr><td class="k">holos stats</td><td>Load and report counts, dictionary size, predicate histogram</td></tr>
         <tr><td class="k">holos dump</td><td>Emit what the principal may see, as RDF. Defaults to N-Quads</td></tr>
-        <tr><td class="k">holos validate</td><td>SHACL, native or vendored, with timings</td></tr>
+        <tr><td class="k">holos validate</td><td>SHACL, native or adapted, with timings</td></tr>
         <tr><td class="k">holos-server</td><td>SPARQL 1.2 Protocol over HTTP + console</td></tr>
       </tbody>
     </table>

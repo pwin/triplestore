@@ -1,7 +1,7 @@
 //! The YASGUI console.
 //!
 //! Served at `/`, pointed at this server's own `/query` endpoint. YASGUI itself is loaded
-//! from a CDN rather than vendored: it is a large JavaScript bundle with its own licence
+//! from a CDN rather than adapted: it is a large JavaScript bundle with its own licence
 //! and release cadence, and checking a minified copy into an RDF engine's source tree
 //! makes that tree harder to audit, not easier.
 //!

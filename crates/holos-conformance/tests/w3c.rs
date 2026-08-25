@@ -10,7 +10,7 @@
 //! HOLOS_UPDATE_CONFORMANCE=1 cargo test -p holos-conformance
 //! ```
 //!
-//! The suites are not vendored. Fetch them with `scripts/fetch-testsuites.sh` (or the
+//! The suites are not committed to this tree. Fetch them with `scripts/fetch-testsuites.sh` (or the
 //! `.ps1`); without them these tests skip rather than fail, so a fresh checkout still
 //! builds and tests green.
 
@@ -231,11 +231,11 @@ fn shacl12_core() {
     run_shacl_suite("shacl12-core", "shacl12-test-suite");
 }
 
-/// The same SHACL suites, through the vendored engine rather than the native evaluator.
+/// The same SHACL suites, through the adapted engine rather than the native evaluator.
 ///
 /// Running both against the same expectations is the only honest way to compare them:
 /// the number that matters is not "how many does each pass" in isolation but how much
-/// coverage the vendored engine actually adds for the bridging cost it charges.
+/// coverage the adapted engine actually adds for the bridging cost it charges.
 fn run_shacl_suite_with(name: &str, relative: &str, engine: holos_conformance::shacl::Engine) {
     use holos_conformance::shacl;
     let Some(root) = shacl::suite_root() else {
@@ -255,19 +255,19 @@ fn run_shacl_suite_with(name: &str, relative: &str, engine: holos_conformance::s
 }
 
 #[test]
-fn shacl_core_vendored() {
+fn shacl_core_adapted() {
     run_shacl_suite_with(
-        "shacl-core-vendored",
+        "shacl-core-adapted",
         "data-shapes-test-suite",
-        holos_conformance::shacl::Engine::Vendored,
+        holos_conformance::shacl::Engine::Adapted,
     );
 }
 
 #[test]
-fn shacl12_core_vendored() {
+fn shacl12_core_adapted() {
     run_shacl_suite_with(
-        "shacl12-core-vendored",
+        "shacl12-core-adapted",
         "shacl12-test-suite",
-        holos_conformance::shacl::Engine::Vendored,
+        holos_conformance::shacl::Engine::Adapted,
     );
 }

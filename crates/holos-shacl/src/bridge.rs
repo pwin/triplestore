@@ -1,4 +1,4 @@
-//! Feeding the vendored engine from a HOLOS store.
+//! Feeding the adapted engine from a HOLOS store.
 //!
 //! `DESIGN.md` §8 plans one change to SHACL_Engine: the validator should read the store's
 //! own dictionary and indexes instead of loading a private copy. This is that change, and

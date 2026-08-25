@@ -182,7 +182,11 @@ mod tests {
         NamedNode::new_unchecked(format!("http://example.com/{s}"))
     }
 
-    fn record(version: u64) -> (Holon, NamedNode, Vec<(Operation, Triple)>) {
+    /// The fixed parts of a tick: who, which holon, and one change.
+    ///
+    /// The version is not among them — each test sets its own on the `TickRecord`, and
+    /// taking it here as well meant every caller passed the same number twice.
+    fn record() -> (Holon, NamedNode, Vec<(Operation, Triple)>) {
         let holon = Holon::new(NamedNode::new_unchecked("urn:holon:people"));
         let principal = NamedNode::new_unchecked("urn:holos:principal:alice");
         let changes = vec![(
@@ -198,7 +202,7 @@ mod tests {
 
     #[test]
     fn a_tick_records_who_when_and_what() {
-        let (holon, principal, changes) = record(1);
+        let (holon, principal, changes) = record();
         let quads = to_quads(&TickRecord {
             holon: &holon,
             version: 1,
@@ -222,7 +226,7 @@ mod tests {
 
     #[test]
     fn each_change_is_a_reified_triple_term() {
-        let (holon, principal, changes) = record(7);
+        let (holon, principal, changes) = record();
         let quads = to_quads(&TickRecord {
             holon: &holon,
             version: 7,
@@ -247,7 +251,7 @@ mod tests {
     fn rendering_is_deterministic() {
         // Two renderings of the same tick must be byte-identical, or the log cannot be
         // diffed and nobody will audit it.
-        let (holon, principal, changes) = record(3);
+        let (holon, principal, changes) = record();
         let build = || {
             to_quads(&TickRecord {
                 holon: &holon,
@@ -270,7 +274,7 @@ mod tests {
     fn a_rejected_tick_is_still_recorded() {
         // The log records attempts, not just successes: a boundary that silently discards
         // what it refused leaves no evidence that anything was tried.
-        let (holon, principal, changes) = record(2);
+        let (holon, principal, changes) = record();
         let quads = to_quads(&TickRecord {
             holon: &holon,
             version: 2,

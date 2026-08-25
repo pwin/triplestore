@@ -15,7 +15,7 @@
 //! Steps 1, 3 and 4 are real, and step 3 is *incremental* — it uses the revalidation of §8,
 //! which is the whole reason that was built. The rest is honest about itself:
 //!
-//! - **Step 2 does not run.** Boundary rules need SHACL-AF fixpoint evaluation. The vendored
+//! - **Step 2 does not run.** Boundary rules need SHACL-AF fixpoint evaluation. The adapted
 //!   engine has it, but only over a bridged snapshot, so firing rules per tick would mean
 //!   re-bridging per tick. Named in §8 as the gap the immutable engine graph leaves.
 //! - **Step 5 recomputes rather than maintains.** §9 restricts incremental maintenance to a
@@ -188,7 +188,7 @@ pub fn tick(
     }
 
     // --- 2. boundary rules to fixpoint --------------------------------------------------
-    // Not run. See the module note: SHACL-AF fixpoint evaluation exists in the vendored
+    // Not run. See the module note: SHACL-AF fixpoint evaluation exists in the adapted
     // engine but only over a bridged snapshot, and re-bridging per tick would cost the
     // whole graph. Left visible rather than silently skipped.
 
