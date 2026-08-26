@@ -35,7 +35,10 @@ rocksdb = []
 [project.urls]
 Homepage = "https://github.com/pwin/triplestore"
 Repository = "https://github.com/pwin/triplestore"
-Documentation = "https://github.com/pwin/triplestore/blob/main/crates/holos-python/README.md"
+# `HEAD` rather than a branch name: GitHub resolves it to whatever the default branch
+# is, so this survives the default being renamed. It was written as `main`, which this
+# repository has never had, and the link 404d.
+Documentation = "https://github.com/pwin/triplestore/blob/HEAD/crates/holos-python/README.md"
 Changelog = "https://github.com/pwin/triplestore/releases"
 Issues = "https://github.com/pwin/triplestore/issues"
 
