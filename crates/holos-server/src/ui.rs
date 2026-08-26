@@ -406,8 +406,14 @@ mod tests {
     fn the_map_plugin_is_registered_and_leaflet_is_loaded() {
         let page = console("/query", "HOLOS");
         assert!(page.contains(r#"Yasgui.Yasr.registerPlugin("Map", HolosMap)"#));
-        assert!(page.contains("leaflet@1.9.4/dist/leaflet.js"), "the script is missing");
-        assert!(page.contains("leaflet@1.9.4/dist/leaflet.css"), "the stylesheet is missing");
+        assert!(
+            page.contains("leaflet@1.9.4/dist/leaflet.js"),
+            "the script is missing"
+        );
+        assert!(
+            page.contains("leaflet@1.9.4/dist/leaflet.css"),
+            "the stylesheet is missing"
+        );
     }
 
     #[test]

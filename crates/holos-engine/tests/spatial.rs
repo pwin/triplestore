@@ -172,3 +172,217 @@ fn disjointness_cannot_be_filtered_by_boxes() {
     // why routing it through the index would be wrong.
     assert!(!can_filter("sfDisjoint"));
 }
+
+// ---------------------------------------------------------------------------------
+// routing: the index must narrow the scan without changing the answer
+// ---------------------------------------------------------------------------------
+
+use holos_engine::QueryOptions;
+use holos_security::Session;
+use spareval::QueryResults;
+use std::sync::Arc;
+
+/// Runs a query with and without the spatial index, and returns both answers.
+///
+/// Every assertion below compares the two. An index can only go wrong by *omitting* rows,
+/// and an omission is invisible unless something holds the two answers side by side.
+fn both_ways(engine: &Engine, query: &str) -> (Vec<String>, Vec<String>) {
+    let session = Session::unrestricted(engine.store()).expect("session");
+    let view = engine.view(&session);
+    let index = Arc::new(SpatialIndex::build(engine.store()).expect("build"));
+
+    let plain = run(&view, query, &QueryOptions::new());
+    let routed = run(&view, query, &QueryOptions::new().with_spatial(index));
+    (plain, routed)
+}
+
+fn run(view: &holos_engine::view::DatasetView<'_>, query: &str, options: &QueryOptions) -> Vec<String> {
+    let (results, _) = Engine::query_with(view, query, options).expect("query");
+    let mut rows: Vec<String> = match results {
+        QueryResults::Solutions(iter) => iter
+            .map(|s| {
+                let s = s.expect("solution");
+                s.iter()
+                    .map(|(v, t)| format!("{}={t}", v.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect(),
+        _ => panic!("expected solutions"),
+    };
+    rows.sort();
+    rows
+}
+
+const PREFIXES: &str = "PREFIX ex:  <http://example.com/>\n\
+                        PREFIX geo: <http://www.opengis.net/ont/geosparql#>\n";
+
+#[test]
+fn routing_does_not_change_the_answer() {
+    let engine = engine();
+    // A window over part of the grid. The index should narrow it substantially, and must
+    // return exactly what the unindexed query returns.
+    let query = format!(
+        "{PREFIXES} SELECT ?s WHERE {{ ?s geo:sfWithin \
+         \"POLYGON((0 0, 3 0, 3 3, 0 3, 0 0))\"^^geo:wktLiteral }}"
+    );
+    let (plain, routed) = both_ways(&engine, &query);
+    assert_eq!(plain, routed, "the spatial index changed the answer");
+    assert!(!plain.is_empty(), "the query should match some points");
+}
+
+#[test]
+fn routing_agrees_across_relations_and_windows() {
+    // Several relations and several windows, because a routing bug is easy to have in one
+    // relation and not another — `can_filter` is a table, and tables get edited.
+    let engine = engine();
+    for relation in ["sfWithin", "sfIntersects", "sfContains", "sfDisjoint", "sfTouches"] {
+        for window in [
+            "POLYGON((0 0, 3 0, 3 3, 0 3, 0 0))",
+            "POLYGON((-10 -10, 20 -10, 20 20, -10 20, -10 -10))",
+            "POLYGON((100 100, 101 100, 101 101, 100 101, 100 100))",
+        ] {
+            let query = format!(
+                "{PREFIXES} SELECT ?s WHERE {{ ?s geo:{relation} \"{window}\"^^geo:wktLiteral }}"
+            );
+            let (plain, routed) = both_ways(&engine, &query);
+            assert_eq!(
+                plain, routed,
+                "{relation} over {window} disagreed between indexed and unindexed"
+            );
+        }
+    }
+}
+
+#[test]
+fn disjointness_is_answered_correctly_despite_not_being_routed() {
+    // The relation the index must not narrow. It still has to give the right answer, and
+    // that answer is large — nearly everything is disjoint from a small window.
+    let engine = engine();
+    let query = format!(
+        "{PREFIXES} SELECT ?s WHERE {{ ?s geo:sfDisjoint \
+         \"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))\"^^geo:wktLiteral }}"
+    );
+    let (plain, routed) = both_ways(&engine, &query);
+    assert_eq!(plain, routed);
+    assert!(
+        plain.len() > 50,
+        "most geometries are disjoint from a unit square; got {}",
+        plain.len()
+    );
+}
+
+#[test]
+fn a_stale_index_is_refused_rather_than_trusted() {
+    // The safety property. An index built before a write is missing what the write added;
+    // using it would drop rows silently. It must be detected and ignored.
+    let mut engine = engine();
+    let index = Arc::new(SpatialIndex::build(engine.store()).expect("build"));
+    assert!(index.is_current_for(engine.store()));
+
+    engine
+        .bulk_load(
+            "@prefix ex: <http://example.com/> .\n\
+             @prefix geo: <http://www.opengis.net/ont/geosparql#> .\n\
+             ex:late geo:asWKT \"POINT(0.25 0.25)\"^^geo:wktLiteral .\n"
+                .as_bytes(),
+            RdfFormat::Turtle,
+            None,
+        )
+        .expect("load");
+
+    assert!(
+        !index.is_current_for(engine.store()),
+        "the index must notice the store moved under it"
+    );
+
+    // And the query must still find the new point, because the stale index is not used.
+    let session = Session::unrestricted(engine.store()).expect("session");
+    let view = engine.view(&session);
+    let query = format!(
+        "{PREFIXES} SELECT ?s WHERE {{ ?s geo:sfWithin \
+         \"POLYGON((0 0, 0.5 0, 0.5 0.5, 0 0.5, 0 0))\"^^geo:wktLiteral }}"
+    );
+    let rows = run(&view, &query, &QueryOptions::new().with_spatial(index));
+    assert!(
+        rows.iter().any(|r| r.contains("late")),
+        "a stale index dropped a row that was written after it was built: {rows:?}"
+    );
+}
+
+#[test]
+fn routing_actually_narrows_rather_than_quietly_doing_nothing() {
+    // Without this, every differential test above would pass on a routing implementation
+    // that never fires — they compare two answers, and two identical no-ops are equal.
+    //
+    // So this asserts the rewrite *emits* the restriction: the algebra must contain a VALUES
+    // clause, and it must be smaller than the index.
+    use holos_engine::topology::{rewrite, Routing};
+    use spargebra::SparqlParser;
+
+    let engine = engine();
+    let index = SpatialIndex::build(engine.store()).expect("build");
+    let query = SparqlParser::new()
+        .parse_query(&format!(
+            "{PREFIXES} SELECT ?s WHERE {{ ?s geo:sfWithin \
+             \"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))\"^^geo:wktLiteral }}"
+        ))
+        .expect("parse");
+
+    let unrouted = rewrite(&query, None).to_string();
+    assert!(
+        !unrouted.contains("VALUES"),
+        "no index was supplied, so nothing should have been narrowed: {unrouted}"
+    );
+
+    let routed = rewrite(
+        &query,
+        Some(Routing {
+            index: &index,
+            store: engine.store(),
+        }),
+    )
+    .to_string();
+    assert!(
+        routed.contains("VALUES"),
+        "the index was supplied and applicable, but no restriction was emitted: {routed}"
+    );
+
+    // And the restriction has to be a restriction: fewer geometries than the whole index.
+    let listed = routed.matches("wktLiteral").count();
+    assert!(
+        listed < index.len(),
+        "the VALUES listed {listed} of {} geometries, which narrows nothing",
+        index.len()
+    );
+}
+
+#[test]
+fn disjointness_emits_no_restriction() {
+    // The correctness boundary, asserted on the algebra rather than only on `can_filter`:
+    // even with an index in hand, a disjoint relation must be left as a full scan.
+    use holos_engine::topology::{rewrite, Routing};
+    use spargebra::SparqlParser;
+
+    let engine = engine();
+    let index = SpatialIndex::build(engine.store()).expect("build");
+    let query = SparqlParser::new()
+        .parse_query(&format!(
+            "{PREFIXES} SELECT ?s WHERE {{ ?s geo:sfDisjoint \
+             \"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))\"^^geo:wktLiteral }}"
+        ))
+        .expect("parse");
+
+    let routed = rewrite(
+        &query,
+        Some(Routing {
+            index: &index,
+            store: engine.store(),
+        }),
+    )
+    .to_string();
+    assert!(
+        !routed.contains("VALUES"),
+        "disjointness was narrowed by bounding boxes, which loses correct answers: {routed}"
+    );
+}

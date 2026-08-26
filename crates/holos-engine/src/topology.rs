@@ -40,16 +40,108 @@
 //! RDFS, a feature linked by a subproperty is still not reachable — [`rewrite`] cannot
 //! invent the entailment, and this is documented rather than papered over.
 //!
-//! # What this is not
+//! # Routing through the spatial index
 //!
-//! It is not a spatial index. Every rewritten pattern becomes a join over the geometries
-//! that satisfy the surrounding query, and the function runs on each pair — so a topology
-//! property between two unbound variables is a cross product. §17's R-tree is what would
-//! fix that, and it is not built. Correct answers first; the planner can come later.
+//! When one operand is a **constant** geometry and a [`SpatialIndex`] is supplied, the
+//! rewrite also emits a `VALUES` clause restricting the other side to the geometries whose
+//! bounding boxes overlap the constant. *Find everything inside this polygon* stops being a
+//! scan of every geometry in the store.
+//!
+//! Three conditions, all of which must hold, and each of which is a correctness boundary
+//! rather than a tuning knob:
+//!
+//! 1. **The relation must be box-filterable.** [`SpatialIndex::can_filter`] excludes
+//!    disjointness, whose answers lie mostly *outside* any probe.
+//! 2. **The index must be current for the store.** A stale index is missing whatever was
+//!    written after it was built, and `VALUES` would then omit rows — silently.
+//!    [`SpatialIndex::is_current_for`] gates this, and failing it costs a full scan.
+//! 3. **One operand must be a constant.** There is nothing to probe with otherwise.
+//!
+//! ## Why this cannot change an answer
+//!
+//! `VALUES` **restricts and never adds**. The candidate set is a superset of the geometries
+//! that can satisfy the relation, so restricting to it removes only rows that would have
+//! failed the filter anyway. The exact `geof:` predicate still runs, the geometry lookup
+//! still goes through the policy-filtered view, and a principal still cannot bind a quad it
+//! may not read. Every way the index could be wrong — stale, over-broad, empty — either
+//! costs time or is caught by the two gates above.
+//!
+//! ## What it does not help
+//!
+//! A relation between two unbound variables. There is no constant to probe with, so it
+//! remains a cross product; §17's note about needing a planner still applies to that shape.
 
-use spargebra::algebra::{Expression, Function, GraphPattern, PropertyPathExpression};
-use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern, Variable};
+use crate::spatial::{can_filter, SpatialIndex};
+use holos_store::Store;
+use spargebra::algebra::{Expression, Function, GraphPattern};
+use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
+
+/// The spatial index and the store to decode candidates against.
+///
+/// Both are needed together: the index answers in term ids, and `VALUES` needs the literals
+/// they stand for.
+#[derive(Clone, Copy)]
+pub struct Routing<'a> {
+    /// The index to probe.
+    pub index: &'a SpatialIndex,
+    /// The store the index describes, used to decode candidates and to check staleness.
+    pub store: &'a Store,
+}
+
+impl Routing<'_> {
+    /// Whether this routing may be used at all.
+    ///
+    /// A stale index omits rows rather than slowing things down, so this is checked before
+    /// any probe rather than trusted.
+    fn usable(&self) -> bool {
+        self.index.is_current_for(self.store)
+    }
+
+    /// The `VALUES` clause restricting `variable` to what could satisfy `relation` with
+    /// `constant`, or `None` if the index cannot help.
+    fn restrict(
+        &self,
+        relation: &str,
+        constant: &oxrdf::Literal,
+        variable: &Variable,
+    ) -> Option<GraphPattern> {
+        if !can_filter(relation) || !self.usable() {
+            return None;
+        }
+        let geometry = crate::geo_ext::geometry_of(&constant.clone().into())?;
+        let candidates = self.index.candidates(&geometry);
+
+        // A restriction that restricts almost nothing is not worth emitting.
+        //
+        // `spareval` joins by building the left side and scanning the right in full, so a
+        // `VALUES` does not stop the scan happening — it only adds a relation to join
+        // against. When it narrows to a handful that is a fair trade; when it names most of
+        // the store it is pure overhead, and a query with a continent-sized window would be
+        // made *slower* by the index meant to help it.
+        //
+        // The threshold is deliberately aggressive. Until the evaluator can bind-join, the
+        // only case that genuinely pays is the one where the candidate set is small or
+        // empty, and an empty one short-circuits the whole pattern.
+        if candidates.len() * 4 > self.index.len() {
+            return None;
+        }
+
+        let mut bindings = Vec::with_capacity(candidates.len());
+        for term in candidates {
+            // A candidate that will not decode is dropped rather than failing the query: the
+            // result is a smaller VALUES, which can only lose a row that could not have been
+            // returned anyway.
+            if let Ok(Some(oxrdf::Term::Literal(literal))) = self.store.decode_term(term) {
+                bindings.push(vec![Some(GroundTerm::Literal(literal))]);
+            }
+        }
+        Some(GraphPattern::Values {
+            variables: vec![variable.clone()],
+            bindings,
+        })
+    }
+}
 
 /// The GeoSPARQL vocabulary namespace, where the *properties* live.
 const GEO: &str = "http://www.opengis.net/ont/geosparql#";
@@ -165,11 +257,16 @@ fn visit(pattern: &GraphPattern, f: &mut impl FnMut(&GraphPattern)) {
 ///
 /// Returns the query unchanged when it mentions none, which is nearly always.
 #[must_use]
-pub fn rewrite(query: &Query) -> Query {
+pub fn rewrite(query: &Query, routing: Option<Routing<'_>>) -> Query {
     if !mentions_topology(query) {
         return query.clone();
     }
     let mut counter = 0usize;
+    let context = Context {
+        counter: &mut counter,
+        routing,
+    };
+    let mut context = context;
     match query {
         Query::Select {
             dataset,
@@ -177,7 +274,7 @@ pub fn rewrite(query: &Query) -> Query {
             base_iri,
         } => Query::Select {
             dataset: dataset.clone(),
-            pattern: rewrite_pattern(pattern, &mut counter),
+            pattern: rewrite_pattern(pattern, &mut context),
             base_iri: base_iri.clone(),
         },
         Query::Construct {
@@ -188,7 +285,7 @@ pub fn rewrite(query: &Query) -> Query {
         } => Query::Construct {
             template: template.clone(),
             dataset: dataset.clone(),
-            pattern: rewrite_pattern(pattern, &mut counter),
+            pattern: rewrite_pattern(pattern, &mut context),
             base_iri: base_iri.clone(),
         },
         Query::Describe {
@@ -197,7 +294,7 @@ pub fn rewrite(query: &Query) -> Query {
             base_iri,
         } => Query::Describe {
             dataset: dataset.clone(),
-            pattern: rewrite_pattern(pattern, &mut counter),
+            pattern: rewrite_pattern(pattern, &mut context),
             base_iri: base_iri.clone(),
         },
         Query::Ask {
@@ -206,73 +303,79 @@ pub fn rewrite(query: &Query) -> Query {
             base_iri,
         } => Query::Ask {
             dataset: dataset.clone(),
-            pattern: rewrite_pattern(pattern, &mut counter),
+            pattern: rewrite_pattern(pattern, &mut context),
             base_iri: base_iri.clone(),
         },
     }
 }
 
-fn rewrite_pattern(pattern: &GraphPattern, counter: &mut usize) -> GraphPattern {
+/// What the rewrite carries down the tree.
+struct Context<'a, 'r> {
+    counter: &'a mut usize,
+    routing: Option<Routing<'r>>,
+}
+
+fn rewrite_pattern(pattern: &GraphPattern, context: &mut Context<'_, '_>) -> GraphPattern {
     match pattern {
-        GraphPattern::Bgp { patterns } => rewrite_bgp(patterns, counter),
+        GraphPattern::Bgp { patterns } => rewrite_bgp(patterns, context),
         GraphPattern::Join { left, right } => GraphPattern::Join {
-            left: Box::new(rewrite_pattern(left, counter)),
-            right: Box::new(rewrite_pattern(right, counter)),
+            left: Box::new(rewrite_pattern(left, context)),
+            right: Box::new(rewrite_pattern(right, context)),
         },
         GraphPattern::LeftJoin {
             left,
             right,
             expression,
         } => GraphPattern::LeftJoin {
-            left: Box::new(rewrite_pattern(left, counter)),
-            right: Box::new(rewrite_pattern(right, counter)),
+            left: Box::new(rewrite_pattern(left, context)),
+            right: Box::new(rewrite_pattern(right, context)),
             expression: expression.clone(),
         },
         GraphPattern::Filter { expr, inner } => GraphPattern::Filter {
             expr: expr.clone(),
-            inner: Box::new(rewrite_pattern(inner, counter)),
+            inner: Box::new(rewrite_pattern(inner, context)),
         },
         GraphPattern::Union { left, right } => GraphPattern::Union {
-            left: Box::new(rewrite_pattern(left, counter)),
-            right: Box::new(rewrite_pattern(right, counter)),
+            left: Box::new(rewrite_pattern(left, context)),
+            right: Box::new(rewrite_pattern(right, context)),
         },
         GraphPattern::Graph { name, inner } => GraphPattern::Graph {
             name: name.clone(),
-            inner: Box::new(rewrite_pattern(inner, counter)),
+            inner: Box::new(rewrite_pattern(inner, context)),
         },
         GraphPattern::Extend {
             inner,
             variable,
             expression,
         } => GraphPattern::Extend {
-            inner: Box::new(rewrite_pattern(inner, counter)),
+            inner: Box::new(rewrite_pattern(inner, context)),
             variable: variable.clone(),
             expression: expression.clone(),
         },
         GraphPattern::Minus { left, right } => GraphPattern::Minus {
-            left: Box::new(rewrite_pattern(left, counter)),
-            right: Box::new(rewrite_pattern(right, counter)),
+            left: Box::new(rewrite_pattern(left, context)),
+            right: Box::new(rewrite_pattern(right, context)),
         },
         GraphPattern::OrderBy { inner, expression } => GraphPattern::OrderBy {
-            inner: Box::new(rewrite_pattern(inner, counter)),
+            inner: Box::new(rewrite_pattern(inner, context)),
             expression: expression.clone(),
         },
         GraphPattern::Project { inner, variables } => GraphPattern::Project {
-            inner: Box::new(rewrite_pattern(inner, counter)),
+            inner: Box::new(rewrite_pattern(inner, context)),
             variables: variables.clone(),
         },
         GraphPattern::Distinct { inner } => GraphPattern::Distinct {
-            inner: Box::new(rewrite_pattern(inner, counter)),
+            inner: Box::new(rewrite_pattern(inner, context)),
         },
         GraphPattern::Reduced { inner } => GraphPattern::Reduced {
-            inner: Box::new(rewrite_pattern(inner, counter)),
+            inner: Box::new(rewrite_pattern(inner, context)),
         },
         GraphPattern::Slice {
             inner,
             start,
             length,
         } => GraphPattern::Slice {
-            inner: Box::new(rewrite_pattern(inner, counter)),
+            inner: Box::new(rewrite_pattern(inner, context)),
             start: *start,
             length: *length,
         },
@@ -281,7 +384,7 @@ fn rewrite_pattern(pattern: &GraphPattern, counter: &mut usize) -> GraphPattern 
             variables,
             aggregates,
         } => GraphPattern::Group {
-            inner: Box::new(rewrite_pattern(inner, counter)),
+            inner: Box::new(rewrite_pattern(inner, context)),
             variables: variables.clone(),
             aggregates: aggregates.clone(),
         },
@@ -305,7 +408,7 @@ fn rewrite_pattern(pattern: &GraphPattern, counter: &mut usize) -> GraphPattern 
 ///
 /// The ordinary ones stay in the BGP. Each topology property contributes two geometry paths
 /// and one filter, which are layered around it.
-fn rewrite_bgp(patterns: &[TriplePattern], counter: &mut usize) -> GraphPattern {
+fn rewrite_bgp(patterns: &[TriplePattern], context: &mut Context<'_, '_>) -> GraphPattern {
     let mut plain = Vec::new();
     let mut relations = Vec::new();
     for triple in patterns {
@@ -325,10 +428,39 @@ fn rewrite_bgp(patterns: &[TriplePattern], counter: &mut usize) -> GraphPattern 
 
     let mut result = GraphPattern::Bgp { patterns: plain };
     for (triple, relation) in relations {
-        // Each operand becomes an expression. A resource needs its geometry fetched and
-        // joined in; a literal *is* the geometry and needs nothing.
-        let (left, joined) = operand(&triple.subject, result, counter);
-        let (right, joined) = operand(&triple.object, joined, counter);
+        // Variables are allocated before anything is joined, so a restriction can be built
+        // for one of them and joined in *ahead* of the geometry lookup it constrains.
+        //
+        // Order matters more than it looks. A `VALUES` joined *after* the lookup filters
+        // rows the scan has already produced, which saves nothing — measured at 50,000
+        // geometries it was a 1x "speed-up". Joined *before*, it binds the variable first
+        // and the lookup starts from four candidates instead of fifty thousand.
+        let subject_variable = match &triple.subject {
+            TermPattern::Literal(_) => None,
+            _ => Some(fresh(context.counter)),
+        };
+        let object_variable = match &triple.object {
+            TermPattern::Literal(_) => None,
+            _ => Some(fresh(context.counter)),
+        };
+
+        // The restriction, if one side is constant and the index can help.
+        if let (TermPattern::Literal(constant), Some(variable)) =
+            (&triple.subject, &object_variable)
+        {
+            result = restrict(context.routing, relation, constant, variable, result);
+        }
+        if let (Some(variable), TermPattern::Literal(constant)) =
+            (&subject_variable, &triple.object)
+        {
+            result = restrict(context.routing, relation, constant, variable, result);
+        }
+
+        // Then the geometry lookups, which now join onto a bound variable where the index
+        // applied and onto the whole store where it did not.
+        let (left, joined) = side(&triple.subject, subject_variable, result, context.counter);
+        let (right, joined) = side(&triple.object, object_variable, joined, context.counter);
+
         result = GraphPattern::Filter {
             expr: call(relation, left, right),
             inner: Box::new(joined),
@@ -337,47 +469,108 @@ fn rewrite_bgp(patterns: &[TriplePattern], counter: &mut usize) -> GraphPattern 
     result
 }
 
-/// Turns one side of a topology property into an expression the function can take.
+/// Joins the index's restriction onto `inner`, or returns it unchanged.
+fn restrict(
+    routing: Option<Routing<'_>>,
+    relation: &str,
+    constant: &oxrdf::Literal,
+    variable: &Variable,
+    inner: GraphPattern,
+) -> GraphPattern {
+    let Some(values) = routing.and_then(|r| r.restrict(relation, constant, variable)) else {
+        return inner;
+    };
+    GraphPattern::Join {
+        left: Box::new(inner),
+        right: Box::new(values),
+    }
+}
+
+/// One side of a topology property: an expression, and the pattern it needs joined in.
 ///
-/// A literal operand is used as written. `?g geo:sfWithin "POLYGON(...)"^^geo:wktLiteral` is
-/// a natural thing to write and the obvious reading is the right one — but looking up
-/// `geo:asWKT` on a literal finds nothing, so without this case the pattern silently matches
-/// nothing, which is the failure this whole module exists to remove.
-///
-/// Anything else is a resource: its geometry is fetched and joined onto what is already
-/// bound, which is what makes a topology property behave like a pattern rather than a
-/// post-filter.
-fn operand(
+/// A literal *is* the geometry and needs nothing joined. Anything else is a resource whose
+/// geometry has to be fetched.
+fn side(
     term: &TermPattern,
+    variable: Option<Variable>,
     inner: GraphPattern,
     counter: &mut usize,
 ) -> (Expression, GraphPattern) {
-    match term {
-        TermPattern::Literal(literal) => (Expression::Literal(literal.clone()), inner),
-        resource => {
-            let variable = fresh(counter);
+    match (term, variable) {
+        (TermPattern::Literal(literal), _) => (Expression::Literal(literal.clone()), inner),
+        (resource, Some(variable)) => {
             let joined = GraphPattern::Join {
                 left: Box::new(inner),
-                right: Box::new(geometry_path(resource, &variable)),
+                right: Box::new(geometry_path(resource, &variable, counter)),
+            };
+            (Expression::Variable(variable), joined)
+        }
+        // A non-literal always gets a variable above; this arm cannot be reached.
+        (resource, None) => {
+            let variable = Variable::new_unchecked(format!("{TEMP}unreachable"));
+            let joined = GraphPattern::Join {
+                left: Box::new(inner),
+                right: Box::new(geometry_path(resource, &variable, counter)),
             };
             (Expression::Variable(variable), joined)
         }
     }
 }
 
-/// `?resource (geo:hasDefaultGeometry|geo:hasGeometry)?/geo:asWKT ?target`.
-fn geometry_path(resource: &TermPattern, target: &Variable) -> GraphPattern {
-    let hop = PropertyPathExpression::ZeroOrOne(Box::new(PropertyPathExpression::Alternative(
-        Box::new(PropertyPathExpression::NamedNode(iri(GEO, "hasDefaultGeometry"))),
-        Box::new(PropertyPathExpression::NamedNode(iri(GEO, "hasGeometry"))),
-    )));
-    GraphPattern::Path {
-        subject: resource.clone(),
-        path: PropertyPathExpression::Sequence(
-            Box::new(hop),
-            Box::new(PropertyPathExpression::NamedNode(iri(GEO, "asWKT"))),
-        ),
-        object: TermPattern::Variable(target.clone()),
+/// The three ways a resource can reach a geometry literal, as a `UNION` of plain patterns.
+///
+/// Semantically this is `?resource (geo:hasDefaultGeometry|geo:hasGeometry)?/geo:asWKT
+/// ?target`, and that is how it was first written. A property path is the obvious spelling
+/// and the wrong one here:
+///
+/// **`spareval` evaluates a property path by traversal, not by index lookup.** With the
+/// target variable already bound — which is exactly what the spatial index arranges — the
+/// path ignores the binding and walks the store anyway. Measured at 50,000 geometries, the
+/// index narrowed fifty thousand candidates to four and the query still took 480 ms, because
+/// the path never used them.
+///
+/// Written out as a union of ordinary triple patterns, each branch is a BGP the evaluator can
+/// probe by object, so a bound `?target` becomes a lookup. The three branches are the three
+/// alternatives the path expression stood for — the zero-length hop, and each of the two
+/// properties — so the answer is unchanged, including the duplicate a resource carrying both
+/// spellings produces.
+fn geometry_path(
+    resource: &TermPattern,
+    target: &Variable,
+    counter: &mut usize,
+) -> GraphPattern {
+    let direct = GraphPattern::Bgp {
+        patterns: vec![TriplePattern {
+            subject: resource.clone(),
+            predicate: NamedNodePattern::NamedNode(iri(GEO, "asWKT")),
+            object: TermPattern::Variable(target.clone()),
+        }],
+    };
+
+    let through = |property: &str, counter: &mut usize| {
+        let intermediate = fresh(counter);
+        GraphPattern::Bgp {
+            patterns: vec![
+                TriplePattern {
+                    subject: resource.clone(),
+                    predicate: NamedNodePattern::NamedNode(iri(GEO, property)),
+                    object: TermPattern::Variable(intermediate.clone()),
+                },
+                TriplePattern {
+                    subject: TermPattern::Variable(intermediate),
+                    predicate: NamedNodePattern::NamedNode(iri(GEO, "asWKT")),
+                    object: TermPattern::Variable(target.clone()),
+                },
+            ],
+        }
+    };
+
+    GraphPattern::Union {
+        left: Box::new(direct),
+        right: Box::new(GraphPattern::Union {
+            left: Box::new(through("hasDefaultGeometry", counter)),
+            right: Box::new(through("hasGeometry", counter)),
+        }),
     }
 }
 
@@ -429,7 +622,7 @@ mod tests {
     fn a_query_without_topology_is_returned_unchanged() {
         let q = parse("SELECT ?s WHERE { ?s ?p ?o }");
         assert!(!mentions_topology(&q));
-        assert_eq!(rewrite(&q).to_string(), q.to_string());
+        assert_eq!(rewrite(&q, None).to_string(), q.to_string());
     }
 
     #[test]
@@ -438,7 +631,7 @@ mod tests {
             "{PREFIXES} SELECT ?f WHERE {{ ?a geo:sfContains ?f }}"
         ));
         assert!(mentions_topology(&q));
-        let text = rewrite(&q).to_string();
+        let text = rewrite(&q, None).to_string();
 
         // The property is gone as a pattern...
         assert!(
@@ -458,7 +651,7 @@ mod tests {
         let q = parse(&format!(
             "{PREFIXES} SELECT ?f WHERE {{ ?f my:hasExactGeometry ?g . ?a geo:sfWithin ?g }}"
         ));
-        let text = rewrite(&q).to_string();
+        let text = rewrite(&q, None).to_string();
         assert!(
             text.contains("hasExactGeometry"),
             "the ordinary pattern was dropped: {text}"
@@ -471,7 +664,7 @@ mod tests {
             let q = parse(&format!(
                 "{PREFIXES} SELECT ?f WHERE {{ ?a geo:{relation} ?f }}"
             ));
-            let text = rewrite(&q).to_string();
+            let text = rewrite(&q, None).to_string();
             assert!(
                 text.contains(&format!("geosparql/{relation}")),
                 "{relation} was not rewritten: {text}"
@@ -486,7 +679,7 @@ mod tests {
         let q = parse(&format!(
             "{PREFIXES} SELECT ?f WHERE {{ ?a geo:sfContains ?f . ?b geo:sfWithin ?f }}"
         ));
-        let text = rewrite(&q).to_string();
+        let text = rewrite(&q, None).to_string();
         for n in 0..4 {
             assert!(
                 text.contains(&format!("{TEMP}{n}")),
@@ -502,7 +695,7 @@ mod tests {
         let q = parse(&format!(
             "{PREFIXES} SELECT ?f WHERE {{ ?f geo:sfWithin \"POLYGON((0 0,1 0,1 1,0 0))\"^^geo:wktLiteral }}"
         ));
-        let text = rewrite(&q).to_string();
+        let text = rewrite(&q, None).to_string();
         assert!(
             text.contains("geosparql/sfWithin"),
             "not rewritten: {text}"
@@ -511,9 +704,14 @@ mod tests {
             text.contains("POLYGON((0 0,1 0,1 1,0 0))"),
             "the literal was lost: {text}"
         );
-        // One operand is a resource and one is a literal, so exactly one temporary.
-        assert!(text.contains(&format!("{TEMP}0")), "{text}");
-        assert!(!text.contains(&format!("{TEMP}1")), "a temporary was made for the literal: {text}");
+        // The literal goes straight into the function call rather than through a variable.
+        // (The resource side still allocates temporaries — one for the WKT target and one
+        // per `hasGeometry` branch — which is what `geometry_path` is for.)
+        assert!(text.contains(&format!("{TEMP}0")), "no WKT target variable: {text}");
+        assert!(
+            text.contains("sfWithin>(?_topo_wkt_0, \"POLYGON"),
+            "the literal was routed through a variable instead of used directly: {text}"
+        );
     }
 
     #[test]
@@ -521,7 +719,7 @@ mod tests {
         let q = parse(&format!(
             "{PREFIXES} SELECT ?f WHERE {{ SERVICE <http://example.org/sparql> {{ ?a geo:sfContains ?f }} }}"
         ));
-        let text = rewrite(&q).to_string();
+        let text = rewrite(&q, None).to_string();
         assert!(
             text.contains("geosparql#sfContains"),
             "the pattern should cross the SERVICE boundary as written: {text}"
@@ -535,7 +733,7 @@ mod tests {
         let q = parse(&format!(
             "{PREFIXES} SELECT ?f WHERE {{ ?a geo:sfOverlaps ?f }}"
         ));
-        let text = rewrite(&q).to_string();
+        let text = rewrite(&q, None).to_string();
         SparqlParser::new()
             .parse_query(&text)
             .unwrap_or_else(|e| panic!("the rewritten query does not parse: {e}\n{text}"));

@@ -121,6 +121,67 @@ fn main() {
     println!("reports. `Candidates` is what the tree proposed; the exact predicate still ran");
     println!("on each one, and the difference between it and `Matches` is the refinement the");
     println!("index cannot do for you.");
+
+    end_to_end();
+}
+
+/// The same SPARQL query, with and without the index in `QueryOptions`.
+///
+/// The table above measures the primitives. This measures what a client actually
+/// experiences: a `geo:sfWithin` against a constant window, evaluated through the whole
+/// query path. Both answers are compared, because a faster wrong answer is not an
+/// improvement.
+fn end_to_end() {
+    use holos_engine::QueryOptions;
+    use holos_security::Session;
+    use spareval::QueryResults;
+    use std::sync::Arc;
+
+    println!("\n## End to end\n");
+    println!("The same SPARQL, through the whole query path.\n");
+    println!("| Geometries | Rows | Unindexed | Indexed | Speed-up |");
+    println!("|---:|---:|---:|---:|---:|");
+
+    for n in [10_000usize, 50_000] {
+        let mut engine = Engine::new();
+        engine
+            .bulk_load(points(n).as_bytes(), RdfFormat::Turtle, None)
+            .expect("load");
+        let index = Arc::new(SpatialIndex::build(engine.store()).expect("build"));
+        let session = Session::unrestricted(engine.store()).expect("session");
+        let view = engine.view(&session);
+
+        let query = "PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+             SELECT ?s WHERE { ?s geo:sfWithin \"POLYGON((495 495, 505 495, 505 505, 495 505, 495 495))\"^^geo:wktLiteral }";
+
+        let count = |options: &QueryOptions| {
+            let (results, _) = Engine::query_with(&view, query, options).expect("query");
+            match results {
+                QueryResults::Solutions(iter) => iter.count(),
+                _ => panic!("expected solutions"),
+            }
+        };
+
+        let started = Instant::now();
+        let plain_rows = count(&QueryOptions::new());
+        let plain = started.elapsed();
+
+        let started = Instant::now();
+        let routed_rows = count(&QueryOptions::new().with_spatial(Arc::clone(&index)));
+        let routed = started.elapsed();
+
+        assert_eq!(
+            plain_rows, routed_rows,
+            "the index changed the answer at {n}: {plain_rows} unindexed, {routed_rows} indexed"
+        );
+
+        let speedup = plain.as_secs_f64() / routed.as_secs_f64().max(f64::MIN_POSITIVE);
+        println!(
+            "| {n} | {plain_rows} | {:.2?} | {:.2?} | **{speedup:.0}x** |",
+            plain, routed
+        );
+    }
+    println!("\nRow counts are asserted equal, not reported and hoped over.");
 }
 
 /// A deterministic point cloud over a 1000 x 1000 extent.

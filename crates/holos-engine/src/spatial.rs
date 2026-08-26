@@ -66,6 +66,38 @@ impl RTreeObject for Indexed {
 #[derive(Debug, Default)]
 pub struct SpatialIndex {
     tree: RTree<Indexed>,
+    /// What the store looked like when this was built.
+    ///
+    /// A spatial index can only ever *narrow* a scan, so the way it goes wrong is by
+    /// omitting a geometry that was added after it was built — and an omission is a missing
+    /// row, which nothing notices. Rather than rely on every caller refreshing it, the index
+    /// carries the shape of the store it came from and [`SpatialIndex::is_current_for`]
+    /// checks it. A mismatch means the index is not used and the query does the full scan:
+    /// slower, and right.
+    built_from: StoreShape,
+}
+
+/// A cheap description of a store's contents, for staleness detection.
+///
+/// Not a hash of the data — that would cost a full scan to check, which is the thing being
+/// avoided. Quad count and dictionary size together move on any insert or delete of anything
+/// new, which covers every way a geometry can enter or leave. A delete-then-insert that
+/// restored both counts *and* changed a geometry would defeat it; that is why the server
+/// rebuilds after every write rather than relying on this, and why this is the second line of
+/// defence rather than the first.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct StoreShape {
+    quads: usize,
+    terms: usize,
+}
+
+impl StoreShape {
+    fn of(store: &Store) -> Self {
+        Self {
+            quads: store.len(),
+            terms: store.dictionary_len(),
+        }
+    }
 }
 
 impl SpatialIndex {
@@ -106,7 +138,18 @@ impl SpatialIndex {
         }
         Ok(Self {
             tree: RTree::bulk_load(entries),
+            built_from: StoreShape::of(store),
         })
+    }
+
+    /// Whether this index still describes `store`.
+    ///
+    /// **Routing must check this.** An index built before a write is missing whatever the
+    /// write added, and using it would drop rows silently. Returning `false` costs a full
+    /// scan; returning `true` wrongly costs a wrong answer.
+    #[must_use]
+    pub fn is_current_for(&self, store: &Store) -> bool {
+        self.built_from == StoreShape::of(store)
     }
 
     /// How many geometries are indexed.

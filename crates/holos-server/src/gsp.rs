@@ -168,13 +168,11 @@ pub fn read(
     let mut writer = RdfSerializer::from_format(format).for_writer(Vec::new());
     for quad in quads {
         // A graph is served as triples: the graph name is the request, not the payload.
-        writer.serialize_triple(
-            oxrdf::TripleRef {
-                subject: quad.subject.as_ref(),
-                predicate: quad.predicate.as_ref(),
-                object: quad.object.as_ref(),
-            },
-        )?;
+        writer.serialize_triple(oxrdf::TripleRef {
+            subject: quad.subject.as_ref(),
+            predicate: quad.predicate.as_ref(),
+            object: quad.object.as_ref(),
+        })?;
     }
     Ok(writer.finish()?)
 }
@@ -283,9 +281,7 @@ pub fn multipart_boundary(content_type: &str) -> Option<String> {
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Mints a name for a graph the client asked the store to create.
@@ -298,11 +294,7 @@ pub fn mint_graph_name(base: &str, path: &str) -> NamedNode {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    NamedNode::new_unchecked(format!(
-        "{}{}/{stamp:x}",
-        base.trim_end_matches('/'),
-        path
-    ))
+    NamedNode::new_unchecked(format!("{}{}/{stamp:x}", base.trim_end_matches('/'), path))
 }
 
 /// Removes a graph entirely: its quads *and* its entry in the catalogue.
@@ -343,7 +335,9 @@ pub fn merge(
     let graph = target.graph_name();
     let mut parser = oxrdfio::RdfParser::from_format(format);
     if let Some(base) = base_iri {
-        parser = parser.with_base_iri(base).map_err(|e| anyhow::anyhow!("{e}"))?;
+        parser = parser
+            .with_base_iri(base)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
 
     // Parsed in full before anything is written, so a body that fails to parse half way
@@ -397,7 +391,9 @@ mod tests {
     fn a_graph_parameter_names_a_named_graph() {
         assert_eq!(
             target(&params(&[("graph", "http://example.org/g")]), "/gsp", None),
-            Ok(Target::Named(NamedNode::new_unchecked("http://example.org/g")))
+            Ok(Target::Named(NamedNode::new_unchecked(
+                "http://example.org/g"
+            )))
         );
     }
 
@@ -424,7 +420,10 @@ mod tests {
 
     #[test]
     fn neither_is_refused_unless_direct_identification_is_configured() {
-        assert_eq!(target(&params(&[]), "/gsp/x", None), Err(TargetError::Missing));
+        assert_eq!(
+            target(&params(&[]), "/gsp/x", None),
+            Err(TargetError::Missing)
+        );
         assert_eq!(
             target(&params(&[]), "/gsp/x", Some("http://data.example.org")),
             Ok(Target::Named(NamedNode::new_unchecked(
@@ -443,7 +442,9 @@ mod tests {
                 "/gsp/x",
                 Some("http://data.example.org")
             ),
-            Ok(Target::Named(NamedNode::new_unchecked("http://elsewhere/g")))
+            Ok(Target::Named(NamedNode::new_unchecked(
+                "http://elsewhere/g"
+            )))
         );
     }
 

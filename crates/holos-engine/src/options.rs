@@ -71,6 +71,12 @@ pub struct QueryOptions {
     /// Statistics are a snapshot: build them once and share the `Arc`. A stale snapshot
     /// makes plans worse, never wrong, because reordering a BGP cannot change its answer.
     pub reorder_with: Option<std::sync::Arc<holos_stats::Statistics>>,
+    /// An R-tree to narrow GeoSPARQL topology relations with, when one side is constant.
+    ///
+    /// Optional and checked: an index built before a write is missing what the write added,
+    /// so `crate::topology` verifies it still describes the store and falls back to a full
+    /// scan if not. Supplying a stale one costs time, never correctness.
+    pub spatial: Option<std::sync::Arc<crate::spatial::SpatialIndex>>,
 }
 
 impl QueryOptions {
@@ -126,6 +132,13 @@ impl QueryOptions {
     #[must_use]
     pub fn reordering(mut self, stats: std::sync::Arc<holos_stats::Statistics>) -> Self {
         self.reorder_with = Some(stats);
+        self
+    }
+
+    /// Narrow topology relations with this spatial index where it applies.
+    #[must_use]
+    pub fn with_spatial(mut self, index: std::sync::Arc<crate::spatial::SpatialIndex>) -> Self {
+        self.spatial = Some(index);
         self
     }
 

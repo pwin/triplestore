@@ -157,6 +157,12 @@ struct State {
     /// never wrong — reordering a basic graph pattern cannot change its answer — so a
     /// reader never has to wait for a rebuild.
     statistics: RwLock<Option<Arc<holos_stats::Statistics>>>,
+    /// The spatial index, rebuilt on every write alongside the statistics.
+    ///
+    /// Rebuilding rather than maintaining incrementally, for now: it is the same shape as
+    /// the statistics beside it, and it is what keeps the index *current*, which is the
+    /// condition the query path checks before it will use one at all.
+    spatial: RwLock<Option<Arc<holos_engine::spatial::SpatialIndex>>>,
 }
 
 impl State {
@@ -186,6 +192,36 @@ impl State {
     fn statistics(&self) -> Option<Arc<holos_stats::Statistics>> {
         self.statistics.read().ok().and_then(|s| s.clone())
     }
+
+    /// Rebuilds the spatial index.
+    ///
+    /// Called wherever the statistics are refreshed, and for the same reason: a write has
+    /// happened, so anything derived from the store is out of date. An index that is not
+    /// rebuilt is not *wrong* — the query path notices it no longer describes the store and
+    /// does the full scan instead — but it stops narrowing anything, so refreshing is what
+    /// makes it worth having.
+    fn refresh_spatial(&self) {
+        let built = {
+            let Ok(engine) = self.engine.read() else {
+                return;
+            };
+            holos_engine::spatial::SpatialIndex::build(engine.store())
+        };
+        match built {
+            Ok(index) => {
+                if let Ok(mut slot) = self.spatial.write() {
+                    *slot = Some(Arc::new(index));
+                }
+            }
+            // Losing the index costs speed, not correctness: without one, topology relations
+            // are evaluated by scanning, which is what they did before it existed.
+            Err(e) => eprintln!("the spatial index could not be rebuilt: {e}"),
+        }
+    }
+
+    fn spatial(&self) -> Option<Arc<holos_engine::spatial::SpatialIndex>> {
+        self.spatial.read().ok().and_then(|s| s.clone())
+    }
 }
 
 fn main() -> Result<()> {
@@ -213,10 +249,12 @@ fn main() -> Result<()> {
         policy,
         config,
         statistics: RwLock::new(None),
+        spatial: RwLock::new(None),
     });
     if state.config.reorder {
         let started = std::time::Instant::now();
         state.refresh_statistics();
+        state.refresh_spatial();
         eprintln!(
             "  reorder  statistics built in {:.2}s",
             started.elapsed().as_secs_f64()
@@ -393,7 +431,10 @@ fn answer(
     params: &std::collections::HashMap<String, String>,
 ) -> Result<()> {
     let principal = principal_for(state, &request);
-    let guard = state.engine.read().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let guard = state
+        .engine
+        .read()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?;
     let session = match Session::open(guard.store(), principal, state.policy.clone()) {
         Ok(s) => s,
         Err(e) => {
@@ -514,7 +555,10 @@ fn backup(state: &State, request: Request) -> Result<()> {
 
     // A read lock: a checkpoint is a read of the store, and blocking writers for its
     // duration would defeat the point of having one.
-    let guard = state.engine.read().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let guard = state
+        .engine
+        .read()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?;
     let outcome = guard.store().checkpoint(&destination);
     let quads = guard.store().len();
     drop(guard);
@@ -550,15 +594,15 @@ fn graph_store(
     let writing = matches!(method.as_str(), "PUT" | "POST" | "DELETE");
 
     if writing && state.config.read_only {
-        return respond(request, 403, "text/plain", b"this endpoint is read-only".to_vec());
+        return respond(
+            request,
+            403,
+            "text/plain",
+            b"this endpoint is read-only".to_vec(),
+        );
     }
 
-    let path = request
-        .url()
-        .split('?')
-        .next()
-        .unwrap_or("/")
-        .to_owned();
+    let path = request.url().split('?').next().unwrap_or("/").to_owned();
     // `POST` to the protocol endpoint itself, carrying neither `?graph` nor `?default`,
     // is the specification's "create a graph and tell me its name" (§5.5). It has to be
     // recognised before the ordinary rules run: with a base configured those would resolve
@@ -578,8 +622,7 @@ fn graph_store(
                 request,
                 400,
                 "text/plain",
-                b"creating a graph by POST needs --gsp-base, so the server can name it"
-                    .to_vec(),
+                b"creating a graph by POST needs --gsp-base, so the server can name it".to_vec(),
             );
         };
         let name = gsp::mint_graph_name(base, &path);
@@ -628,11 +671,19 @@ fn graph_store(
     // A read takes the read lock; a write takes the write lock. Sharing one path would
     // mean every GET excluding every other request for no reason.
     if writing {
-        let mut guard = state.engine.write().map_err(|_| anyhow::anyhow!("poisoned"))?;
+        let mut guard = state
+            .engine
+            .write()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?;
         let mut session = match Session::open(guard.store(), principal, state.policy.clone()) {
             Ok(s) => s,
             Err(e) => {
-                return respond(request, 500, "text/plain", format!("session: {e}").into_bytes())
+                return respond(
+                    request,
+                    500,
+                    "text/plain",
+                    format!("session: {e}").into_bytes(),
+                )
             }
         };
         let existed = match gsp::exists(&guard, &session, &target) {
@@ -657,7 +708,8 @@ fn graph_store(
                         415,
                         "text/plain",
                         b"unsupported media type: send RDF with a content-type this \
-                          store parses".to_vec(),
+                          store parses"
+                            .to_vec(),
                     );
                 }
                 // PUT replaces, POST merges. That difference is the whole distinction
@@ -688,6 +740,7 @@ fn graph_store(
         drop(guard);
         if matches!(method.as_str(), "PUT" | "POST" | "DELETE") {
             state.refresh_statistics();
+            state.refresh_spatial();
         }
 
         return match outcome {
@@ -713,10 +766,20 @@ fn graph_store(
         };
     }
 
-    let guard = state.engine.read().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let guard = state
+        .engine
+        .read()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?;
     let session = match Session::open(guard.store(), principal, state.policy.clone()) {
         Ok(s) => s,
-        Err(e) => return respond(request, 500, "text/plain", format!("session: {e}").into_bytes()),
+        Err(e) => {
+            return respond(
+                request,
+                500,
+                "text/plain",
+                format!("session: {e}").into_bytes(),
+            )
+        }
     };
     match gsp::exists(&guard, &session, &target) {
         Ok(false) => return respond(request, 404, "text/plain", b"no such graph".to_vec()),
@@ -861,6 +924,9 @@ fn query_options(
     if let Some(stats) = state.statistics() {
         options = options.reordering(stats);
     }
+    if let Some(index) = state.spatial() {
+        options = options.with_spatial(index);
+    }
     for iri in http::values(params, "default-graph-uri") {
         let node = NamedNode::new(&iri).map_err(|e| format!("default-graph-uri `{iri}`: {e}"))?;
         options = options.with_default_graph(node.into());
@@ -903,17 +969,17 @@ fn apply_update(
     // `using-graph-uri` names the dataset the update's WHERE runs against. It is applied
     // to the parsed form rather than the text, so an update that names its own dataset can
     // be told apart from one that does not — the protocol makes carrying both an error.
-    let outcome = named_dataset(params)
-        .and_then(|(default_graphs, named_graphs)| {
-            let mut parsed = sparql_update::parse(update, Some(&base))?;
-            sparql_update::with_protocol_dataset(&mut parsed, default_graphs, named_graphs)?;
-            sparql_update::apply(&mut guard, &mut session, &parsed)
-        });
+    let outcome = named_dataset(params).and_then(|(default_graphs, named_graphs)| {
+        let mut parsed = sparql_update::parse(update, Some(&base))?;
+        sparql_update::with_protocol_dataset(&mut parsed, default_graphs, named_graphs)?;
+        sparql_update::apply(&mut guard, &mut session, &parsed)
+    });
     // Release the write lock before rebuilding: refresh_statistics takes a read lock, and
     // holding the write lock across it would deadlock.
     drop(guard);
     if outcome.is_ok() {
         state.refresh_statistics();
+        state.refresh_spatial();
     }
 
     match outcome {
@@ -928,8 +994,9 @@ fn apply_update(
             let status = match &e {
                 // Both mean the client sent something unanswerable, which is a 400
                 // whether the SPARQL failed to parse or the request contradicted itself.
-                holos_engine::EngineError::Syntax(_)
-                | holos_engine::EngineError::BadRequest(_) => 400,
+                holos_engine::EngineError::Syntax(_) | holos_engine::EngineError::BadRequest(_) => {
+                    400
+                }
                 holos_engine::EngineError::AccessDenied => 403,
                 _ => 500,
             };
@@ -980,7 +1047,10 @@ fn principal_for(state: &State, request: &Request) -> Principal {
         match header(request, "x-holos-principal") {
             Some(id) => Principal::new(NamedNode::new_unchecked(format!(
                 "urn:holos:principal:forwarded/{}",
-                id.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_', "_")
+                id.replace(
+                    |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_',
+                    "_"
+                )
             ))),
             None => Principal::anonymous(),
         }
@@ -994,7 +1064,8 @@ fn principal_for(state: &State, request: &Request) -> Principal {
                 principal = principal.with_role(role);
             }
         }
-        if let Some(level) = header(request, "x-holos-clearance").and_then(|c| c.trim().parse().ok())
+        if let Some(level) =
+            header(request, "x-holos-clearance").and_then(|c| c.trim().parse().ok())
         {
             principal = principal.with_clearance(Label::level(level));
         }
@@ -1044,7 +1115,10 @@ fn respond_with(
         ("Access-Control-Allow-Headers", "content-type, accept"),
         // The Graph Store Protocol uses all five verbs, so a browser client that can only
         // GET and POST cannot reach half of it.
-        ("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, DELETE, OPTIONS"),
+        (
+            "Access-Control-Allow-Methods",
+            "GET, HEAD, POST, PUT, DELETE, OPTIONS",
+        ),
         // Without this a browser cannot read the name of a graph it just created.
         ("Access-Control-Expose-Headers", "location"),
     ]
@@ -1074,7 +1148,9 @@ fn open_engine(config: &Config) -> Result<Engine> {
         Some(path) => {
             let storage = holos_store::RocksStorage::open(path)
                 .with_context(|| format!("opening the store at {path}"))?;
-            Ok(Engine::with_store(holos_store::Store::with_storage(storage)))
+            Ok(Engine::with_store(holos_store::Store::with_storage(
+                storage,
+            )))
         }
         #[cfg(not(feature = "rocksdb"))]
         Some(_) => anyhow::bail!("this build has no persistent backend"),

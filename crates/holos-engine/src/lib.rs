@@ -285,8 +285,9 @@ impl Engine {
         let parsed = parser.parse_query(query)?;
         // Same rewrite as `query_with`: a topology property means the same thing whichever
         // entry point asked, and answering it on one path only would be worse than not
-        // answering it at all.
-        let parsed = crate::topology::rewrite(&parsed);
+        // answering it at all. No spatial routing here — this entry point takes no options,
+        // so there is no index to route to, and the unnarrowed form is the correct one.
+        let parsed = crate::topology::rewrite(&parsed, None);
         Ok(Self::evaluator().prepare(&parsed).execute(view)?)
     }
 
@@ -319,7 +320,11 @@ impl Engine {
         // GeoSPARQL topology properties become geometry lookups and a filter. Unconditional
         // because it is correctness rather than optimisation: without it, `?a geo:sfContains
         // ?b` is an ordinary lookup that matches nothing and says so silently.
-        let parsed = crate::topology::rewrite(&parsed);
+        let routing = options.spatial.as_ref().map(|index| crate::topology::Routing {
+            index,
+            store: view.store(),
+        });
+        let parsed = crate::topology::rewrite(&parsed, routing);
         // Applied to the parsed algebra, before the evaluator's own optimiser runs on it.
         let parsed = match &options.reorder_with {
             None => parsed,
