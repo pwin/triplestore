@@ -52,6 +52,14 @@ env:
   # A wheel is a release artefact; build it like one even on a pull request, so what CI
   # exercises is what would ship.
   CARGO_PROFILE_RELEASE_DEBUG: "false"
+  # Named explicitly so `maturin-action` does not have to ask `cargo metadata` where the
+  # target directory is. On the containerised Linux builds it asks on the *host*, where no
+  # Rust toolchain is installed — Rust goes into the container — so the call fails and each
+  # of those jobs logs "Failed to get Cargo target directory from `cargo metadata`". The
+  # action then falls back to `target`, which is the right answer for this workspace, so
+  # the warning is cosmetic; saying it up front skips the lookup and the noise. Relative,
+  # so it resolves to the same directory on the host and inside the container.
+  CARGO_TARGET_DIR: target
 
 jobs:
   # ---------------------------------------------------------------------------------
