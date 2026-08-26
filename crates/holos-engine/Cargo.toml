@@ -25,6 +25,7 @@ geojson.workspace = true
 sparesults.workspace = true
 thiserror.workspace = true
 rustc-hash.workspace = true
+rstar.workspace = true
 
 [dev-dependencies]
 flate2.workspace = true

@@ -225,6 +225,14 @@ fn pick_output_kind(args: &[Term]) -> Kind {
     }
 }
 
+/// The geometry a term carries, if it is a GeoSPARQL geometry literal.
+///
+/// Public so the spatial index can decide what to index without a second copy of the
+/// datatype and CRS rules — those live here, and a second copy would drift.
+pub fn geometry_of(term: &Term) -> Option<Geometry> {
+    extract_geometry(term)
+}
+
 fn extract_geometry(term: &Term) -> Option<Geometry> {
     let Term::Literal(literal) = term else {
         return None;

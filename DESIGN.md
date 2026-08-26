@@ -1191,15 +1191,46 @@ These are **filter** functions. They evaluate over whatever bindings reach them,
 `geof:sfWithin(?point, ?region)` scans every candidate geometry rather than probing an
 index. On a small dataset that is fine; on a national gazetteer it is not.
 
-The missing piece is an **R-tree over geometry literals**, and the design already has a slot
-for it: §5 reserves term tags `0x9`–`0xF` for "geometry handles" among others, so a geometry
-can carry an index handle in its id rather than needing a side table. Making the planner
-*route* to that index is §7 work — it is a cost-based decision like any other, and it needs
-the optimiser that P2 will build. Doing the index without the planner would leave something
-nothing knows how to use.
+The missing piece is an **R-tree over geometry literals**. §5 reserved term tags `0x9`–`0xF`
+for "geometry handles" so a geometry could carry an index handle in its id rather than needing
+a side table, and routing was said to be blocked on the P2 optimiser.
 
-So: functions now, index when there is a planner to use it, and a measurement before either
-is called fast.
+> **The index is built, in memory.** `holos_engine::spatial::SpatialIndex` is an `rstar`
+> R-tree over every geometry literal in a store, keyed by bounding box. `rstar` was already
+> in the tree through `geo`, so it cost no new dependency.
+>
+> **Measured**, per §17's own instruction not to call anything fast without one. A point
+> cloud over a 1000 × 1000 extent, probed with a 10 × 10 window — about 0.01% of it, the
+> shape of a "what is near here" query:
+>
+> | Geometries | Build | Scan | Probe | Speed-up |
+> |---:|---:|---:|---:|---:|
+> | 10,000 | 24.9 ms | 17.3 ms | 35.1 µs | **492×** |
+> | 50,000 | 99.1 ms | 75.0 ms | 20.3 µs | **3,692×** |
+> | 200,000 | 550.0 ms | 371.6 ms | 135.7 µs | **2,738×** |
+>
+> `cargo run --release -p holos-bench --bin spatial`. The benchmark asserts that the scan and
+> the probe find the *same* matches rather than reporting both and trusting the reader; a
+> faster answer that is a different answer is not an optimisation.
+>
+> Three things the numbers do not say. **Build is a real cost** — 550 ms at 200,000 — paid
+> once and not yet incremental, so an `INSERT` currently invalidates it. **The speed-up is
+> not monotonic** because the probe times are near the clock's resolution and the match counts
+> differ; the shape is what matters, not the third digit. And **candidates equal matches here
+> only because points have degenerate bounding boxes** — over polygons the tree proposes more
+> than it should and refinement discards the rest, which is the normal case.
+>
+> **Refinement is not optional.** A bounding box says a geometry *may* qualify, never that it
+> does. The exact predicate still runs on every candidate; the index only decides which are
+> worth testing.
+>
+> **Disjointness is deliberately not routed.** `sfDisjoint`, `ehDisjoint` and `rcc8dc` are
+> true of nearly everything *outside* a probe, so bounding-box overlap is the wrong filter and
+> would discard almost every correct answer. `spatial::can_filter` is that boundary, and it is
+> about correctness rather than cost.
+>
+> Still to do: routing the [`topology`] rewrite through it when an operand is a constant
+> region, incremental maintenance, and persisting handles in the reserved tag.
 
 ---
 

@@ -24,6 +24,7 @@ pub mod geo_ext;
 pub mod options;
 pub mod service;
 pub mod source;
+pub mod spatial;
 pub mod topology;
 pub mod update;
 pub mod view;

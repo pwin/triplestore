@@ -64,6 +64,9 @@ holos-tabular = { path = "crates/holos-tabular", version = "0.1.1" }
 anyhow = "1"
 thiserror = "2"
 rustc-hash = "2"
+# Already in the tree through `geo`; declared because `holos-engine` uses it directly for
+# the spatial index, and a transitive dependency is not a contract.
+rstar = "0.12"
 # `bindgen-runtime` is in rocksdb's default features, and `default-features = false` drops
 # it. Without it `clang-sys` *links* libclang at build time instead of loading it, so the
 # build script needs the dylib on the loader path rather than at LIBCLANG_PATH — which is
