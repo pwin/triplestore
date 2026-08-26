@@ -5,7 +5,7 @@ this ecosystem does not have to learn a second vocabulary for the same ideas. Wh
 is :class:`Policy` and :class:`Principal`: a query can be asked *as somebody*, and the
 answer is the one that principal is entitled to.
 
-    >>> from holos import Store, Principal, Policy
+    >>> from holosdb import Store, Principal, Policy
     >>> store = Store()
     >>> store.load("examples/hr.trig")
     21
@@ -22,7 +22,7 @@ That holds for *every* query shape without anyone enumerating them — a ``COUNT
 leak the existence of hidden rows, and a ``FILTER NOT EXISTS`` cannot probe for them.
 """
 
-from ._holos import (  # noqa: F401
+from ._holosdb import (  # noqa: F401
     HolosError,
     PolicyError,
     Policy,

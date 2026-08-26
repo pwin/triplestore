@@ -1,14 +1,14 @@
-# holos
+# holosdb
 
 An RDF 1.2 triplestore with SPARQL 1.2, where **access policy is enforced at the index
 scan** rather than by rewriting queries.
 
 ```sh
-pip install holos
+pip install holosdb
 ```
 
 ```python
-from holos import Store, Principal, Policy
+from holosdb import Store, Principal, Policy
 
 store = Store()                    # in memory
 store = Store("./var/db")          # persistent
@@ -53,8 +53,8 @@ compliance report, a reconciliation total — and an error is better than a quie
 store.validate("shapes.ttl")            # SHACL, {'conforms': False, 'violations': 12, ...}
 store.named_graphs()
 store.dictionary_size                   # smaller than you expect: see below
-holos.geosparql_functions()             # 45 of them
-holos.has_rocksdb()                     # what this wheel actually contains
+holosdb.geosparql_functions()             # 45 of them
+holosdb.has_rocksdb()                     # what this wheel actually contains
 ```
 
 **GeoSPARQL** works through the ordinary query path, so it composes with policy — denying
@@ -87,7 +87,7 @@ this build** — raising is deliberate, because silently accepting an update tha
 would be much worse than an error. Writes go through `add()` and `load()`.
 
 Persistence is compiled into the wheel rather than installed beside it, so
-`pip install holos[rocksdb]` is accepted but installs nothing; the published wheels already
+`pip install holosdb[rocksdb]` is accepted but installs nothing; the published wheels already
 have it. `PACKAGING.md` explains why a Python extra cannot do otherwise, and
 `has_rocksdb()` reports what you actually got.
 

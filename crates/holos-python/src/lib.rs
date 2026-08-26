@@ -38,9 +38,13 @@ use std::sync::{Arc, RwLock};
 // errors
 // ---------------------------------------------------------------------------------
 
-pyo3::create_exception!(_holos, HolosError, pyo3::exceptions::PyException);
-pyo3::create_exception!(_holos, SyntaxError, HolosError);
-pyo3::create_exception!(_holos, PolicyError, HolosError);
+// The *public* module name, not the extension's. It becomes each exception's `__module__`,
+// so a traceback reads `holosdb.SyntaxError` rather than naming the private `_holosdb`
+// that users are not expected to know exists. The classes below say the same thing through
+// `#[pyclass(module = ...)]`.
+pyo3::create_exception!(holosdb, HolosError, pyo3::exceptions::PyException);
+pyo3::create_exception!(holosdb, SyntaxError, HolosError);
+pyo3::create_exception!(holosdb, PolicyError, HolosError);
 
 fn map_engine_error(e: &holos_engine::EngineError) -> PyErr {
     match e {
@@ -105,7 +109,7 @@ fn parse_named_node(iri: &str) -> PyResult<NamedNode> {
 /// ```python
 /// alice = Principal("urn:user:alice", roles=["hr"], clearance=3)
 /// ```
-#[pyclass(module = "holos", name = "Principal", frozen, from_py_object)]
+#[pyclass(module = "holosdb", name = "Principal", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyPrincipal {
     inner: CorePrincipal,
@@ -160,7 +164,7 @@ impl PyPrincipal {
 /// More specific scopes win. At equal specificity **deny beats allow**, which is why
 /// `except_role` exists: "deny salary to everyone except HR" is otherwise inexpressible,
 /// because an allow rule for HR would never win against the deny.
-#[pyclass(module = "holos", name = "Policy", from_py_object)]
+#[pyclass(module = "holosdb", name = "Policy", from_py_object)]
 #[derive(Clone)]
 pub struct PyPolicy {
     inner: CorePolicy,
@@ -253,7 +257,7 @@ impl PyPolicy {
 // ---------------------------------------------------------------------------------
 
 /// One row of a SELECT result.
-#[pyclass(module = "holos", name = "QuerySolution")]
+#[pyclass(module = "holosdb", name = "QuerySolution")]
 pub struct PyQuerySolution {
     names: Arc<Vec<String>>,
     values: Vec<Option<Term>>,
@@ -331,7 +335,7 @@ impl PyQuerySolution {
 /// An RDF 1.2 quad store.
 ///
 /// ```python
-/// from holos import Store
+/// from holosdb import Store
 ///
 /// store = Store()                       # in memory
 /// store = Store("./var/db")             # persistent, needs a RocksDB build
@@ -342,7 +346,7 @@ impl PyQuerySolution {
 ///
 /// Only one process may hold a persistent store directory at a time — RocksDB takes an
 /// exclusive lock on it.
-#[pyclass(module = "holos", name = "Store")]
+#[pyclass(module = "holosdb", name = "Store")]
 pub struct PyStore {
     // An RwLock rather than a Mutex because the store is genuinely many-readers /
     // single-writer, and queries — the common case — only need a read.
@@ -870,7 +874,7 @@ fn spargeo_names() -> Vec<String> {
 }
 
 #[pymodule]
-fn _holos(module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _holosdb(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add("HolosError", module.py().get_type::<HolosError>())?;
     module.add("SyntaxError", module.py().get_type::<SyntaxError>())?;

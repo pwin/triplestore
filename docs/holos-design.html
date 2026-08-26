@@ -843,8 +843,8 @@ footer{
     Each one shipped somewhere. Their combination is the thesis.
   </p>
   <p class="standfirst" style="font-size:17px">
-P0 and the security layer are built. <strong>2,876 of 3,014 W3C tests pass, and every one
-    of the 138 failures is upstream</strong> &mdash; not one is a HOLOS bug
+P0 and the security layer are built. <strong>3,145 of 3,284 W3C tests pass, and every one
+    of the 139 failures is upstream</strong> &mdash; not one is a HOLOS bug
     (<a href="#s15">&sect;15</a>). Everything above L3 is still design.
     Storage has two backends behind one trait; SHACL_Engine is adapted and fed from the
     store <strong>3.6&times; cheaper than parsing</strong>, with a native evaluator alongside
@@ -1718,12 +1718,17 @@ P0 and the security layer are built. <strong>2,876 of 3,014 W3C tests pass, and 
     SHACL calls that a violation, so comparing datatype IRIs is not enough.</p>
 
     <h3>The skips are not a hiding place</h3>
-    <p>304 SPARQL 1.1 tests are skipped, and each skip names a roadmap item rather than a
-    mystery: SPARQL Update and the Graph Store Protocol are L6; 42 entailment tests need the
-    reasoner that is L4; federated queries need a service handler; a handful encode their
-    expected results in the old DAWG <code>rs:ResultSet</code> RDF vocabulary, which the harness
-    does not read. Counting any of those as failures would bury the ones that are actually
-    broken.</p>
+    <p><b>101</b> SPARQL 1.1 tests are skipped, down from 304, and each skip names a roadmap
+    item rather than a mystery: <b>70</b> need an entailment regime, which is the reasoner at
+    L4; <b>25</b> are upstream evaluator behaviour, confirmed by the oracle differential;
+    <b>6</b> are result-format tests the harness does not read. Counting any of those as
+    failures would bury the ones that are actually broken.</p>
+    <p>The 203 that used to be skipped and now run are SPARQL Update (94), both protocol
+    suites (47), update syntax (55), and the DAWG <code>rs:ResultSet</code> result encoding —
+    which took SPARQL 1.0 from 45% coverage to 93% on its own, and was a <em>harness</em>
+    limitation rather than an engine one all along. The protocol suites run by starting the
+    real server on an ephemeral port and replaying each scripted HTTP conversation against it;
+    both now pass in full, <b>34/34</b> and <b>13/13</b>.</p>
 
     <p>The strongest single result is the one the round-trip gives: the canonicality rule from
     <a href="#s5">&sect;5</a> &mdash; inline only when the lexical form is already canonical, so

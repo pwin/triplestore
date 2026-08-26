@@ -236,10 +236,11 @@ footer{
   SHACL runs inside the write path, and a graph can carry its own invariants. This is how to
   use it — for ordinary queries, for geospatial work, for validation, and for holons.</p>
   <div class="badges">
-    <span class="badge"><b>303</b> tests</span>
+    <span class="badge"><b>476</b> tests</span>
     <span class="badge"><b>45</b> GeoSPARQL functions</span>
-    <span class="badge">SPARQL 1.1 <b>321/321</b></span>
-    <span class="badge">SPARQL 1.2 <b>242/246</b></span>
+    <span class="badge">SPARQL 1.1 <b>523/524</b></span>
+    <span class="badge">SPARQL 1.2 <b>262/266</b></span>
+    <span class="badge">Protocols <b>47/47</b></span>
     <span class="badge">SHACL Core <b>92/97</b></span>
   </div>
 </header>
@@ -396,9 +397,11 @@ holos dump --store ./var/store --format trig    # nq, nt, trig, ttl, rdf, jsonld
     <table>
       <thead><tr><th>Suite</th><th class="num-cell">Correctness</th><th class="num-cell">Coverage</th><th>What is not run</th></tr></thead>
       <tbody>
-        <tr><td>SPARQL 1.1</td><td class="num-cell"><b>321/321</b> &middot; 100%</td><td class="num-cell">321/625 &middot; <b>51%</b></td><td>Update (149), protocol (47), entailment (70), federation (7)</td></tr>
-        <tr><td>SPARQL 1.2</td><td class="num-cell"><b>242/246</b> &middot; 98.4%</td><td class="num-cell">246/269 &middot; <b>91%</b></td><td>Update syntax (23)</td></tr>
-        <tr><td>SPARQL 1.0</td><td class="num-cell"><b>126/127</b> &middot; 99.2%</td><td class="num-cell">127/283 &middot; <b>45%</b></td><td>152 whose expected results the harness cannot read</td></tr>
+        <tr><td>SPARQL 1.1</td><td class="num-cell"><b>523/524</b> &middot; 99.8%</td><td class="num-cell">524/625 &middot; <b>84%</b></td><td>Entailment (70), upstream (25), result formats (6)</td></tr>
+        <tr><td>SPARQL 1.2</td><td class="num-cell"><b>262/266</b> &middot; 98.5%</td><td class="num-cell">266/269 &middot; <b>99%</b></td><td>3 differing only in blank-node labels</td></tr>
+        <tr><td>SPARQL 1.0</td><td class="num-cell"><b>262/263</b> &middot; 99.6%</td><td class="num-cell">263/283 &middot; <b>93%</b></td><td>20 the parser rejects (upstream)</td></tr>
+        <tr><td>SPARQL Protocol</td><td class="num-cell"><b>34/34</b> &middot; 100%</td><td class="num-cell">34/34 &middot; <b>100%</b></td><td>—</td></tr>
+        <tr><td>Graph Store Protocol</td><td class="num-cell"><b>13/13</b> &middot; 100%</td><td class="num-cell">13/13 &middot; <b>100%</b></td><td>—</td></tr>
       </tbody>
     </table>
   </div>
@@ -409,11 +412,19 @@ holos dump --store ./var/store --format trig    # nq, nt, trig, ttl, rdf, jsonld
     suite runs at all. Quoting only the first would let a store report 100% while skipping
     half the tests, so both are printed by
     <code>cargo run -p holos-conformance --example coverage</code>.</p>
-    <p>The gaps are honest ones and each has a cause: <b>SPARQL Update is not implemented</b>
-    (that is 149 of SPARQL 1.1's skips and all of 1.2's), the protocol suites need endpoints
-    that do not exist yet, and entailment needs a reasoner. SPARQL 1.0's 152 are a
-    <em>harness</em> limitation, not an engine one — those tests encode expected results as
-    RDF, which the harness does not parse.</p>
+    <p>The gaps are honest ones and each has a cause. What remains for SPARQL 1.1 is
+    <b>70 entailment tests</b>, which need the reasoner, <b>25</b> confirmed by the oracle to
+    be upstream evaluator behaviour, and <b>6</b> result-format tests the harness does not
+    read.</p>
+    <p>Coverage moved from 51% to 84% by running what had been skipped rather than by fixing
+    failures: SPARQL Update (94 tests), both protocol suites (47), update syntax (55), and the
+    DAWG <code>rs:ResultSet</code> result encoding — which took SPARQL 1.0 from 45% to 93% on
+    its own, and was a <em>harness</em> limitation rather than an engine one all along.</p>
+    <p>The protocol suites are scripted HTTP conversations rather than queries, so they run by
+    starting the real server on an ephemeral port and replaying each script against it.
+    Running them for the first time found twelve ways the server was too permissive or too
+    strict — among them a multipart upload that stored only its first part and answered 204
+    as though it had worked.</p>
   </div>
 
   <p>All four SPARQL 1.2 failures are in the reused parser rather than anything below it,
@@ -802,17 +813,37 @@ sequenceDiagram
   </div>
 
   <div class="codelabel">endpoints</div>
-<pre><code>GET  /                   YASGUI console
-GET  /query?query=...    SPARQL 1.2 Protocol
-POST /query              form-encoded or application/sparql-query
-POST /update             501 — no update evaluator yet
-GET  /stats              {"quads":…,"dictionaryTerms":…,"namedGraphs":…}
-GET  /health             liveness</code></pre>
+<pre><code>GET    /                   YASGUI console
+GET    /query?query=...    SPARQL 1.2 Protocol
+POST   /query              form-encoded or application/sparql-query
+POST   /update             SPARQL 1.1 Update
+GET    /graph?graph=...    Graph Store Protocol — fetch a graph
+PUT    /graph?graph=...    replace a graph        POST merges
+DELETE /graph?graph=...    remove a graph
+GET    /stats              {"quads":…,"dictionaryTerms":…,"namedGraphs":…}
+GET    /health             liveness</code></pre>
 
-  <h3>Writes are the gap</h3>
-  <p>There is no SPARQL Update and no Graph Store Protocol. Writes go through the
-  <code>holos</code> command line against a stopped store, or through the holon API. That is
-  the single largest hole in the HTTP surface and it is stated in the 501 rather than faked.</p>
+  <h3>Two ways to write</h3>
+  <p><code>POST /update</code> takes SPARQL 1.1 Update, form-encoded or as
+  <code>application/sparql-update</code>. It takes the write lock for the request's duration
+  and is all-or-nothing: if any operation fails, the store is left exactly as it was,
+  including the operations that had already succeeded. Policy applies on the write path, so a
+  principal cannot delete what it cannot see, and <code>SILENT</code> never suppresses a
+  policy refusal.</p>
+  <p>The <b>Graph Store Protocol</b> at <code>/graph</code> is the better route for whole
+  graphs: <code>PUT</code> replaces, <code>POST</code> merges, <code>DELETE</code> removes the
+  graph rather than emptying it. It takes RDF directly in any syntax the store parses, so a
+  bulk load needs no <code>INSERT DATA</code> wrapper generated around it.</p>
+  <p>Both W3C protocol suites pass in full — <b>34/34</b> SPARQL Protocol and <b>13/13</b>
+  Graph Store Protocol. <code>LOAD &lt;http://…&gt;</code> is refused: fetching a URL named
+  inside a request is a server-side request forgery primitive.</p>
+
+  <div class="note">
+    <span class="lbl">The console writes to a different endpoint</span>
+    <p>YASGUI's endpoint box defaults to <code>/query</code>, which answers <b>400</b> for an
+    update. Change it to <code>/update</code> in the tab — the endpoint is per-tab, so keep
+    one tab on each.</p>
+  </div>
 </section>
 
 <!-- ============================================================ 9 -->

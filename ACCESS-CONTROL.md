@@ -344,7 +344,7 @@ Clearance 2 still sees nothing: 2 does not dominate 3.
 ### The same thing from Python
 
 ```python
-from holos import Store, Principal, Policy
+from holosdb import Store, Principal, Policy
 
 policy = (Policy()
           .deny_predicate("http://example.com/salary", except_role="hr")

@@ -6,7 +6,7 @@
 [`crates/`](crates/) builds a working store — tagged term ids, the nine-order index, SPARQL 1.2
 over reused Oxigraph crates, and fine-grained access policy enforced at the scan (§14).
 
-**Conformance: 2,876 of 3,014 W3C tests pass, and every one of the 138 failures is upstream.**
+**Conformance: 3,145 of 3,284 W3C tests pass, and every one of the 139 failures is upstream.**
 Not one is a HOLOS bug. The suites and how that attribution is made are in §15. 90 further
 unit and property tests pass.
 
@@ -385,8 +385,9 @@ becomes a per-holon retention policy rather than a schema decision.
 ## 10. L6 — Interfaces
 
 > **Partly built.** `holos-server` serves the SPARQL 1.2 Protocol over HTTP with a YASGUI
-> console at `/`. PyO3 and WASM bindings, the Graph Store Protocol and SPARQL Update are
-> not built; `POST /update` answers 501 rather than pretending.
+> console at `/`, the Graph Store Protocol at `/graph`, and SPARQL 1.1 Update at `/update`.
+> Both W3C protocol suites pass in full (34/34 and 13/13). PyO3 bindings are built and
+> packaged as `holosdb`. **WASM is not built.**
 
 Embedded Rust API first; then SPARQL 1.2 Protocol + Graph Store Protocol over HTTP (the
 Fuseki-equivalent); then PyO3 and WASM bindings, following the pattern both Oxigraph and

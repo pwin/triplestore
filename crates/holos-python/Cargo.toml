@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-name = "_holos"
+name = "_holosdb"
 # `cdylib` for the wheel; `rlib` so the crate's own tests can still link it.
 crate-type = ["cdylib", "rlib"]
 

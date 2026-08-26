@@ -149,7 +149,7 @@ writes without one. For bulk work, `engine.bulk_load(reader, format, base)` and
 ## 5. Python
 
 ```python
-from holos import Store
+from holosdb import Store
 
 store = Store("./var/db")
 store.load("data.trig")

@@ -11,8 +11,8 @@ import tempfile
 
 import pytest
 
-import holos
-from holos import Policy, Principal, Store
+import holosdb
+from holosdb import Policy, Principal, Store
 
 EX = "http://example.com/"
 HR_TRIG = os.path.join(
@@ -32,8 +32,8 @@ def store():
 
 def test_the_wheel_reports_what_it_contains():
     # A Python extra cannot toggle compiled code, so this is the only honest way to ask.
-    assert isinstance(holos.has_rocksdb(), bool)
-    assert holos.__version__
+    assert isinstance(holosdb.has_rocksdb(), bool)
+    assert holosdb.__version__
 
 
 def test_load_and_count(store):
@@ -112,7 +112,7 @@ def test_an_unknown_variable_raises(store):
 
 
 def test_a_syntax_error_is_its_own_exception(store):
-    with pytest.raises(holos.SyntaxError):
+    with pytest.raises(holosdb.SyntaxError):
         store.query("SELECT nonsense")
 
 
@@ -222,7 +222,7 @@ def test_an_update_is_all_or_nothing():
     # The second operation cannot succeed, so the first must not survive either.
     s = Store()
     s.update(f"INSERT DATA {{ <{EX}keep> <{EX}p> <{EX}b> }}")
-    with pytest.raises(holos.HolosError):
+    with pytest.raises(holosdb.HolosError):
         s.update(
             f"INSERT DATA {{ <{EX}new> <{EX}p> <{EX}x> }} ; DROP GRAPH <{EX}missing>"
         )
@@ -243,7 +243,7 @@ def test_a_denied_write_is_refused_and_rolled_back():
     policy = Policy().deny_predicate(f"{EX}secret")
     # deny_predicate covers reads; a write-denying rule needs the same scope on WRITE,
     # which the fluent API expresses through deny_all plus a grant.
-    with pytest.raises(holos.PolicyError):
+    with pytest.raises(holosdb.PolicyError):
         s.update(
             f"INSERT DATA {{ <{EX}a> <{EX}p> <{EX}b> }}",
             policy=Policy.deny_all(),
@@ -261,7 +261,7 @@ def test_an_update_cannot_delete_what_the_principal_cannot_read():
 
 
 def test_an_update_syntax_error_is_reported():
-    with pytest.raises(holos.SyntaxError):
+    with pytest.raises(holosdb.SyntaxError):
         Store().update("INSERT DATA { not sparql")
 
 
@@ -313,7 +313,7 @@ def test_concatenated_gzip_members_all_load(tmp_path):
 
 
 def test_geosparql_function_list_includes_the_two_we_added():
-    fns = holos.geosparql_functions()
+    fns = holosdb.geosparql_functions()
     assert len(fns) == 45
     assert any(f.endswith("/buffer") for f in fns)
     assert any(f.endswith("/boundary") for f in fns)
@@ -365,7 +365,7 @@ ex:PersonShape a sh:NodeShape ;
 # --------------------------------------------------------------------------- persistence
 
 
-@pytest.mark.skipif(not holos.has_rocksdb(), reason="built without persistence")
+@pytest.mark.skipif(not holosdb.has_rocksdb(), reason="built without persistence")
 def test_a_persistent_store_survives_reopening():
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "db")
@@ -377,7 +377,7 @@ def test_a_persistent_store_survives_reopening():
             assert again.query("SELECT ?o WHERE { ?s ?p ?o }")[0]["o"] == "kept"
 
 
-@pytest.mark.skipif(not holos.has_rocksdb(), reason="built without persistence")
+@pytest.mark.skipif(not holosdb.has_rocksdb(), reason="built without persistence")
 def test_one_process_at_a_time_holds_a_store():
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "db")
@@ -397,9 +397,9 @@ def test_close_is_idempotent_and_the_store_then_refuses_work():
     s.close()  # closing twice is fine
     assert s.is_closed
     assert repr(s) == "Store(closed)"
-    with pytest.raises(holos.HolosError):
+    with pytest.raises(holosdb.HolosError):
         len(s)
-    with pytest.raises(holos.HolosError):
+    with pytest.raises(holosdb.HolosError):
         s.query("SELECT * WHERE { ?s ?p ?o }")
 
 

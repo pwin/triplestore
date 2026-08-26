@@ -27,7 +27,7 @@ The full argument, the layer design, the roadmap and the risks are in **[DESIGN.
 | **L4** SHACL | ◐ Two validators behind one trait: [SHACL_Engine](https://github.com/pwin/SHACL_Engine) adapted for coverage, and a native evaluator for **incremental revalidation at 161× a full pass** |
 | **GeoSPARQL** | ✅ 45 functions — 43 via `spargeo`, plus `geof:buffer` and `geof:boundary` implemented here — composing with policy and the term encoding — see [DESIGN.md §17](DESIGN.md#17-geospatial) |
 | **L5** Holon layer | ◐ Walking skeleton: scene, boundary enforced on the write path, event log with per-triple RDF 1.2 provenance, **165 validated commits/s at 41× a full pass**. Owes atomicity, rules, maintained projections, time travel |
-| **L6** Protocol server | ◐ SPARQL 1.2 Protocol over HTTP (**34/34** W3C protocol tests) + **Graph Store Protocol** (**13/13**) + YASGUI console, **`POST /update`**, and **Python bindings** on PyPI. Owes WASM |
+| **L6** Protocol server | ◐ SPARQL 1.2 Protocol over HTTP (**34/34** W3C protocol tests) + **Graph Store Protocol** (**13/13**) + YASGUI console, **`POST /update`**, and **Python bindings** packaged as `holosdb` (built, tested, not yet published). Owes WASM |
 
 345 unit and property tests pass (`cargo test --workspace`), plus the W3C suites below.
 
@@ -178,6 +178,32 @@ reasons that looked nothing like the cause.
 cargo build --release      # needs Rust 1.87+
 cargo test --workspace
 ```
+
+## Python
+
+The bindings are packaged as **`holosdb`** — one abi3 wheel per platform, serving CPython
+3.9+, with RocksDB linked in.
+
+```sh
+pip install holosdb
+```
+
+```python
+from holosdb import Store, Principal, Policy
+
+store = Store("./var/store")
+store.load("data.nt")
+
+# ask a question *as somebody* — the policy is applied at the index scan, so the answer is
+# the one that principal is entitled to, for every query shape
+for row in store.query("SELECT ?s WHERE { ?s ?p ?o } LIMIT 5",
+                       principal=Principal("urn:user:alice", roles=["staff"])):
+    print(row["s"])
+```
+
+Build and release are [`.github/workflows/python.yml`](.github/workflows/python.yml);
+[PACKAGING.md](crates/holos-python/PACKAGING.md) covers the wheel layout, the `rocksdb`
+extra, and how to cut a release.
 
 ## Serve it
 
