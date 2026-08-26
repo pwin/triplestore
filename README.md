@@ -235,8 +235,9 @@ needs no network access at all.
 
 ## GeoSPARQL
 
-43 GeoSPARQL functions are registered on the evaluator, so spatial predicates compose with
-ordinary SPARQL — and with the access policy:
+45 GeoSPARQL functions are registered on the evaluator — 43 from `spargeo` plus
+`geof:buffer` and `geof:boundary` implemented here — so spatial predicates compose with
+ordinary SPARQL, and with the access policy:
 
 ```sparql
 PREFIX geo:  <http://www.opengis.net/ont/geosparql#>

@@ -26,6 +26,15 @@ deploy\smoke.ps1
 
 Then open `http://127.0.0.1:7878/` for the YASGUI console.
 
+The console has a **Map** tab alongside Table. It appears when a result carries a
+`geo:wktLiteral` or `geo:geoJSONLiteral` binding, draws the geometries on an OpenStreetMap
+base layer, and puts the rest of each row in the shape's popup — so a map is a result view
+rather than a picture. It reads CRS84 only, which is GeoSPARQL's default; a geometry in any
+other CRS is counted and reported under the map rather than drawn somewhere wrong.
+
+YASR's own map and chart plugins are not open source. This one was written for HOLOS and
+lives in `crates/holos-server/src/ui.rs`.
+
 ### Prerequisites
 
 | | Why |
