@@ -83,12 +83,20 @@ jobs:
       # @rpath/libclang.dylib" or a page of undefined `clang_*` symbols. Naming the
       # directory is the whole fix. (The Linux builds run in a container and are handled by
       # `before-script-linux` below.)
-      - name: Point bindgen at libclang (macOS)
+      - name: macOS build environment
         if: runner.os == 'macOS'
         run: |
           lib="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
           test -f "$lib/libclang.dylib" || { echo "no libclang.dylib under $lib"; exit 1; }
           echo "LIBCLANG_PATH=$lib" >> "$GITHUB_ENV"
+          # RocksDB uses C++17 aligned new/delete, which Clang refuses to emit below
+          # macOS 10.13. rustc's default deployment target for x86_64-apple-darwin is
+          # older than that, so the cross-compile fails on `clock_cache.cc` with "aligned
+          # allocation function ... is only available on macOS 10.13 or newer". arm64
+          # starts at 11.0 and needs nothing.
+          if [ "${{ matrix.platform.target }}" = "x86_64" ]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=10.13" >> "$GITHUB_ENV"
+          fi
 
       - name: Point bindgen at libclang (Windows)
         if: runner.os == 'Windows'
