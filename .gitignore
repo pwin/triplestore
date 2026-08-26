@@ -68,11 +68,17 @@ LOG.old.*
 # =============================================================================
 # Benchmark working files
 # =============================================================================
-# `holos-bench` generates these; they are large and reproducible from the harness.
+# `holos-bench` generates these; they are large and reproducible from the harness. By
+# default it writes them to the system temp directory rather than the tree, so these
+# patterns only matter when HOLOS_BENCH_DIR points somewhere inside it.
+#
+# There was a `holos-bench/` rule here. Without a leading slash that matches at any depth,
+# so it excluded `crates/holos-bench/` — the crate's own source — from the repository. A
+# fresh clone then had a workspace member with no manifest, and `cargo build` failed before
+# compiling anything. Do not reinstate it: the data never lands in the tree anyway.
 bench-*.nt
 bench-*.nq
 /bench/
-holos-bench/
 
 # =============================================================================
 # Python
