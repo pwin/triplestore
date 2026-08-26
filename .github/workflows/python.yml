@@ -106,8 +106,9 @@ jobs:
           # RocksDB is compiled from C++ and linked statically into the extension module,
           # so the build container needs a C++ toolchain and a good deal of patience — this
           # is why a wheel takes minutes rather than seconds. `clang-devel` is the part
-          # bindgen needs; without it the link ends in a page of undefined `clang_*`
-          # symbols that says nothing about the actual cause.
+          # bindgen needs: it opens libclang at build time, and the manylinux images do not
+          # ship one. `clang-sys` searches /usr/lib64 by default, which is where this puts
+          # it, so no LIBCLANG_PATH is needed inside the container.
           before-script-linux: |
             set -eux
             if command -v dnf >/dev/null; then
@@ -117,9 +118,10 @@ jobs:
             elif command -v apt-get >/dev/null; then
               apt-get update && apt-get install -y g++ clang libclang-dev
             fi
-            # Prove it landed somewhere bindgen will look, rather than discovering it did
-            # not thirty minutes into a RocksDB compile.
-            ls -1 /usr/lib64/libclang.so* /usr/lib/libclang.so* 2>/dev/null | head -1
+            # Report where it landed, without being able to fail the build: an earlier
+            # version of this line ended the container with exit 2 because its second glob
+            # matched nothing — while the library it was checking for was present.
+            ls -1 /usr/lib64/libclang.so* 2>/dev/null | head -1 || true
 
       - uses: actions/upload-artifact@v4
         with:

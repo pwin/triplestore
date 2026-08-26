@@ -64,7 +64,13 @@ holos-tabular = { path = "crates/holos-tabular", version = "0.1.0" }
 anyhow = "1"
 thiserror = "2"
 rustc-hash = "2"
-rocksdb = { version = "0.24", default-features = false, features = ["lz4"] }
+# `bindgen-runtime` is in rocksdb's default features, and `default-features = false` drops
+# it. Without it `clang-sys` *links* libclang at build time instead of loading it, so the
+# build script needs the dylib on the loader path rather than at LIBCLANG_PATH — which is
+# not something a CI runner provides, and produced "Library not loaded: @rpath/
+# libclang.dylib" on macOS and a page of undefined `clang_*` symbols on Linux. With it,
+# LIBCLANG_PATH is honoured and the build works wherever a libclang exists.
+rocksdb = { version = "0.24", default-features = false, features = ["lz4", "bindgen-runtime"] }
 tempfile = "3"
 proptest = "1"
 
