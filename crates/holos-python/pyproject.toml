@@ -46,5 +46,9 @@ manifest-path = "Cargo.toml"
 features = ["pyo3/extension-module"]
 # abi3: one wheel per platform serves every CPython 3.9+, which matters when each wheel
 # carries a statically linked RocksDB.
-compatibility = "manylinux2014"
+#
+# `compatibility` is deliberately not pinned here. The right manylinux tag depends on the
+# image a build runs in, and CI picks it per platform; pinning one in the manifest means a
+# local build claims a compatibility it may not have. Release builds use manylinux_2_28,
+# which is what bindgen's libclang requirement forces.
 strip = true

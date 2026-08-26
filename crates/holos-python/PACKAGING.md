@@ -60,8 +60,17 @@ would be careless with other people's bandwidth.
 
 `maturin-action` builds the matrix. The pieces that matter:
 
-- **Linux** — build inside `manylinux2014`, which has a new enough toolchain for RocksDB.
-  `manylinux_2_28` also works and produces smaller wheels; it drops older distributions.
+- **Linux** — build inside **`manylinux_2_28`**. `manylinux2014` is CentOS 7, and while its
+  toolchain compiles RocksDB, it has no clang new enough for the libclang that
+  `librocksdb-sys` needs to run bindgen; the build ends in a page of undefined `clang_*`
+  symbols. 2_28 is AlmaLinux 8, where `dnf install clang-devel` is the whole fix. The cost
+  is glibc 2.28 — CentOS 7 and Ubuntu 18.04 cannot install the wheel, and both are long out
+  of support.
+- **libclang, everywhere.** bindgen *loads* libclang at build time rather than linking it,
+  and neither hosted runner puts one where it looks. macOS has it under
+  `$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib`, Windows under
+  `C:\Program Files\LLVM\bin`; the workflow sets `LIBCLANG_PATH` to each and fails loudly
+  if the file is absent, rather than thirty minutes into a RocksDB compile.
 - **macOS** — build `universal2`, or `x86_64` and `aarch64` separately.
 - **Windows** — MSVC. Needs "Desktop development with C++" installed.
 - **sdist** — publish one. It is what lets anyone on an unusual platform build from source,

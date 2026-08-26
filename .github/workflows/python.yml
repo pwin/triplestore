@@ -55,8 +55,13 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { os: ubuntu-latest, target: x86_64, manylinux: "2014" }
-          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: "2014" }
+          # manylinux_2_28 rather than 2014: `librocksdb-sys` runs bindgen, bindgen needs
+          # libclang, and CentOS 7 — which is what the 2014 image is — has no clang new
+          # enough to provide one. 2_28 is AlmaLinux 8, where `dnf install clang-devel` is
+          # all it takes. The cost is glibc 2.28, so CentOS 7 and Ubuntu 18.04 cannot
+          # install the wheel; both are long out of support.
+          - { os: ubuntu-latest, target: x86_64, manylinux: "2_28" }
+          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: "2_28" }
           - { os: macos-13, target: x86_64, manylinux: "auto" }
           - { os: macos-latest, target: aarch64, manylinux: "auto" }
           - { os: windows-latest, target: x64, manylinux: "auto" }
@@ -66,6 +71,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # `librocksdb-sys` generates its bindings with bindgen, which loads libclang at build
+      # time rather than linking it. Both hosted runners ship one; neither puts it anywhere
+      # bindgen looks by default, so the build aborts with "Library not loaded:
+      # @rpath/libclang.dylib" or a page of undefined `clang_*` symbols. Naming the
+      # directory is the whole fix. (The Linux builds run in a container and are handled by
+      # `before-script-linux` below.)
+      - name: Point bindgen at libclang (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          lib="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
+          test -f "$lib/libclang.dylib" || { echo "no libclang.dylib under $lib"; exit 1; }
+          echo "LIBCLANG_PATH=$lib" >> "$GITHUB_ENV"
+
+      - name: Point bindgen at libclang (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $lib = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path "$lib\libclang.dll")) { throw "no libclang.dll under $lib" }
+          "LIBCLANG_PATH=$lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build the wheel
         uses: PyO3/maturin-action@v1
@@ -78,14 +104,22 @@ jobs:
             --manifest-path crates/holos-python/Cargo.toml
           sccache: "true"
           # RocksDB is compiled from C++ and linked statically into the extension module,
-          # so the build container needs a C++ toolchain and a good deal of patience. This
-          # is the reason a wheel takes minutes rather than seconds.
+          # so the build container needs a C++ toolchain and a good deal of patience — this
+          # is why a wheel takes minutes rather than seconds. `clang-devel` is the part
+          # bindgen needs; without it the link ends in a page of undefined `clang_*`
+          # symbols that says nothing about the actual cause.
           before-script-linux: |
-            if command -v yum >/dev/null; then
-              yum install -y gcc-c++ clang-devel
+            set -eux
+            if command -v dnf >/dev/null; then
+              dnf install -y gcc-c++ clang-devel llvm-devel
+            elif command -v yum >/dev/null; then
+              yum install -y gcc-c++ clang-devel llvm-devel
             elif command -v apt-get >/dev/null; then
               apt-get update && apt-get install -y g++ clang libclang-dev
             fi
+            # Prove it landed somewhere bindgen will look, rather than discovering it did
+            # not thirty minutes into a RocksDB compile.
+            ls -1 /usr/lib64/libclang.so* /usr/lib/libclang.so* 2>/dev/null | head -1
 
       - uses: actions/upload-artifact@v4
         with:
