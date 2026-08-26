@@ -1135,6 +1135,40 @@ hull, envelope, the set operations and the GeoJSON accessor. HOLOS adds **2 more
 > against a live endpoint and two of the names came back unknown. They are implemented now,
 > which is why the sentence above is true; it was not when it was first written.
 
+### The set operations are wrapped, not just registered
+
+`geof:union`, `geof:intersection`, `geof:difference` and `geof:symDifference` are
+`spargeo`'s implementations called through a wrapper in `geo_ext`, because their output
+needed correcting.
+
+`geo`'s boolean operations go through `i_overlay`, which works on an integer grid and
+converts back on the way out. Coordinates that are exactly representable survive; the rest
+come back shifted by around 1e-10. `-83.2` becomes `-83.20000000009313`.
+
+That is about 0.01 mm on the ground and harmless for anything measuring distance. It is
+**not** harmless for the exact topological predicates, which turn on whether two boundaries
+coincide:
+
+```text
+sfTouches(C, A)             → true
+sfTouches(C, union(A, D))   → false     ← the same shared edge, now 1e-10 apart
+```
+
+`sfTouches`, `sfEquals` and `sfCrosses` therefore stopped composing with any computed
+geometry, and did so silently — the answer was wrong, not merely imprecise. It was found by
+validating against Ontotext's GeoSPARQL example, not by a test here.
+
+**The fix is snapping, not rounding**, and the distinction is the whole design. Rounding
+every output coordinate to the inputs' decimal places would also move genuinely *new*
+vertices: two integer-coordinate edges crossing at x = 1.5 would round to 2, turning a
+correct intersection into a wrong one. Instead each output coordinate is compared against the
+coordinates that went in and replaced only when within 1e-9 of one — so a preserved vertex
+returns to its exact input value, while a computed intersection point, matching no input, is
+left exactly as produced.
+
+Wrapping `spargeo` rather than reimplementing keeps one implementation of the operation
+itself; only the coordinates are touched on the way out.
+
 The two additions match `spargeo`'s literal conventions exactly — CRS84 only, both
 `wktLiteral` and `geoJSONLiteral` accepted, output in whichever the arguments used, the same
 OGC unit IRIs — because a function that round-tripped literals differently from its

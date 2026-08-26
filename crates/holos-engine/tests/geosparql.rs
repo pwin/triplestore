@@ -165,3 +165,99 @@ fn access_policy_still_applies_to_geometry() {
         _ => panic!("expected a solutions result"),
     }
 }
+
+// ---------------------------------------------------------------------------------
+// coordinate snapping after a set operation
+// ---------------------------------------------------------------------------------
+//
+// `geo`'s boolean operations go through `i_overlay`, which works on an integer grid and
+// converts back on the way out. Coordinates that are not exactly representable come back
+// shifted by about 1e-10: `-83.2` becomes `-83.20000000009313`.
+//
+// That is 0.01 mm and harmless for measuring. It is not harmless for the exact topological
+// predicates, which turn on whether two boundaries coincide — so `sfTouches` silently
+// stopped composing with any computed geometry. `geo_ext` wraps the four set operations to
+// snap their output back onto the coordinates that went in.
+
+const WKT: &str = r#"^^<http://www.opengis.net/ont/geosparql#wktLiteral>"#;
+
+/// The single value of a one-row, one-column query.
+fn value(expression: &str) -> String {
+    let rows = rows(&format!("{PREFIXES} SELECT ({expression} AS ?r) WHERE {{}}"));
+    assert_eq!(rows.len(), 1, "expected exactly one row from {expression}");
+    rows[0]
+        .split_once('=')
+        .map(|(_, v)| v.to_owned())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_set_operation_returns_its_inputs_coordinates_exactly() {
+    // -83.2 and 34.1 are in the inputs, so they must be in the output unchanged. Before the
+    // snapping wrapper this produced -83.20000000009313.
+    let result = value(&format!(
+        r#"geof:union("Polygon((-83.6 34.1, -83.2 34.1, -83.2 34.5, -83.6 34.5, -83.6 34.1))"{WKT},
+                      "Polygon((-83.3 34.0, -83.1 34.0, -83.1 34.2, -83.3 34.2, -83.3 34.0))"{WKT})"#
+    ));
+    assert!(
+        result.contains("-83.6 34.1"),
+        "an input coordinate came back perturbed: {result}"
+    );
+    assert!(
+        !result.contains("34.10000000"),
+        "the i_overlay perturbation is still present: {result}"
+    );
+}
+
+#[test]
+fn touching_survives_a_union() {
+    // The failure this fixes, stated as the invariant it broke: C shares an edge with A at
+    // longitude -83.2, so it touches A, and it must still touch a union that A is part of.
+    let a = r#""Polygon((-83.6 34.1, -83.2 34.1, -83.2 34.5, -83.6 34.5, -83.6 34.1))""#;
+    let d = r#""Polygon((-83.3 34.0, -83.1 34.0, -83.1 34.2, -83.3 34.2, -83.3 34.0))""#;
+    let c = r#""Polygon((-83.2 34.3, -83.0 34.3, -83.0 34.5, -83.2 34.5, -83.2 34.3))""#;
+
+    assert_eq!(
+        value(&format!("geof:sfTouches({c}{WKT}, {a}{WKT})")),
+        value(&format!(
+            "geof:sfTouches({c}{WKT}, geof:union({a}{WKT}, {d}{WKT}))"
+        )),
+        "touching A but not touching a union containing A is a contradiction"
+    );
+}
+
+#[test]
+fn a_computed_vertex_is_not_snapped() {
+    // The reason this is snapping rather than rounding. Rounding every coordinate to the
+    // inputs' decimal places would move genuinely new vertices; here the triangle
+    // 2x + 3y <= 6 clipped to the 0..2 square produces a vertex at y = 2/3, which matches no
+    // input and must survive as computed.
+    let result = value(&format!(
+        r#"geof:intersection("Polygon((0 0, 3 0, 0 2, 0 0))"{WKT},
+                             "Polygon((0 0, 2 0, 2 2, 0 2, 0 0))"{WKT})"#
+    ));
+    assert!(
+        result.contains("2 0.66"),
+        "the computed vertex at y = 2/3 was lost or snapped away: {result}"
+    );
+}
+
+#[test]
+fn every_set_operation_is_wrapped() {
+    // A wrapper on three of the four would be worse than none: the exception would be found
+    // by whoever eventually used it, in production.
+    for operation in ["union", "intersection", "difference", "symDifference"] {
+        let result = value(&format!(
+            r#"geof:{operation}("Polygon((0.1 0.1, 0.4 0.1, 0.4 0.4, 0.1 0.4, 0.1 0.1))"{WKT},
+                                "Polygon((0.3 0.3, 0.6 0.3, 0.6 0.6, 0.3 0.6, 0.3 0.3))"{WKT})"#
+        ));
+        assert!(
+            result.contains("0.1 0.1") || result.contains("0.3 0.3") || result.contains("0.4 0.4"),
+            "{operation} did not return an input coordinate exactly: {result}"
+        );
+        assert!(
+            !result.contains("0.10000000") && !result.contains("0.30000000"),
+            "{operation} still perturbs its inputs: {result}"
+        );
+    }
+}

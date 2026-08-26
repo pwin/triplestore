@@ -37,12 +37,29 @@ const OGC_UOM_PREFIX: &str = "http://www.opengis.net/def/uom/OGC/1.0/";
 const BUFFER: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.opengis.net/def/function/geosparql/buffer");
 /// `geof:boundary`.
+const UNION: NamedNodeRef<'_> =
+    NamedNodeRef::new_unchecked("http://www.opengis.net/def/function/geosparql/union");
+const INTERSECTION: NamedNodeRef<'_> =
+    NamedNodeRef::new_unchecked("http://www.opengis.net/def/function/geosparql/intersection");
+const DIFFERENCE: NamedNodeRef<'_> =
+    NamedNodeRef::new_unchecked("http://www.opengis.net/def/function/geosparql/difference");
+const SYM_DIFFERENCE: NamedNodeRef<'_> =
+    NamedNodeRef::new_unchecked("http://www.opengis.net/def/function/geosparql/symDifference");
 const BOUNDARY: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.opengis.net/def/function/geosparql/boundary");
 
 /// The functions this module adds to `spargeo`'s 43.
-pub const EXTRA_GEOSPARQL_FUNCTIONS: [(NamedNodeRef<'static>, fn(&[Term]) -> Option<Term>); 2] =
-    [(BUFFER, geof_buffer), (BOUNDARY, geof_boundary)];
+pub const EXTRA_GEOSPARQL_FUNCTIONS: [(NamedNodeRef<'static>, fn(&[Term]) -> Option<Term>); 6] = [
+    (BUFFER, geof_buffer),
+    (BOUNDARY, geof_boundary),
+    // The four set operations are `spargeo`'s, wrapped to snap their output back onto the
+    // inputs' coordinates. Registered after `spargeo`'s own so these win; see
+    // `snap_to_inputs` for what they are correcting and why it matters.
+    (UNION, geof_union),
+    (INTERSECTION, geof_intersection),
+    (DIFFERENCE, geof_difference),
+    (SYM_DIFFERENCE, geof_sym_difference),
+];
 
 // ---------------------------------------------------------------------------------
 // literal plumbing — deliberately identical in behaviour to spargeo's private helpers
@@ -52,6 +69,130 @@ pub const EXTRA_GEOSPARQL_FUNCTIONS: [(NamedNodeRef<'static>, fn(&[Term]) -> Opt
 enum Kind {
     Wkt,
     GeoJson,
+}
+
+/// The GeoSPARQL function namespace.
+const GEOF: &str = "http://www.opengis.net/def/function/geosparql/";
+
+/// How close an output coordinate must be to an input one to be treated as that input.
+///
+/// The perturbation being corrected is around 1e-10 in absolute terms at these magnitudes.
+/// 1e-9 degrees is roughly **0.1 mm** on the ground, far below any distance RDF geometry
+/// data is meaningful at, and far above the error. Wide enough to catch it, narrow enough
+/// that a genuinely distinct vertex cannot be swallowed.
+const SNAP_EPSILON: f64 = 1e-9;
+
+/// `spargeo`'s implementation of a function, by local name.
+///
+/// The functions are a public const array of name/pointer pairs, which is what makes it
+/// possible to reuse an implementation rather than write a second one that would then have
+/// to be kept in agreement with it.
+fn spargeo_function(local: &str) -> Option<fn(&[Term]) -> Option<Term>> {
+    let iri = format!("{GEOF}{local}");
+    spargeo::GEOSPARQL_EXTENSION_FUNCTIONS
+        .iter()
+        .find(|(name, _)| name.as_str() == iri)
+        .map(|(_, function)| *function)
+}
+
+/// Every coordinate value appearing in the arguments.
+///
+/// X and Y are kept apart. Mixing them would let a latitude snap to a longitude, which at
+/// these tolerances is unlikely but is not a risk worth taking for nothing.
+fn input_coordinates(args: &[Term]) -> (Vec<f64>, Vec<f64>) {
+    // `map_coords` takes an `Fn`, so the collection goes through a Cell rather than a
+    // captured `&mut`. Cheap, and avoids threading a second traversal helper through the
+    // module for one caller.
+    let xs = std::cell::RefCell::new(Vec::new());
+    let ys = std::cell::RefCell::new(Vec::new());
+    for arg in args {
+        let Some(geometry) = extract_geometry(arg) else {
+            continue;
+        };
+        map_coords(&geometry, &|c: Coord| {
+            xs.borrow_mut().push(c.x);
+            ys.borrow_mut().push(c.y);
+            c
+        });
+    }
+    (xs.into_inner(), ys.into_inner())
+}
+
+/// The input value this output coordinate is a perturbed copy of, if any.
+fn nearest(value: f64, candidates: &[f64]) -> Option<f64> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|candidate| (candidate - value).abs() <= SNAP_EPSILON)
+        .min_by(|a, b| {
+            (a - value)
+                .abs()
+                .partial_cmp(&(b - value).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
+/// Restores coordinates that a boolean operation perturbed.
+///
+/// # The problem
+///
+/// `geo`'s boolean operations go through `i_overlay`, which works on an integer grid and
+/// converts back on the way out. Coordinates that are exactly representable survive; others
+/// come back shifted by about 1e-10. `-83.2` becomes `-83.20000000009313`.
+///
+/// That is 0.01 mm and harmless for anything measuring distance. It is *not* harmless for
+/// the exact topological predicates, which turn on whether two boundaries coincide:
+///
+/// ```text
+/// sfTouches(C, A)             -> true
+/// sfTouches(C, union(A, D))   -> false     // same shared edge, now 1e-10 apart
+/// ```
+///
+/// So `sfTouches`, `sfEquals` and `sfCrosses` silently stopped composing with any computed
+/// geometry — the answer was wrong, not merely imprecise.
+///
+/// # The fix, and why it is not rounding
+///
+/// Rounding every coordinate to the inputs' decimal places would also move genuinely *new*
+/// vertices: two integer-coordinate lines crossing at x = 1.5 would be rounded to 2, turning
+/// a correct intersection into a wrong one.
+///
+/// Instead each output coordinate is compared against the coordinates that went in, and
+/// replaced only when it is within [`SNAP_EPSILON`] of one of them. A preserved vertex
+/// returns to its exact input value; a computed intersection point, which matches no input,
+/// is left exactly as the algorithm produced it.
+fn snap_to_inputs(result: &Term, args: &[Term]) -> Term {
+    let (xs, ys) = input_coordinates(args);
+    if xs.is_empty() {
+        return result.clone();
+    }
+    let Some(geometry) = extract_geometry(result) else {
+        return result.clone();
+    };
+    let snapped = map_coords(&geometry, &|c: Coord| Coord {
+        x: nearest(c.x, &xs).unwrap_or(c.x),
+        y: nearest(c.y, &ys).unwrap_or(c.y),
+    });
+    Term::Literal(to_literal(&snapped, pick_output_kind(args)))
+}
+
+/// Runs one of `spargeo`'s set operations and snaps the result back onto its inputs.
+fn set_operation(local: &str, args: &[Term]) -> Option<Term> {
+    let result = spargeo_function(local)?(args)?;
+    Some(snap_to_inputs(&result, args))
+}
+
+fn geof_union(args: &[Term]) -> Option<Term> {
+    set_operation("union", args)
+}
+fn geof_intersection(args: &[Term]) -> Option<Term> {
+    set_operation("intersection", args)
+}
+fn geof_difference(args: &[Term]) -> Option<Term> {
+    set_operation("difference", args)
+}
+fn geof_sym_difference(args: &[Term]) -> Option<Term> {
+    set_operation("symDifference", args)
 }
 
 fn detect_kind(term: &Term) -> Option<Kind> {
