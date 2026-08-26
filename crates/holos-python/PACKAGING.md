@@ -71,7 +71,9 @@ would be careless with other people's bandwidth.
   `$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib`, Windows under
   `C:\Program Files\LLVM\bin`; the workflow sets `LIBCLANG_PATH` to each and fails loudly
   if the file is absent, rather than thirty minutes into a RocksDB compile.
-- **macOS** — build `universal2`, or `x86_64` and `aarch64` separately.
+- **macOS** — both arches are cross-compiled from the arm64 runner. The Intel runner
+  label `macos-13` has been retired; a job requesting it queues forever rather than
+  failing, which cancels the run and every job downstream of it.
 - **Windows** — MSVC. Needs "Desktop development with C++" installed.
 - **sdist** — publish one. It is what lets anyone on an unusual platform build from source,
   and it is the only artifact that stays useful when a wheel matrix goes stale.
