@@ -112,6 +112,27 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// Makes everything written so far durable. A no-op for the in-memory tier.
     fn flush(&mut self) -> Result<()>;
 
+    /// Writes a consistent snapshot of the store to `destination`.
+    ///
+    /// The point of a checkpoint is that it can be taken while the store is *open* and
+    /// being written to, which is what makes an online backup possible. Copying the
+    /// directory instead requires stopping the service, because an LSM tree in mid-flight
+    /// is not a set of files that can be copied one at a time.
+    ///
+    /// The default is a refusal rather than a silent copy: a backend that cannot produce a
+    /// consistent snapshot should say so, not hand back something that looks like one.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unsupported`] on a backend without checkpoints, and whatever the
+    /// backend reports otherwise.
+    fn checkpoint(&self, destination: &std::path::Path) -> Result<()> {
+        let _ = destination;
+        Err(crate::StorageError::Unsupported(
+            "this storage backend cannot take a checkpoint".to_owned(),
+        ))
+    }
+
     /// Announces a bulk load, so a backend can buffer writes and skip its log.
     ///
     /// A default no-op rather than a downcast: a caller should be able to ask any backend

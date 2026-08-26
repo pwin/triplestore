@@ -227,15 +227,63 @@ file silently.
 
 ## Backup and restore
 
-[deploy/backup.sh](deploy/backup.sh) — and it **requires the service to be stopped**, which
-is a real limitation rather than caution:
+**The service keeps running.** RocksDB checkpoints flush the log and hard-link the SST files
+into a new directory, so the snapshot is consistent, near-instant, and initially costs almost
+no disk — taken while the store is open and being written to.
 
-> RocksDB checkpoints are named in `DESIGN.md` §6.1 but are **not built yet**, so there is
-> no way to take a consistent snapshot of an open store. When checkpoints land this becomes
-> a hard-linked online copy and the stop goes away.
+```sh
+deploy/backup.sh /backups          # or: holos backup --store ./var/store --to /backups/tonight
+```
 
-The script refuses to run if it can see the lock held. Restore by stopping the service and
-copying the directory back.
+Two consequences of hard links, both of which matter:
+
+- **A checkpoint on the same filesystem shares the store's files.** That is what makes it
+  cheap, and it means **it is not an off-machine backup** — losing the disk loses both. Copy
+  or replicate the result elsewhere if that is what you need. To a different filesystem
+  RocksDB copies instead: correct, no longer instant, genuinely independent.
+- **A checkpoint pins the files it links**, so compaction cannot delete them. Disk use climbs
+  as the snapshot and the live store diverge. `deploy/backup.sh` keeps the last
+  `HOLOS_BACKUP_KEEP` (default 7) and removes the rest — retention is part of the job, not an
+  afterthought.
+
+Restore by pointing `--store` at a checkpoint, or by copying it back with the service stopped.
+
+Two refusals worth knowing, both preventing a backup that looks fine and is not:
+
+- **During a bulk load.** Those writes are buffered in the process rather than in RocksDB, so
+  a checkpoint taken then would be internally consistent and missing data.
+- **An in-memory store.** It has no files to snapshot, and says so rather than writing nothing
+  and reporting success.
+
+### Over HTTP
+
+`POST /backup` does the same thing, and is **off unless both flags are set**:
+
+```sh
+holos-server --store ./var/store              --backup-dir /backups --backup-role ops --trust-forwarded-identity
+
+curl -X POST -H 'X-Holos-Roles: ops' http://127.0.0.1:7878/backup
+# {"path":"/backups/holos-1787763950","quads":1048576}
+```
+
+| Condition | Answer |
+|---|---|
+| Either flag unset | **404** — the endpoint is absent, not merely defended |
+| Identity not trusted | **403** — every request is anonymous, so nobody holds the role |
+| Role missing or wrong | **403** |
+| Role held | **201** with the path and quad count |
+| Bulk load in progress, or in-memory store | **409** with the reason |
+
+**The caller never names the destination.** `POST /backup?to=/anywhere` would be an
+arbitrary-write primitive — whatever the server process can write, a caller could ask it to
+fill with a copy of the database. The server owns `--backup-dir` and mints a timestamped
+child inside it.
+
+A backup copies the whole store, ignoring the policy that governs every query. It is the one
+operation where the ordinary access controls do not apply, which is why it has its own role —
+and why `--role` on the server, which grants a role to *everyone*, must not be used to
+provide it.
+
 
 `holos dump` is **not** a backup — it emits what the *principal* is allowed to see, through
 the same policy-filtered view as any query. That is usually a smaller thing, and that is the
@@ -393,7 +441,7 @@ Stated plainly, because finding these out in production is worse.
 |---|---|---|
 | **No TLS in the server** | Plain HTTP only | Terminate at the front door. Both configs do |
 | **Timeouts are not absolute** | `--timeout` stops a query that is reading or streaming rows; one blocked inside a single in-memory step is not interruptible | Bound the result size in the query |
-| **No online backup** | Backups need a stop | Above |
+| **A checkpoint is not off-machine** | Hard links share the live store's files, so one disk failure loses both | Copy or replicate the checkpoint elsewhere; or checkpoint to a different filesystem, which copies |
 | **Single process per store** | No read replicas over one directory | Run replicas over separate copies |
 | **CORS is `*`** | Any origin may query | Intentional — a SPARQL endpoint is routinely queried from a page elsewhere, and refusing that makes it useless for its most common job. Restrict at the proxy if you need to |
 | **Direct graph identification is off by default** | `PUT /graph/people` answers 400; the parameter form works | Set `--gsp-base` to the base URI the *outside* sees |

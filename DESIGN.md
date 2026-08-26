@@ -191,7 +191,11 @@ But use the RocksDB features Oxigraph currently leaves on the table:
 - **Merge operators** for dictionary refcounts and for the statistics counters in §7 — no
   read-modify-write on the write path.
 - **Checkpoints** for consistent backups *and* for holon branching: a checkpoint is a cheap
-  hard-linked fork of a dataset.
+  hard-linked fork of a dataset. **Built.** `Store::checkpoint` takes one while the store is
+  open and being written to; `holos backup` and `POST /backup` expose it. Two refusals rather
+  than a wrong answer: during a bulk load, whose writes are buffered outside RocksDB, and on
+  an in-memory store, which has no files to snapshot. Holon branching is
+  `holos_holon::branch` — §9.
 - **User-defined timestamps** for MVCC and time travel. Caveat, stated plainly: UDT is still marked
   experimental upstream. Fallback if it disappoints — an explicit monotonic version suffix in the
   key, the TiKV approach, at the cost of writing your own GC.
@@ -375,7 +379,28 @@ which regime a projection is in. Pretending otherwise would be the design's wors
 
 **Time travel and branching** fall out of the substrate: `AT VERSION n` / `AT TIME t` reads use
 RocksDB user-defined timestamps (or version-suffixed keys); a branch is a checkpoint plus a fresh
-event-log head. Auditability — which the Holon article flags as an explicit architectural choice —
+event-log head.
+
+> **Branching is built; time travel is not.** `holos_holon::branch` creates a holon starting
+> from another's scene and boundary, with a fresh event log opening on a `holos:branchedFrom`
+> record naming the parent and the version it diverged at. The two then move independently.
+>
+> The two halves of §6.1's sentence turn out to live in different places. The **checkpoint**
+> is `Store::checkpoint`, a hard-linked fork of the whole dataset — cheap, but a separate
+> store, so the branches cannot be queried together. The **fresh event-log head** is the
+> holon-level branch, inside one store, where they can. Which to reach for depends on the
+> question: forking a dataset to try a migration wants the first; comparing two futures of
+> one holon wants the second.
+>
+> A holon branch copies its scene rather than linking it, because nothing in RDF lets two
+> named graphs share storage and pretending otherwise would mean a write to one silently
+> changing the other. It therefore costs the size of the scene.
+>
+> Versions continue rather than restart: a branch taken at parent version 7 has version 7 and
+> its first tick is 8. Restarting at zero would make "version 3" ambiguous between two
+> lineages whose scenes are genuinely related.
+>
+> `AT VERSION n` still needs the MVCC substrate, which is not built. Auditability — which the Holon article flags as an explicit architectural choice —
 becomes a per-holon retention policy rather than a schema decision.
 
 **All holon metadata is RDF** in a system graph, queryable with ordinary SPARQL. No new model.

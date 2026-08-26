@@ -104,6 +104,10 @@ struct Config {
     gsp_path: String,
     data: Vec<String>,
     store: Option<String>,
+    /// Where `POST /backup` writes checkpoints. `None` disables the endpoint entirely.
+    backup_dir: Option<String>,
+    /// The role a principal must hold to trigger a backup. `None` disables the endpoint.
+    backup_role: Option<String>,
     threads: usize,
     ui: bool,
     trust_forwarded: bool,
@@ -127,6 +131,8 @@ impl Default for Config {
             gsp_path: "/graph".to_owned(),
             data: Vec::new(),
             store: None,
+            backup_dir: None,
+            backup_role: None,
             threads: 8,
             ui: true,
             trust_forwarded: false,
@@ -366,6 +372,7 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
             }
             apply_update(state, request, &update, &merged)
         }
+        ("POST", "/backup") => backup(state, request),
         ("OPTIONS", _) => respond(request, 204, "text/plain", Vec::new()),
         (method, p)
             if matches!(method, "GET" | "HEAD" | "PUT" | "POST" | "DELETE")
@@ -448,6 +455,85 @@ fn is_graph_store_path(state: &State, path: &str) -> bool {
     }
     state.config.gsp_base.is_some()
         && path.starts_with(&format!("{}/", state.config.gsp_path.trim_end_matches('/')))
+}
+
+/// Takes a consistent snapshot of the store, for an administrator.
+///
+/// # Why the client cannot name the destination
+///
+/// It would be the obvious API — `POST /backup?to=/srv/backups/tonight` — and it would be an
+/// arbitrary-write primitive: whatever the server process can write, a caller could ask it
+/// to fill with a copy of the database. The server owns the parent directory (`--backup-dir`)
+/// and mints a timestamped child; the caller chooses nothing but the moment.
+///
+/// # The guard
+///
+/// Three conditions, each of which fails closed:
+///
+/// 1. **The endpoint does not exist** unless both `--backup-dir` and `--backup-role` are set.
+///    An unconfigured server answers 404, so the surface is absent rather than merely
+///    defended.
+/// 2. **The principal must hold the named role.** A backup copies the whole store, ignoring
+///    the policy that governs every query — so this is the one operation where the ordinary
+///    access controls do not apply, and it needs its own.
+/// 3. **Identity has to be trustworthy.** Without `--trust-forwarded-identity` every request
+///    is anonymous and holds no roles, so the endpoint answers 403 to everyone. That is the
+///    correct default: an unauthenticated server should not be able to be told to copy
+///    itself.
+fn backup(state: &State, request: Request) -> Result<()> {
+    let (Some(dir), Some(role)) = (&state.config.backup_dir, &state.config.backup_role) else {
+        // Not 403: an endpoint that is switched off should be indistinguishable from one
+        // that was never built, so probing cannot map the configuration.
+        return respond(request, 404, "text/plain", b"not found".to_vec());
+    };
+
+    let principal = principal_for(state, &request);
+    if !principal.has_role(role) {
+        return respond(
+            request,
+            403,
+            "text/plain",
+            format!("a backup requires the `{role}` role").into_bytes(),
+        );
+    }
+
+    let destination = std::path::Path::new(dir).join(format!(
+        "holos-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    ));
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return respond(
+            request,
+            500,
+            "text/plain",
+            format!("could not prepare {dir}: {e}").into_bytes(),
+        );
+    }
+
+    // A read lock: a checkpoint is a read of the store, and blocking writers for its
+    // duration would defeat the point of having one.
+    let guard = state.engine.read().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let outcome = guard.store().checkpoint(&destination);
+    let quads = guard.store().len();
+    drop(guard);
+
+    match outcome {
+        Ok(()) => {
+            let body = format!(
+                r#"{{"path":{},"quads":{quads}}}"#,
+                ui::json_string(&destination.display().to_string())
+            );
+            respond(request, 201, "application/json", body.into_bytes())
+        }
+        Err(holos_store::StorageError::Unsupported(why)) => {
+            // 409 rather than 500: the request was well formed and the server is healthy;
+            // this store simply cannot do it right now, or at all.
+            respond(request, 409, "text/plain", why.into_bytes())
+        }
+        Err(e) => respond(request, 500, "text/plain", e.to_string().into_bytes()),
+    }
 }
 
 /// The Graph Store Protocol.
@@ -1054,6 +1140,8 @@ fn parse_args(args: &[String]) -> Result<Config> {
             "--listen" => c.listen = value(&mut i)?,
             "--data" => c.data.push(value(&mut i)?),
             "--store" => c.store = Some(value(&mut i)?),
+            "--backup-dir" => c.backup_dir = Some(value(&mut i)?),
+            "--backup-role" => c.backup_role = Some(value(&mut i)?),
             "--threads" => c.threads = value(&mut i)?.parse()?,
             "--timeout" => {
                 let seconds: f64 = value(&mut i)?.parse()?;

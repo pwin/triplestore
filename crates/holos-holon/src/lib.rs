@@ -33,6 +33,7 @@
 #![warn(missing_docs, clippy::pedantic)]
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 
+pub mod branch;
 pub mod event;
 pub mod model;
 pub mod registry;
@@ -62,6 +63,12 @@ pub enum HolonError {
     /// The principal may not write to this holon's scene.
     #[error("the principal may not write to {0}")]
     WriteDenied(NamedNode),
+    /// The request contradicts itself or the store's current state.
+    ///
+    /// A client error rather than a storage one: branching onto an id that is already
+    /// registered, say. No retry changes it.
+    #[error("{0}")]
+    Invalid(String),
     /// A projection asked for a regime this build does not implement.
     #[error(
         "projection {0} asks to be incrementally maintained, which is not implemented \

@@ -28,6 +28,7 @@ USAGE
     holos stats    --data <FILE>...
     holos dump     --data <FILE>... [POLICY]
     holos validate --data <FILE>... [--shapes <FILE>]
+    holos backup   --store <DIR> --to <DIR>
 
 DATA
     --data <FILE>            Load a file. Repeatable. Format is taken from the extension:
@@ -131,6 +132,7 @@ fn main() -> Result<()> {
         "dump" => dump(&engine, &opts),
         "update" => update_command(&mut engine, &opts),
         "validate" => validate(&mut engine, &opts),
+        "backup" => backup(&engine, &opts),
         other => bail!("unknown command `{other}`\n\n{USAGE}"),
     }
 }
@@ -215,6 +217,50 @@ fn write_results(results: QueryResults<'_>, format: QueryResultsFormat) -> Resul
         }
     }
     println!();
+    Ok(())
+}
+
+/// Writes a consistent snapshot of a persistent store to a new directory.
+///
+/// Works on a store another process has open and is writing to, which is what makes it a
+/// backup rather than a maintenance window. RocksDB flushes its log and hard-links the SST
+/// files, so it is near-instant and initially costs almost no disk.
+///
+/// Two things worth knowing, both printed rather than buried:
+///
+/// * Hard links need the **same filesystem**. To another mount RocksDB copies instead —
+///   still correct, no longer instant. Back up locally, then move or replicate the result.
+/// * A checkpoint **pins the files it links**, so it cannot be deleted by compaction. Disk
+///   use climbs as the snapshot and the live store diverge; old checkpoints need removing.
+fn backup(engine: &Engine, opts: &Options) -> Result<()> {
+    let destination = opts
+        .to
+        .as_deref()
+        .context("--to <DIR> says where to write the snapshot")?;
+    let destination = Path::new(destination);
+    anyhow::ensure!(
+        !destination.exists(),
+        "{} already exists; a checkpoint needs a directory that does not, which is why          timestamped names are the usual pattern",
+        destination.display()
+    );
+    if let Some(parent) = destination.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+    }
+
+    let quads = engine.store().len();
+    engine
+        .store()
+        .checkpoint(destination)
+        .with_context(|| format!("checkpointing to {}", destination.display()))?;
+
+    println!("wrote a checkpoint of {quads} quads to {}", destination.display());
+    println!();
+    println!("restore by pointing --store at it, or by copying it back over the original");
+    println!("note: it hard-links the live store's files where it can, so it is not an");
+    println!("      off-machine backup until it is copied somewhere else");
     Ok(())
 }
 
@@ -440,6 +486,8 @@ fn open_data(path: &str) -> Result<Box<dyn std::io::BufRead + Send>> {
 #[derive(Debug, Default)]
 struct Options {
     data: Vec<String>,
+    /// Destination for `holos backup`.
+    to: Option<String>,
     base: Option<String>,
     query: Option<String>,
     query_file: Option<String>,
@@ -570,6 +618,7 @@ impl Options {
                 "--role" => o.roles.push(value(&mut i)?),
                 "--except-role" => o.except_role = Some(value(&mut i)?),
                 "--store" => o.store = Some(value(&mut i)?),
+        "--to" => o.to = Some(value(&mut i)?),
                 "--bulk" => o.bulk = true,
                 "--shapes" => o.shapes = Some(value(&mut i)?),
                 "--report" => o.report = true,

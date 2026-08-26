@@ -18,6 +18,13 @@ pub enum StorageError {
     /// that does not decode. Always a bug or on-disk damage, never user input.
     #[error("corrupt store: {0}")]
     Corruption(String),
+    /// The backend cannot do what was asked, and no retry will change that.
+    ///
+    /// Distinct from [`StorageError::Io`], which means it tried and failed. This means it
+    /// did not try, because the operation has no meaning for this backend — a checkpoint of
+    /// an in-memory store, say. Callers turn it into an explanation rather than a retry.
+    #[error("{0}")]
+    Unsupported(String),
 }
 
 impl StorageError {

@@ -24,6 +24,7 @@ pub mod geo_ext;
 pub mod options;
 pub mod service;
 pub mod source;
+pub mod topology;
 pub mod update;
 pub mod view;
 
@@ -281,6 +282,10 @@ impl Engine {
                 .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
         }
         let parsed = parser.parse_query(query)?;
+        // Same rewrite as `query_with`: a topology property means the same thing whichever
+        // entry point asked, and answering it on one path only would be worse than not
+        // answering it at all.
+        let parsed = crate::topology::rewrite(&parsed);
         Ok(Self::evaluator().prepare(&parsed).execute(view)?)
     }
 
@@ -310,6 +315,10 @@ impl Engine {
                 .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
         }
         let parsed = parser.parse_query(query)?;
+        // GeoSPARQL topology properties become geometry lookups and a filter. Unconditional
+        // because it is correctness rather than optimisation: without it, `?a geo:sfContains
+        // ?b` is an ordinary lookup that matches nothing and says so silently.
+        let parsed = crate::topology::rewrite(&parsed);
         // Applied to the parsed algebra, before the evaluator's own optimiser runs on it.
         let parsed = match &options.reorder_with {
             None => parsed,

@@ -808,6 +808,10 @@ impl Storage for RocksStorage {
         self.db.flush().map_err(rocks_err)
     }
 
+    fn checkpoint(&self, destination: &std::path::Path) -> Result<()> {
+        checkpoint_to(self, destination)
+    }
+
     fn flush(&mut self) -> Result<()> {
         if self.bulk.is_some() {
             self.finish_bulk()?;
@@ -939,6 +943,36 @@ fn un_gosp([g, o, s, p]: [TermId; 4]) -> EncodedQuad {
 }
 
 // --- helpers ---------------------------------------------------------------------------
+
+/// Takes a hard-linked consistent snapshot of an open store.
+///
+/// RocksDB's own checkpoint: it flushes the write-ahead log and then hard-links the SST
+/// files into `destination`, so the copy is consistent, near-instant, and initially costs
+/// almost no disk. Two consequences worth knowing:
+///
+/// * **Hard links need the same filesystem.** Checkpointing to another mount makes RocksDB
+///   copy the files instead — still correct, no longer instant.
+/// * **A checkpoint pins the SST files it links.** They cannot be deleted while it exists,
+///   so as compaction proceeds the snapshot and the live store diverge and disk use climbs.
+///   A checkpoint left lying around is a slow disk leak; retention is the caller's job.
+///
+/// # Errors
+///
+/// Refuses while a bulk load is running, because those writes are buffered in this process
+/// rather than in RocksDB: a checkpoint taken then would be internally consistent and
+/// missing data, which is worse than a failure. Otherwise propagates RocksDB's own error —
+/// including the refusal to write into a directory that already exists.
+fn checkpoint_to(storage: &RocksStorage, destination: &std::path::Path) -> Result<()> {
+    if storage.bulk.is_some() {
+        return Err(StorageError::Unsupported(
+            "a bulk load is in progress; its writes are buffered outside RocksDB, so a \
+             checkpoint taken now would be consistent and incomplete"
+                .to_owned(),
+        ));
+    }
+    let checkpoint = rocksdb::checkpoint::Checkpoint::new(&storage.db).map_err(rocks_err)?;
+    checkpoint.create_checkpoint(destination).map_err(rocks_err)
+}
 
 fn cf<'a>(db: &'a DB, name: &str) -> Result<&'a rocksdb::ColumnFamily> {
     db.cf_handle(name)

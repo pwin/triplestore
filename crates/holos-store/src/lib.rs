@@ -217,6 +217,23 @@ impl Store {
         self.inner.flush()
     }
 
+    /// Writes a consistent snapshot of the store to `destination`.
+    ///
+    /// Works on an open store being written to, which is the whole point: copying the
+    /// directory instead requires stopping the service, because an LSM tree in mid-flight is
+    /// not a set of files that can be copied one at a time.
+    ///
+    /// `destination` must not already exist. Backends that link rather than copy require it
+    /// to be on the same filesystem as the store to stay cheap.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unsupported`] for an in-memory store, which has no files to snapshot,
+    /// and while a bulk load is running. Otherwise the backend's own failure.
+    pub fn checkpoint(&self, destination: &std::path::Path) -> Result<()> {
+        self.inner.checkpoint(destination)
+    }
+
     /// Announces a bulk load, so the backend can buffer writes and skip its log.
     pub fn begin_bulk_load(&mut self) {
         self.inner.begin_bulk_load();
