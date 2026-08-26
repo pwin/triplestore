@@ -34,6 +34,16 @@ on:
         type: boolean
         default: false
 
+# Every job below sets `timeout-minutes`. GitHub's default is six hours, which is six
+# hours of a build nobody is watching.
+#
+# What this does not cover: a job **queued** for a runner is not running, so the timeout
+# never starts. A workflow asking for a retired runner label — `macos-13`, say — sits
+# queued for GitHub's 24-hour limit rather than failing, and blocks everything downstream
+# of it through `needs:`. No timeout here prevents that; only not naming dead labels does.
+# Action versions are the current majors, all of which run on Node 24. Node 20 was
+# deprecated in September 2025, and an action still targeting it is force-run on Node 24
+# with a warning on every job.
 permissions:
   contents: read
 
@@ -51,6 +61,9 @@ jobs:
   wheels:
     name: wheel (${{ matrix.platform.os }} / ${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.os }}
+    # RocksDB compiles from C++ on every platform. The slowest real one is Windows at
+    # ~12 minutes warm and ~18 cold, so this is generous headroom rather than a target.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -71,9 +84,9 @@ jobs:
           - { os: macos-latest, target: x86_64, manylinux: "auto" }
           - { os: windows-latest, target: x64, manylinux: "auto" }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -136,7 +149,7 @@ jobs:
             # matched nothing — while the library it was checking for was present.
             ls -1 /usr/lib64/libclang.so* 2>/dev/null | head -1 || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist
@@ -148,14 +161,16 @@ jobs:
   sdist:
     name: sdist
     runs-on: ubuntu-latest
+    # No compilation, just an archive. Runs in seconds.
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build the sdist
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
           args: --out dist --manifest-path crates/holos-python/Cargo.toml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-sdist
           path: dist
@@ -171,6 +186,8 @@ jobs:
     name: test the wheel (${{ matrix.os }}, py${{ matrix.python }})
     needs: wheels
     runs-on: ${{ matrix.os }}
+    # An install and 38 tests: about a minute.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -179,11 +196,11 @@ jobs:
         # working, one wheel satisfies both; if it is not, this is where that shows up.
         python: ["3.9", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
           merge-multiple: true
@@ -209,13 +226,14 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.publish_testpypi
     needs: [wheels, sdist, test-wheel]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment:
       name: testpypi
       url: https://test.pypi.org/p/holosdb
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
           merge-multiple: true
@@ -235,6 +253,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [wheels, sdist, test-wheel]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment:
       name: pypi
       url: https://pypi.org/p/holosdb
@@ -243,7 +262,7 @@ jobs:
       # highest-value thing available for a package's supply chain.
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
           merge-multiple: true
