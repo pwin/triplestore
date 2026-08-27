@@ -872,6 +872,11 @@ fn geosparql_functions() -> Vec<String> {
             .map(|n| n.as_str().to_owned()),
     );
     out.sort();
+    // Several of `geo_ext`'s entries *replace* one of `spargeo`'s rather than adding to
+    // them -- the four set operations and `geof:distance` -- so concatenating listed each of
+    // those twice. The evaluator itself keeps one registration per IRI, so a list that
+    // showed duplicates was describing something that does not exist.
+    out.dedup();
     out
 }
 

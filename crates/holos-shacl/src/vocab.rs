@@ -104,6 +104,14 @@ sh_vocab! {
     flags => sh!("flags"),
     language_in => sh!("languageIn"),
     unique_lang => sh!("uniqueLang"),
+    // SHACL 1.2 list constraints. They take an RDF list as the *value node* and say
+    // something about its members, which is a different shape of check from everything
+    // above: the value is a handle to a structure rather than a value in itself.
+    min_list_length => sh!("minListLength"),
+    max_list_length => sh!("maxListLength"),
+    unique_members => sh!("uniqueMembers"),
+    member_shape => sh!("memberShape"),
+    single_line => sh!("singleLine"),
     equals => sh!("equals"),
     disjoint => sh!("disjoint"),
     less_than => sh!("lessThan"),
@@ -163,6 +171,11 @@ sh_vocab! {
     pattern_component => sh!("PatternConstraintComponent"),
     language_in_component => sh!("LanguageInConstraintComponent"),
     unique_lang_component => sh!("UniqueLangConstraintComponent"),
+    min_list_length_component => sh!("MinListLengthConstraintComponent"),
+    max_list_length_component => sh!("MaxListLengthConstraintComponent"),
+    unique_members_component => sh!("UniqueMembersConstraintComponent"),
+    member_shape_component => sh!("MemberShapeConstraintComponent"),
+    single_line_component => sh!("SingleLineConstraintComponent"),
     equals_component => sh!("EqualsConstraintComponent"),
     disjoint_component => sh!("DisjointConstraintComponent"),
     less_than_component => sh!("LessThanConstraintComponent"),

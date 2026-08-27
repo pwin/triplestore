@@ -131,6 +131,16 @@ pub enum Constraint {
     HasValue(TermId),
     /// `sh:in`
     In(Vec<TermId>),
+    /// `sh:minListLength` — the value node is a list of at least this many members.
+    MinListLength(usize),
+    /// `sh:maxListLength` — at most this many.
+    MaxListLength(usize),
+    /// `sh:uniqueMembers` — no member of the list appears twice.
+    UniqueMembers,
+    /// `sh:memberShape` — every member of the list conforms to this shape.
+    MemberShape(ShapeIdx),
+    /// `sh:singleLine` — the lexical form contains no line break.
+    SingleLine,
 }
 
 /// A compiled `sh:pattern`.
@@ -176,6 +186,11 @@ impl Constraint {
             Self::Pattern(_) => sh.pattern_component,
             Self::LanguageIn(_) => sh.language_in_component,
             Self::UniqueLang => sh.unique_lang_component,
+            Self::MinListLength(_) => sh.min_list_length_component,
+            Self::MaxListLength(_) => sh.max_list_length_component,
+            Self::UniqueMembers => sh.unique_members_component,
+            Self::MemberShape(_) => sh.member_shape_component,
+            Self::SingleLine => sh.single_line_component,
             Self::Equals(_) => sh.equals_component,
             Self::Disjoint(_) => sh.disjoint_component,
             Self::LessThan(_) => sh.less_than_component,
@@ -336,7 +351,10 @@ fn referenced_shapes(shape: &Shape) -> Vec<ShapeIdx> {
     let mut out = Vec::new();
     for constraint in &shape.constraints {
         match constraint {
-            Constraint::Not(i) | Constraint::Node(i) | Constraint::Property(i) => out.push(*i),
+            Constraint::Not(i)
+            | Constraint::Node(i)
+            | Constraint::Property(i)
+            | Constraint::MemberShape(i) => out.push(*i),
             Constraint::And(v) | Constraint::Or(v) | Constraint::Xone(v) => {
                 out.extend(v.iter().copied());
             }
@@ -688,11 +706,33 @@ impl<'a> Compiler<'a> {
         if let Some(list) = g.object(node, sh.r#in)? {
             out.push(Constraint::In(self.list(list)?));
         }
+        if let Some(v) = g
+            .object(node, sh.min_list_length)?
+            .and_then(|v| self.integer(v))
+        {
+            out.push(Constraint::MinListLength(v));
+        }
+        if let Some(v) = g
+            .object(node, sh.max_list_length)?
+            .and_then(|v| self.integer(v))
+        {
+            out.push(Constraint::MaxListLength(v));
+        }
+        if matches!(g.object(node, sh.unique_members)?, Some(v) if self.is_true(v)) {
+            out.push(Constraint::UniqueMembers);
+        }
+        if matches!(g.object(node, sh.single_line)?, Some(v) if self.is_true(v)) {
+            out.push(Constraint::SingleLine);
+        }
 
         // Logical constraints and nested shapes.
         for n in g.objects(node, sh.not)? {
             let idx = self.shape_for(n)?;
             out.push(Constraint::Not(idx));
+        }
+        for n in g.objects(node, sh.member_shape)? {
+            let idx = self.shape_for(n)?;
+            out.push(Constraint::MemberShape(idx));
         }
         for (parameter, make) in [
             (sh.and, Constraint::And as fn(Vec<ShapeIdx>) -> Constraint),

@@ -287,6 +287,80 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
+            // --- SHACL 1.2 list constraints -------------------------------------------
+            //
+            // These take the value node as a *handle to a structure* rather than as a value,
+            // which is a different shape of check from everything above. A value node that is
+            // not a well-formed list fails: `sh:minListLength` is a statement about a list,
+            // and something that is not one does not satisfy it.
+            Constraint::MinListLength(min) => {
+                for &v in values {
+                    match self.rdf_list(v)? {
+                        Some(members) if members.len() >= *min => {}
+                        _ => violate_value(v, results),
+                    }
+                }
+            }
+            Constraint::MaxListLength(max) => {
+                for &v in values {
+                    match self.rdf_list(v)? {
+                        Some(members) if members.len() <= *max => {}
+                        _ => violate_value(v, results),
+                    }
+                }
+            }
+            Constraint::UniqueMembers => {
+                for &v in values {
+                    let Some(members) = self.rdf_list(v)? else {
+                        violate_value(v, results);
+                        continue;
+                    };
+                    let mut seen = FxHashSet::default();
+                    if !members.iter().all(|m| seen.insert(*m)) {
+                        violate_value(v, results);
+                    }
+                }
+            }
+            Constraint::MemberShape(inner) => {
+                for &v in values {
+                    let Some(members) = self.rdf_list(v)? else {
+                        violate_value(v, results);
+                        continue;
+                    };
+                    for member in members {
+                        if !self.holds(*inner, member, depth)? {
+                            violate_value(member, results);
+                        }
+                    }
+                }
+            }
+            Constraint::SingleLine => {
+                for &v in values {
+                    // Non-literals have no lexical form to be single-lined, and a literal
+                    // carrying a line break is what this exists to reject.
+                    // Every Unicode line break, not just the two ASCII ones. The suite uses
+                    // a form feed and a vertical tab precisely because an implementation
+                    // that looked only for \n and \r would pass the obvious cases and miss
+                    // these.
+                    const BREAKS: [char; 7] = [
+                        '\u{000A}', // line feed
+                        '\u{000B}', // vertical tab
+                        '\u{000C}', // form feed
+                        '\u{000D}', // carriage return
+                        '\u{0085}', // next line
+                        '\u{2028}', // line separator
+                        '\u{2029}', // paragraph separator
+                    ];
+                    let breaks = match self.data.term(v)? {
+                        Some(Term::Literal(l)) => l.value().contains(BREAKS),
+                        // A non-literal has no lexical form to be single-lined.
+                        _ => true,
+                    };
+                    if breaks {
+                        violate_value(v, results);
+                    }
+                }
+            }
             Constraint::Node(inner) => {
                 for &v in values {
                     if !self.holds(*inner, v, depth)? {
@@ -569,6 +643,36 @@ impl<'a> Validator<'a> {
             Some(Term::NamedNode(n)) => Some(n.into_string()),
             _ => None,
         })
+    }
+
+    /// The members of a well-formed RDF list, or `None` if `head` is not one.
+    ///
+    /// `None` covers every way a list can be malformed — a cell with no `rdf:first`, more
+    /// than one `rdf:rest`, or a cycle — and the callers all treat that as a violation
+    /// rather than as an empty list. A constraint like `sh:minListLength` is a statement
+    /// *about a list*, and something that is not a list does not satisfy it.
+    ///
+    /// The visited set is what makes a cyclic list terminate. `rdf:rest` loops are not
+    /// expressible in Turtle's list syntax but are perfectly expressible in the triples
+    /// underneath it, so a validator that trusted the shape of its input would hang on data
+    /// it is supposed to be checking.
+    fn rdf_list(&self, head: TermId) -> Result<Option<Vec<TermId>>, ShaclError> {
+        let mut members = Vec::new();
+        let mut visited = FxHashSet::default();
+        let mut cell = head;
+        while cell != self.sh.rdf_nil {
+            if !visited.insert(cell) {
+                return Ok(None);
+            }
+            let first = self.data.objects(cell, self.sh.rdf_first)?;
+            let rest = self.data.objects(cell, self.sh.rdf_rest)?;
+            let ([f], [r]) = (first.as_slice(), rest.as_slice()) else {
+                return Ok(None);
+            };
+            members.push(*f);
+            cell = *r;
+        }
+        Ok(Some(members))
     }
 
     fn language_of(&self, id: TermId) -> Result<Option<String>, ShaclError> {

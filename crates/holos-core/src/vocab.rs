@@ -236,6 +236,19 @@ vocab_table![
     "http://www.w3.org/ns/shacl#ClosedConstraintComponent",
     "http://www.w3.org/ns/shacl#HasValueConstraintComponent",
     "http://www.w3.org/ns/shacl#InConstraintComponent",
+    // --- SHACL 1.2 additions. Appended, because a payload is an index into this table and
+    // that index is on disk; inserting these next to their 1.0 relatives would renumber
+    // every term after them.
+    "http://www.w3.org/ns/shacl#minListLength",
+    "http://www.w3.org/ns/shacl#maxListLength",
+    "http://www.w3.org/ns/shacl#uniqueMembers",
+    "http://www.w3.org/ns/shacl#memberShape",
+    "http://www.w3.org/ns/shacl#singleLine",
+    "http://www.w3.org/ns/shacl#MinListLengthConstraintComponent",
+    "http://www.w3.org/ns/shacl#MaxListLengthConstraintComponent",
+    "http://www.w3.org/ns/shacl#UniqueMembersConstraintComponent",
+    "http://www.w3.org/ns/shacl#MemberShapeConstraintComponent",
+    "http://www.w3.org/ns/shacl#SingleLineConstraintComponent",
     // --- prov: (the holon Event graph is PROV-O shaped, DESIGN.md §9)
     "http://www.w3.org/ns/prov#Entity",
     "http://www.w3.org/ns/prov#Activity",
