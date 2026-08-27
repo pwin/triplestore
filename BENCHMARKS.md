@@ -370,9 +370,9 @@ tuning problem rather than a missing operator, and a much less urgent one.
 Three things kept it honest:
 
 * **The fragment is small.** `SELECT` over one basic graph pattern in the default graph, with
-  `DISTINCT`, `LIMIT`, `OFFSET` and a projection. `FILTER`, `OPTIONAL`, `UNION`, `GRAPH`,
-  aggregation, `ORDER BY`, property paths, blank nodes and triple terms are all refused and
-  fall back. A fast path that is wrong is worse than no fast path.
+  `FILTER`, `DISTINCT`, `LIMIT`, `OFFSET` and a projection. `OPTIONAL`, `UNION`, `GRAPH`,
+  aggregation, `ORDER BY`, property paths, `FROM`, blank nodes and triple terms are all
+  refused and fall back. A fast path that is wrong is worse than no fast path.
 * **Ordering is decided at each step, not once.** After the first pattern binds `?s`, the
   others stop being predicate scans and become subject-and-predicate lookups — a different
   estimate entirely. Ordering up front would miss the effect the operator exists for.
@@ -432,6 +432,42 @@ suite contains exactly two queries using it and both are `CONSTRUCT`. The ninete
 exercise dataset specification are in the SPARQL 1.0 suite, which was on disk and had never
 been run. It is now the `sparql10` ratchet, at 262/263. A newer suite is not a superset of an
 older one — 1.1's manifests test what 1.1 *added*.
+
+#### 3e. Filters, pushed down
+
+A `FILTER` is applied as soon as the last variable it mentions is bound, rather than after
+the join. On the same store, a selective filter over the three-pattern star:
+
+| | Rows | Time |
+|---|---:|---:|
+| Evaluator, filter after the join | 19 | 67.503 ms |
+| Bind join, filter pushed down | 19 | **0.948 ms** |
+| | | **71×** |
+
+Row counts are asserted equal in the benchmark, not reported and hoped over. The benchmark
+also asserts the filter matches *something*: the first version of it compared a string-typed
+`badgeNumber` against a number, which SPARQL treats as a type error and an eliminated
+solution, so it measured two ways of returning nothing and called the result 1×.
+
+The predicate is evaluated by **`spareval`'s own expression evaluator**, through this
+engine's function registry. That is the point: SPARQL comparison is value-based with numeric
+promotion across `xsd` types, and a second implementation of `=` that got
+`"1"^^xsd:integer` versus `"1.0"^^xsd:decimal` wrong would be a silent wrong answer. Only two
+classes are refused, both because the borrowed evaluator runs against an empty dataset and
+without an evaluation context: `EXISTS`, which would quietly answer `false` everywhere, and
+`NOW`/`RAND`/`UUID`/`STRUUID`/`BNODE`.
+
+Conjunctions are split, because `A && B` can only be applied once the later half is bound and
+splitting lets the earlier half prune sooner.
+
+**What this does not do — a correction.** Bringing `FILTER` into the fragment was expected to
+make the spatial index and the bind join compose, and it does so for only one of the two
+spellings. A hand-written `FILTER(geof:sfWithin(?g, <window>))` is `Project(Filter(Bgp))` and
+is now inside the fragment. The *property* shorthand `?f geo:sfWithin <window>` is not:
+`topology::rewrite` turns it into a geometry lookup joined in as a union of ordinary
+patterns, so the rewritten query is `Filter(Join(Bgp, Union(..)))`. That needs `JOIN` and
+`UNION` in the fragment, which is a substantially larger piece of work. A test pins both
+halves of this so the claim cannot drift back to the broader one.
 
 ### 4. A commit costs the size of its change, not the size of the scene
 

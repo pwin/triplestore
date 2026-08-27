@@ -16,6 +16,7 @@ oxiri = "0.2"
 oxrdfio.workspace = true
 spargebra.workspace = true
 spareval.workspace = true
+sparopt.workspace = true
 spargeo.workspace = true
 holos-stats.workspace = true
 flate2.workspace = true

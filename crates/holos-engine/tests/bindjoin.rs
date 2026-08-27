@@ -202,9 +202,12 @@ fn a_variable_predicate_agrees() {
 fn shapes_outside_the_fragment_still_work() {
     // Each of these must be refused by `plan` and answered by the evaluator. What is checked
     // is that the fast path's presence did not break them.
+    //
+    // `FILTER` used to be on this list and is not any more; the refusal is asserted rather
+    // than described, so that moving something into the fragment cannot leave a comment here
+    // quietly claiming it is still outside.
     let engine = engine();
     for query in [
-        format!("{P} SELECT ?n WHERE {{ ?s ex:name ?n . FILTER(STRLEN(?n) > 8) }}"),
         format!("{P} SELECT ?n WHERE {{ ?s ex:name ?n OPTIONAL {{ ?s ex:nickname ?k }} }}"),
         format!("{P} SELECT ?n WHERE {{ {{ ?s ex:name ?n }} UNION {{ ?s ex:label ?n }} }}"),
         format!("{P} SELECT ?n WHERE {{ ?s ex:name ?n }} ORDER BY ?n LIMIT 3"),
@@ -218,6 +221,14 @@ fn shapes_outside_the_fragment_still_work() {
         );
         let reference = rows(&engine, &query, &QueryOptions::new().explaining());
         assert_eq!(fetched, reference, "disagreement on {query}");
+
+        let parsed = spargebra::SparqlParser::new()
+            .parse_query(&query)
+            .expect("parse");
+        assert!(
+            holos_engine::bindjoin::plan(&parsed).is_none(),
+            "this is supposed to be outside the fragment: {query}"
+        );
     }
 }
 
@@ -368,9 +379,7 @@ fn distinct_outside_a_slice_is_refused_rather_than_flattened() {
     use spargebra::algebra::GraphPattern;
 
     let inner = spargebra::SparqlParser::new()
-        .parse_query(&format!(
-            "{P} SELECT ?n WHERE {{ ?s ex:name ?n }} LIMIT 5"
-        ))
+        .parse_query(&format!("{P} SELECT ?n WHERE {{ ?s ex:name ?n }} LIMIT 5"))
         .expect("parse");
     let spargebra::Query::Select { pattern, .. } = inner else {
         panic!("expected a SELECT");
@@ -442,8 +451,10 @@ fn every_entry_point_gives_the_same_answer() {
             QueryResults::Solutions(iter) => iter
                 .map(|s| {
                     let s = s.expect("solution");
-                    let mut cells: Vec<String> =
-                        s.iter().map(|(v, t)| format!("{}={t}", v.as_str())).collect();
+                    let mut cells: Vec<String> = s
+                        .iter()
+                        .map(|(v, t)| format!("{}={t}", v.as_str()))
+                        .collect();
                     cells.sort();
                     cells.join(" ")
                 })
@@ -473,7 +484,10 @@ fn every_entry_point_gives_the_same_answer() {
     // And the evaluator itself, so all three are anchored to something outside the operator.
     let reference = rows(&engine, &query, &QueryOptions::new().explaining());
 
-    assert_eq!(with_options, reference, "query_with disagrees with the evaluator");
+    assert_eq!(
+        with_options, reference,
+        "query_with disagrees with the evaluator"
+    );
     assert_eq!(plain, reference, "query disagrees with the evaluator");
     assert_eq!(
         prepared, reference,
@@ -511,7 +525,11 @@ fn the_column_order_of_the_projection_survives() {
     let (slow, _) =
         Engine::query_with(&view, &query, &QueryOptions::new().explaining()).expect("query");
 
-    assert_eq!(names(fast), names(slow), "column order differs between paths");
+    assert_eq!(
+        names(fast),
+        names(slow),
+        "column order differs between paths"
+    );
     assert_eq!(
         names(
             Engine::query_with(&view, &query, &QueryOptions::new())
@@ -521,6 +539,215 @@ fn the_column_order_of_the_projection_survives() {
         vec!["d", "n", "s"],
         "the projection order in the query text is what a client gets"
     );
+}
+
+// ------------------------------------------------------------------------ filters
+
+#[test]
+fn filters_agree_with_the_evaluator() {
+    // The whole point of borrowing `spareval`'s expression evaluator rather than writing a
+    // second one: every case here is decided by the same code the slow path uses, so what is
+    // actually being checked is that the *plumbing* — which variables get decoded, at what
+    // depth the predicate runs, what an error does — does not change the verdict.
+    //
+    // The numeric and datatype cases are deliberate. SPARQL comparison is value-based with
+    // numeric promotion, and a hand-rolled `=` would get several of these wrong while
+    // passing anything written with strings.
+    let engine = engine();
+    for query in [
+        // Comparison on a literal, the ordinary case.
+        format!("{P} SELECT ?n WHERE {{ ?s ex:name ?n . FILTER(STRLEN(?n) > 8) }}"),
+        // Numeric, where promotion across xsd types is the evaluator's business.
+        format!("{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(?b > 30) }}"),
+        format!("{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(?b >= 30.0) }}"),
+        format!("{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(?b = 7) }}"),
+        // A conjunction, which the planner splits and pushes separately.
+        format!(
+            "{P} SELECT ?b ?d WHERE {{ ?s ex:badge ?b . ?s ex:memberOf ?d . \
+             FILTER(?b > 10 && ?d = ex:d3) }}"
+        ),
+        // A disjunction, which it must not split.
+        format!("{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(?b < 5 || ?b > 55) }}"),
+        // Negation, and a nested conjunction inside it.
+        format!("{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(!(?b > 5 && ?b < 50)) }}"),
+        // Several separate FILTERs, which nest as wrappers rather than combining.
+        format!("{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(?b > 10) FILTER(?b < 20) }}"),
+        // IN, IF and COALESCE: three shapes with their own evaluation rules.
+        format!("{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(?b IN (1, 2, 3)) }}"),
+        format!("{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(IF(?b > 30, true, false)) }}"),
+        format!("{P} SELECT ?n WHERE {{ ?s ex:name ?n . FILTER(COALESCE(?n, \"x\") != \"\") }}"),
+        // An expression that errors on some rows: STRLEN of a non-literal is an error, and
+        // an erroring FILTER eliminates the solution rather than failing the query.
+        format!("{P} SELECT ?d WHERE {{ ?s ex:memberOf ?d . FILTER(STRLEN(?d) > 1) }}"),
+        // A filter over a term the join binds late, so it is applied at depth rather than
+        // on the first pattern.
+        format!(
+            "{P} SELECT ?n ?label WHERE {{ ?s ex:name ?n . ?s ex:memberOf ?d . \
+             ?d ex:label ?label . FILTER(?label != \"dept 0\") }}"
+        ),
+        // A filter that matches nothing, and one that matches everything.
+        format!("{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(?b > 1000) }}"),
+        format!("{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(?b >= 0) }}"),
+        // A filter mentioning `?s`, `?p` or `?o`. Those three names are not arbitrary: the
+        // conversion into the evaluator's expression type has no public entry point for a
+        // bare expression, so the expression travels inside a throwaway `FILTER` wrapped
+        // around a `?s ?p ?o` pattern. If that wrapper's variables could ever capture the
+        // expression's own, this is where it would show.
+        format!("{P} SELECT ?s WHERE {{ ?s ex:badge ?o . FILTER(?s != ex:p0) }}"),
+        format!("{P} SELECT ?o WHERE {{ ?s ex:badge ?o . FILTER(?o > 30) }}"),
+        format!("{P} SELECT ?p WHERE {{ ex:p3 ?p ?o . FILTER(?p != ex:name) }}"),
+        // Constant filters, which have no variables and are therefore decided at the very
+        // first frame, before anything is bound at all.
+        format!("{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(1 > 0) }}"),
+        format!("{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(\"a\" = \"b\") }}"),
+        // With the solution modifiers, since filters run before them.
+        format!(
+            "{P} SELECT DISTINCT ?d WHERE {{ ?s ex:memberOf ?d . ?s ex:badge ?b . \
+             FILTER(?b > 20) }}"
+        ),
+        format!("{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(?b > 10) }} LIMIT 5 OFFSET 3"),
+    ] {
+        let (fast, slow) = both(&engine, &query);
+        assert_eq!(fast, slow, "disagreement on {query}");
+    }
+}
+
+#[test]
+fn a_filter_query_actually_takes_the_fast_path() {
+    // Without this, every case in `filters_agree_with_the_evaluator` would still pass if
+    // `plan` had quietly started refusing filters again — both paths would simply be the
+    // evaluator. The agreement tests are only meaningful while this one holds.
+    let parsed = spargebra::SparqlParser::new()
+        .parse_query(&format!(
+            "{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(?b > 30) }}"
+        ))
+        .expect("parse");
+    assert!(
+        holos_engine::bindjoin::plan(&parsed).is_some(),
+        "a filtered BGP is supposed to be inside the fragment"
+    );
+}
+
+#[test]
+fn expressions_the_borrowed_evaluator_cannot_judge_are_refused() {
+    // `EXISTS` reads a dataset the expression evaluator does not have, and would answer
+    // `false` for every solution rather than failing — a silent wrong answer. The
+    // context-dependent builtins have no evaluation context here; `NOW` must additionally be
+    // constant across a query, which this path has no way to arrange.
+    for expression in [
+        "EXISTS { ?s ex:nickname ?k }",
+        "NOT EXISTS { ?s ex:nickname ?k }",
+        "NOW() > \"2020-01-01T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>",
+        "RAND() < 0.5",
+        "STRLEN(STR(UUID())) > 0",
+        "STRLEN(STRUUID()) > 0",
+        "ISBLANK(BNODE())",
+    ] {
+        let text = format!("{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER({expression}) }}");
+        let parsed = spargebra::SparqlParser::new()
+            .parse_query(&text)
+            .expect("parse");
+        assert!(
+            holos_engine::bindjoin::plan(&parsed).is_none(),
+            "should have been refused: {expression}"
+        );
+    }
+
+    // And the answers must still be right, which is the reason refusing is acceptable.
+    let engine = engine();
+    let (fast, slow) = both(
+        &engine,
+        &format!(
+            "{P} SELECT ?n WHERE {{ ?s ex:name ?n . FILTER(EXISTS {{ ?s ex:nickname ?k }}) }}"
+        ),
+    );
+    assert_eq!(fast, slow);
+    assert!(!fast.is_empty(), "20 of 60 people have a nickname");
+}
+
+#[test]
+fn a_filter_on_an_unbound_variable_is_refused() {
+    // A variable the patterns never bind brings the unbound rules with it — `BOUND`,
+    // `COALESCE` and error propagation all behave differently there, and every variable this
+    // path binds is bound by construction. Rather than model the exception, refuse it.
+    let parsed = spargebra::SparqlParser::new()
+        .parse_query(&format!(
+            "{P} SELECT ?b WHERE {{ ?s ex:badge ?b . FILTER(!BOUND(?missing)) }}"
+        ))
+        .expect("parse");
+    assert!(holos_engine::bindjoin::plan(&parsed).is_none());
+}
+
+#[test]
+fn the_geosparql_filter_form_composes_and_the_property_form_does_not() {
+    // The boundary of a claim that was first made too broadly, pinned so it stays honest.
+    //
+    // A hand-written `FILTER(geof:...)` over a geometry pattern is `Project(Filter(Bgp))`,
+    // which is inside the fragment: `geof:sfWithin` is a custom function on the same
+    // evaluator, so it is pushed down like any other predicate.
+    //
+    // The property shorthand is not, and `FILTER` alone was never going to make it so.
+    // `topology::rewrite` turns `?f geo:sfWithin <literal>` into a geometry lookup joined in
+    // as a *union* of ordinary patterns, so the rewritten query is
+    // `Filter(Join(Bgp, Union(..)))`. Bringing that into the fragment needs `JOIN` and
+    // `UNION`, which is a much larger piece of work than this one.
+    use holos_engine::topology;
+
+    const GEO: &str = "http://www.opengis.net/ont/geosparql#";
+    const WINDOW: &str = "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))";
+    let prefixes = format!(
+        "PREFIX geo: <{GEO}> PREFIX geof: <http://www.opengis.net/def/function/geosparql/>"
+    );
+
+    let parse = |text: &str| {
+        spargebra::SparqlParser::new()
+            .parse_query(text)
+            .expect("parse")
+    };
+
+    let filter_form = parse(&format!(
+        "{prefixes} SELECT ?f WHERE {{ ?f geo:asWKT ?g .          FILTER(geof:sfWithin(?g, \"{WINDOW}\"^^geo:wktLiteral)) }}"
+    ));
+    assert!(
+        holos_engine::bindjoin::plan(&topology::rewrite(&filter_form, None)).is_some(),
+        "the explicit FILTER form should be inside the fragment"
+    );
+
+    let property_form = parse(&format!(
+        "{prefixes} SELECT ?f WHERE {{ ?f geo:sfWithin \"{WINDOW}\"^^geo:wktLiteral }}"
+    ));
+    assert!(
+        holos_engine::bindjoin::plan(&topology::rewrite(&property_form, None)).is_none(),
+        "the property form rewrites to a join over a union, which this fragment refuses"
+    );
+
+    // And both still answer correctly, which is what makes refusing one of them acceptable.
+    let mut engine = Engine::new();
+    engine
+        .bulk_load(
+            format!(
+                "@prefix geo: <{GEO}> .\n                 <http://example.com/inside>  geo:asWKT \"POINT(5 5)\"^^geo:wktLiteral .\n                 <http://example.com/outside> geo:asWKT \"POINT(50 50)\"^^geo:wktLiteral .\n"
+            )
+            .as_bytes(),
+            RdfFormat::Turtle,
+            None,
+        )
+        .expect("load");
+
+    for query in [
+        format!(
+            "{prefixes} SELECT ?f WHERE {{ ?f geo:asWKT ?g .              FILTER(geof:sfWithin(?g, \"{WINDOW}\"^^geo:wktLiteral)) }}"
+        ),
+        format!("{prefixes} SELECT ?f WHERE {{ ?f geo:sfWithin \"{WINDOW}\"^^geo:wktLiteral }}"),
+    ] {
+        let (fast, slow) = both(&engine, &query);
+        assert_eq!(fast, slow, "disagreement on {query}");
+        assert_eq!(
+            fast,
+            vec!["f=<http://example.com/inside>".to_owned()],
+            "only the point inside the window is within it: {query}"
+        );
+    }
 }
 
 #[test]

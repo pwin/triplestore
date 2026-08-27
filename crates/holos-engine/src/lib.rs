@@ -188,13 +188,20 @@ impl Engine {
         query: &spargebra::Query,
         services: crate::service::LocalServiceHandler,
     ) -> Result<QueryResults<'a>, EngineError> {
+        // The same rewrite the other two entry points apply, and for the same reason: a
+        // topology property is a geometry lookup plus a `geof:` call, and a query that skips
+        // the rewrite matches nothing and says so silently. Leaving it off here meant
+        // `geo:sfContains` was answered correctly through two entry points and emptily
+        // through the third.
+        let parsed = crate::topology::rewrite(query, None);
+
         // The same fast path `query_with` takes. It was attached only there at first, which
         // meant the W3C conformance suites — which reach evaluation through *this* function —
         // gave it no coverage at all while appearing to be its main test. A `SERVICE` query
         // is outside the fragment regardless, so this is safe with a handler present, but it
         // is only attempted without one so that the two paths cannot diverge unnoticed.
         if services.is_empty() {
-            if let Some(results) = Self::try_bind_join(view, query, None, None)? {
+            if let Some(results) = Self::try_bind_join(view, &parsed, None, None)? {
                 return Ok(results);
             }
         }
@@ -203,7 +210,7 @@ impl Engine {
         } else {
             Self::evaluator().with_default_service_handler(services)
         };
-        Ok(evaluator.prepare(query).execute(view)?)
+        Ok(evaluator.prepare(&parsed).execute(view)?)
     }
 
     /// Inserts one quad, subject to the session's write policy.

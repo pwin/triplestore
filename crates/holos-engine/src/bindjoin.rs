@@ -27,11 +27,35 @@
 //! `spareval`, which is why the fragment can grow later without risk.
 //!
 //! Handled: `SELECT` over a single basic graph pattern in the default graph, optionally
-//! wrapped in `DISTINCT`, `LIMIT` and `OFFSET`, with a projection.
+//! wrapped in `FILTER`, `DISTINCT`, `LIMIT` and `OFFSET`, with a projection.
 //!
-//! Refused: `FILTER`, `OPTIONAL`, `UNION`, `GRAPH`, `MINUS`, `VALUES`, `BIND`, aggregation,
-//! `ORDER BY`, property paths, subqueries, `ASK`/`CONSTRUCT`/`DESCRIBE`, and any pattern
-//! mentioning a blank node. Every one of those is a *silent* wrong answer if guessed at.
+//! Refused: `OPTIONAL`, `UNION`, `GRAPH`, `MINUS`, `VALUES`, `BIND`, aggregation,
+//! `ORDER BY`, property paths, subqueries, `ASK`/`CONSTRUCT`/`DESCRIBE`, `FROM`, and any
+//! pattern mentioning a blank node. Every one of those is a *silent* wrong answer if guessed
+//! at.
+//!
+//! # Filters, and why they are not reimplemented
+//!
+//! A filter is applied **as soon as the last variable it mentions is bound**, not after the
+//! join. That is most of its value: a predicate applied after the join has already paid for
+//! the join, while one applied at depth one prunes every branch below it. Conjunctions are
+//! split for the same reason — `A && B` can only be applied when the later of the two is
+//! ready, so the halves are pushed separately.
+//!
+//! The predicate itself is evaluated by **`spareval`'s own expression evaluator**, through
+//! this engine's function registry, so `FILTER` semantics here are the evaluator's rather
+//! than a second implementation of them. That matters more than it sounds: SPARQL's
+//! comparison rules involve datatype-aware value equality and numeric promotion, and an
+//! independent implementation of `=` that got `"1"^^xsd:integer` versus `"1.0"^^xsd:decimal`
+//! wrong would be a silent wrong answer of exactly the kind this module exists to avoid.
+//!
+//! Two classes of expression are refused rather than approximated, because the borrowed
+//! evaluator runs against an empty dataset and without an evaluation context:
+//!
+//! * **`EXISTS`** reads the dataset. It would quietly answer `false` for every solution.
+//! * **`NOW`, `RAND`, `UUID`, `STRUUID`, `BNODE`** need a context this path does not build.
+//!   `NOW` in particular must be constant across a query, which is a property of the context
+//!   and not of the function.
 //!
 //! # Why it can give up half way
 //!
@@ -61,7 +85,7 @@ use holos_core::TermId;
 use holos_stats::Statistics;
 use rustc_hash::FxHashMap;
 use spareval::{CancellationToken, QueryableDataset};
-use spargebra::algebra::GraphPattern;
+use spargebra::algebra::{Expression, Function, GraphPattern};
 use spargebra::term::{TermPattern, TriplePattern, Variable};
 use spargebra::Query;
 
@@ -100,6 +124,9 @@ const TOKEN_CHECK_INTERVAL: u64 = 4096;
 /// What the recursion accumulates, kept together so `step` takes one argument rather than
 /// four.
 struct Run<'a> {
+    /// The evaluator whose expression rules the filters borrow. Built once per query, not
+    /// once per row: constructing one registers the whole custom-function table.
+    evaluator: spareval::QueryEvaluator,
     out: Vec<Vec<Option<TermId>>>,
     seen: rustc_hash::FxHashSet<Vec<Option<TermId>>>,
     /// Rows consumed by `OFFSET` so far.
@@ -147,9 +174,20 @@ impl Run<'_> {
     }
 }
 
+/// One `FILTER`, ready to evaluate.
+struct Filter {
+    /// `sparopt`'s form, because that is what the evaluator's public entry point takes.
+    /// Converted once when the plan is built rather than once per row.
+    expression: sparopt::algebra::Expression,
+    /// The variables it mentions, every one of which the patterns bind. Used to decide the
+    /// depth at which the filter becomes evaluable, and to decode only what it needs.
+    needs: Vec<Variable>,
+}
+
 /// A query this module can answer, reduced to what evaluation needs.
 pub struct Plan {
     patterns: Vec<TriplePattern>,
+    filters: Vec<Filter>,
     /// Variables the query projects, in order.
     variables: Vec<Variable>,
     distinct: bool,
@@ -216,24 +254,140 @@ pub fn plan(query: &Query) -> Option<Plan> {
                 node = inner;
             }
             GraphPattern::Project { inner, variables } => {
-                let patterns = as_bgp(inner)?;
-                return finish(patterns, variables.clone(), distinct, offset, limit);
+                let (patterns, filters) = as_bgp_with_filters(inner)?;
+                return finish(
+                    patterns,
+                    &filters,
+                    variables.clone(),
+                    distinct,
+                    offset,
+                    limit,
+                );
             }
             _ => return None,
         }
     }
 }
 
-/// The patterns of a bare BGP, or `None` if it is anything else.
-fn as_bgp(pattern: &GraphPattern) -> Option<&[TriplePattern]> {
-    match pattern {
-        GraphPattern::Bgp { patterns } => Some(patterns),
+/// The patterns of a BGP, and any `FILTER`s wrapped around it.
+///
+/// `FILTER` is a wrapper in the SPARQL algebra and several of them nest, so this peels until
+/// it reaches the BGP underneath. Anything else in between — a `UNION`, a `GRAPH`, a join —
+/// ends the fragment.
+fn as_bgp_with_filters(pattern: &GraphPattern) -> Option<(&[TriplePattern], Vec<&Expression>)> {
+    let mut filters = Vec::new();
+    let mut node = pattern;
+    loop {
+        match node {
+            GraphPattern::Bgp { patterns } => return Some((patterns, filters)),
+            GraphPattern::Filter { expr, inner } => {
+                filters.push(expr);
+                node = inner;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Splits `A && B` into its conjuncts.
+///
+/// A conjunction can only be applied once the later of its two halves is ready, so leaving
+/// it whole delays the half that was ready earlier. Splitting is what lets each half be
+/// pushed to the depth it actually belongs at.
+fn flatten_conjunction<'e>(expr: &'e Expression, out: &mut Vec<&'e Expression>) {
+    if let Expression::And(left, right) = expr {
+        flatten_conjunction(left, out);
+        flatten_conjunction(right, out);
+    } else {
+        out.push(expr);
+    }
+}
+
+/// Collects the variables an expression mentions, and reports whether it can be evaluated
+/// here at all.
+///
+/// Returns `false` for the two classes described in the module documentation: `EXISTS`,
+/// which reads a dataset the borrowed evaluator does not have, and the context-dependent
+/// builtins. Both would otherwise fail quietly — `EXISTS` by answering `false` everywhere —
+/// which is worse than refusing the query.
+fn inspect_expression(expr: &Expression, out: &mut Vec<Variable>) -> bool {
+    match expr {
+        Expression::NamedNode(_) | Expression::Literal(_) => true,
+        Expression::Variable(v) | Expression::Bound(v) => {
+            if !out.contains(v) {
+                out.push(v.clone());
+            }
+            true
+        }
+        Expression::Or(a, b)
+        | Expression::And(a, b)
+        | Expression::Equal(a, b)
+        | Expression::SameTerm(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => inspect_expression(a, out) && inspect_expression(b, out),
+        Expression::UnaryPlus(a) | Expression::UnaryMinus(a) | Expression::Not(a) => {
+            inspect_expression(a, out)
+        }
+        Expression::If(a, b, c) => {
+            inspect_expression(a, out) && inspect_expression(b, out) && inspect_expression(c, out)
+        }
+        Expression::In(a, list) => {
+            inspect_expression(a, out) && list.iter().all(|e| inspect_expression(e, out))
+        }
+        Expression::Coalesce(list) => list.iter().all(|e| inspect_expression(e, out)),
+        Expression::FunctionCall(function, args) => {
+            // Custom functions — `geof:sfWithin` and the rest of §17 — are deliberately
+            // allowed: they are registered on the same evaluator, so they behave here
+            // exactly as they do anywhere else.
+            if matches!(
+                function,
+                Function::Now
+                    | Function::Rand
+                    | Function::Uuid
+                    | Function::StrUuid
+                    | Function::BNode
+            ) {
+                return false;
+            }
+            args.iter().all(|e| inspect_expression(e, out))
+        }
+        Expression::Exists(_) => false,
+    }
+}
+
+/// Converts one expression into the form the evaluator's public entry point takes.
+///
+/// There is no public conversion for a bare expression, so it travels inside a `FILTER` and
+/// is taken out the other side. Roundabout, but it is upstream's own conversion rather than
+/// a second copy of it, which is the property worth having.
+fn to_sparopt(expr: &Expression) -> Option<sparopt::algebra::Expression> {
+    let wrapper = GraphPattern::Filter {
+        expr: expr.clone(),
+        inner: Box::new(GraphPattern::Bgp {
+            patterns: vec![TriplePattern {
+                subject: TermPattern::Variable(Variable::new_unchecked("s")),
+                predicate: spargebra::term::NamedNodePattern::Variable(Variable::new_unchecked(
+                    "p",
+                )),
+                object: TermPattern::Variable(Variable::new_unchecked("o")),
+            }],
+        }),
+    };
+    match sparopt::algebra::GraphPattern::from(&wrapper) {
+        sparopt::algebra::GraphPattern::Filter { expression, .. } => Some(expression),
         _ => None,
     }
 }
 
 fn finish(
     patterns: &[TriplePattern],
+    filters: &[&Expression],
     variables: Vec<Variable>,
     distinct: bool,
     offset: usize,
@@ -267,8 +421,31 @@ fn finish(
     if !variables.iter().all(|v| bound.contains(v)) {
         return None;
     }
+
+    let mut conjuncts = Vec::new();
+    for filter in filters {
+        flatten_conjunction(filter, &mut conjuncts);
+    }
+    let mut prepared = Vec::with_capacity(conjuncts.len());
+    for conjunct in conjuncts {
+        let mut needs = Vec::new();
+        if !inspect_expression(conjunct, &mut needs) {
+            return None;
+        }
+        // A filter naming a variable the patterns never bind is evaluating an unbound
+        // variable, which has its own rules — `BOUND`, `COALESCE` and error propagation all
+        // behave differently there. Every variable this path binds is bound by
+        // construction, so rather than model the unbound case, refuse it.
+        if !needs.iter().all(|v| bound.contains(v)) {
+            return None;
+        }
+        let expression = to_sparopt(conjunct)?;
+        prepared.push(Filter { expression, needs });
+    }
+
     Some(Plan {
         patterns: patterns.to_vec(),
+        filters: prepared,
         variables,
         distinct,
         offset,
@@ -305,6 +482,7 @@ impl Plan {
     ) -> Result<Option<Vec<Vec<Option<TermId>>>>, ViewError> {
         let mut bindings: FxHashMap<&Variable, TermId> = FxHashMap::default();
         let mut run = Run {
+            evaluator: crate::Engine::evaluator(),
             out: Vec::new(),
             seen: rustc_hash::FxHashSet::default(),
             skipped: 0,
@@ -314,7 +492,8 @@ impl Plan {
         };
 
         let remaining: Vec<usize> = (0..self.patterns.len()).collect();
-        self.step(view, stats, &remaining, &mut bindings, &mut run)?;
+        let pending: Vec<usize> = (0..self.filters.len()).collect();
+        self.step(view, stats, &remaining, &pending, &mut bindings, &mut run)?;
 
         // Discarded, not truncated. A partial answer returned as a whole one is precisely
         // the failure this operator must not introduce.
@@ -344,17 +523,38 @@ impl Plan {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn step<'p>(
         &'p self,
         view: &DatasetView<'_>,
         stats: Option<&Statistics>,
         remaining: &[usize],
+        pending: &[usize],
         bindings: &mut FxHashMap<&'p Variable, TermId>,
         run: &mut Run<'_>,
     ) -> Result<(), ViewError> {
         if run.done() {
             return Ok(());
         }
+
+        // Any filter whose variables are all bound is applied now, before the remaining
+        // patterns are scanned. Failing one prunes this branch entirely, which is where the
+        // saving is — a filter applied after the join has already paid for the join.
+        //
+        // At the deepest frame every variable is bound, so `still_pending` is empty there
+        // and no filter can reach the row that follows unapplied.
+        let mut still_pending = Vec::with_capacity(pending.len());
+        for &index in pending {
+            let filter = &self.filters[index];
+            if filter.needs.iter().all(|v| bindings.contains_key(v)) {
+                if !Self::passes(filter, bindings, view, &run.evaluator)? {
+                    return Ok(());
+                }
+            } else {
+                still_pending.push(index);
+            }
+        }
+        let pending = &still_pending[..];
         if let Some(limit) = self.limit {
             if run.out.len() >= limit {
                 // Stopping here is what makes the work proportional to the answer rather
@@ -408,7 +608,7 @@ impl Plan {
                 continue;
             }
             let rest: Vec<usize> = remaining.iter().copied().filter(|i| *i != index).collect();
-            self.step(view, stats, &rest, bindings, run)?;
+            self.step(view, stats, &rest, pending, bindings, run)?;
             for variable in added {
                 bindings.remove(variable);
             }
@@ -422,6 +622,37 @@ impl Plan {
             }
         }
         Ok(())
+    }
+
+    /// Whether a solution satisfies one filter.
+    ///
+    /// The expression is evaluated by `spareval`, so the answer is the evaluator's answer. Only
+    /// the variables the filter mentions are decoded — a dictionary lookup per variable per row
+    /// is the cost of this feature, and there is no reason to pay it for columns the predicate
+    /// never reads.
+    ///
+    /// `None` from the evaluator means the expression raised an error or has no effective
+    /// boolean value. SPARQL's rule for both is that the solution is eliminated, not that the
+    /// query fails, so both become `false`.
+    fn passes(
+        filter: &Filter,
+        bindings: &FxHashMap<&Variable, TermId>,
+        view: &DatasetView<'_>,
+        evaluator: &spareval::QueryEvaluator,
+    ) -> Result<bool, ViewError> {
+        let mut substitutions = Vec::with_capacity(filter.needs.len());
+        for variable in &filter.needs {
+            let Some(id) = bindings.get(variable) else {
+                return Ok(false);
+            };
+            let Some(term) = view.store().decode_term(*id)? else {
+                return Ok(false);
+            };
+            substitutions.push((variable, term));
+        }
+        Ok(evaluator
+            .evaluate_effective_boolean_value_expression(&filter.expression, substitutions)
+            .unwrap_or(false))
     }
 
     /// The concrete term ids a pattern is constrained to, given what is already bound.

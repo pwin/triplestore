@@ -284,9 +284,20 @@ An index nested-loop join closes it: **0.535 ms on the query path, about 82×**.
 decoding — not a missing operator.
 
 **The fragment is deliberately tiny.** `SELECT` over one basic graph pattern in the default
-graph, with `DISTINCT`, `LIMIT`, `OFFSET` and a projection. Everything else is refused and
-falls back, so the fragment can grow later without the growth being a risk to what already
-works.
+graph, with `FILTER`, `DISTINCT`, `LIMIT`, `OFFSET` and a projection. Everything else is
+refused and falls back, so the fragment can grow later without the growth being a risk to
+what already works — `FILTER` was the first such growth, and it cost **71×** on a selective
+filtered star (67.5 ms to 0.948 ms) because the predicate now prunes branches before the
+remaining patterns are scanned at all.
+
+**Filters are borrowed, not reimplemented.** The predicate is evaluated by `spareval`'s own
+expression evaluator through this engine's function registry, so `FILTER` semantics here are
+the evaluator's. SPARQL comparison is value-based with numeric promotion, and an independent
+`=` that mishandled `"1"^^xsd:integer` against `"1.0"^^xsd:decimal` would be exactly the
+silent wrong answer this module exists to avoid. Two classes are refused rather than
+approximated, because the borrowed evaluator has neither a dataset nor an evaluation context:
+`EXISTS`, which would answer `false` for every solution, and `NOW`/`RAND`/`UUID`/`STRUUID`/
+`BNODE`.
 
 **Ordering is chosen at each step, not once.** Once the first pattern binds `?s`, the others
 stop being predicate scans and become subject-and-predicate lookups — a different and far
@@ -334,6 +345,16 @@ agrees with the evaluator on SPARQL nobody wrote for it.
 The general lesson is worth more than the operator: **a fast path attached to one entry point
 inherits the reputation of the test suites it never runs under.** Coverage is a property of
 the path taken, not of the tests that exist.
+
+**Where this still does not reach.** Bringing `FILTER` in was expected to make §17's spatial
+index and this operator compose, and it does so for only one of the two spellings. A
+hand-written `FILTER(geof:sfWithin(?g, <window>))` is `Project(Filter(Bgp))` and is inside
+the fragment. The property shorthand `?f geo:sfWithin <window>` is not: the rewrite above
+turns it into a geometry lookup joined in as a *union* of ordinary patterns, so what reaches
+the planner is `Filter(Join(Bgp, Union(..)))`. Composing those needs `JOIN` and `UNION` in
+the fragment, which is the next substantial piece rather than an increment on this one. Both
+halves are pinned by a test, because the broader claim was made once already before anything
+checked it.
 
 ---
 

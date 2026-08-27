@@ -36,6 +36,9 @@ oxsdatatypes = "0.2"
 sparesults = { version = "0.3", features = ["sparql-12"] }
 spargebra = { version = "0.4", features = ["sparql-12"] }
 spareval = { version = "0.2", features = ["sparql-12"] }
+# Only for `sparopt::algebra::Expression`, which is what `spareval`'s public expression
+# evaluator takes. Same version `spareval` itself resolves, so the types match.
+sparopt = "0.3"
 # GeoSPARQL function library, from the Oxigraph family. Same reuse argument as the
 # rest of L0: 43 conformance-heavy geometry functions nobody should rewrite.
 spargeo = "0.5"
