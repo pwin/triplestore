@@ -209,8 +209,16 @@ fn shapes_outside_the_fragment_still_work() {
     let engine = engine();
     for query in [
         format!("{P} SELECT ?n WHERE {{ ?s ex:name ?n OPTIONAL {{ ?s ex:nickname ?k }} }}"),
-        format!("{P} SELECT ?n WHERE {{ {{ ?s ex:name ?n }} UNION {{ ?s ex:label ?n }} }}"),
         format!("{P} SELECT ?n WHERE {{ ?s ex:name ?n }} ORDER BY ?n LIMIT 3"),
+        format!("{P} SELECT (COUNT(*) AS ?c) WHERE {{ ?s ex:name ?n }}"),
+        format!("{P} SELECT ?n WHERE {{ GRAPH ?g {{ ?s ex:name ?n }} }}"),
+        format!("{P} SELECT ?n WHERE {{ ?s ex:name ?n MINUS {{ ?s ex:nickname ?k }} }}"),
+        // A union branch that is not a plain BGP is still outside: the flattening only
+        // understands alternatives made of patterns.
+        format!(
+            "{P} SELECT ?n WHERE {{ {{ ?s ex:name ?n FILTER(STRLEN(?n) > 8) }} \
+             UNION {{ ?s ex:label ?n }} }}"
+        ),
     ] {
         let stats =
             Arc::new(Statistics::build(engine.store(), GraphFilter::Default).expect("statistics"));
@@ -679,19 +687,17 @@ fn a_filter_on_an_unbound_variable_is_refused() {
 }
 
 #[test]
-fn the_geosparql_filter_form_composes_and_the_property_form_does_not() {
-    // The boundary of a claim that was first made too broadly, pinned so it stays honest.
+fn both_geosparql_spellings_compose_with_the_operator() {
+    // The reason `JOIN`, `UNION` and `VALUES` were added at all, pinned in the shape that
+    // motivated them.
     //
-    // A hand-written `FILTER(geof:...)` over a geometry pattern is `Project(Filter(Bgp))`,
-    // which is inside the fragment: `geof:sfWithin` is a custom function on the same
-    // evaluator, so it is pushed down like any other predicate.
-    //
-    // The property shorthand is not, and `FILTER` alone was never going to make it so.
-    // `topology::rewrite` turns `?f geo:sfWithin <literal>` into a geometry lookup joined in
-    // as a *union* of ordinary patterns, so the rewritten query is
-    // `Filter(Join(Bgp, Union(..)))`. Bringing that into the fragment needs `JOIN` and
-    // `UNION`, which is a much larger piece of work than this one.
-    use holos_engine::topology;
+    // A hand-written `FILTER(geof:...)` was already inside the fragment. The *property*
+    // shorthand was not: `topology::rewrite` turns `?f geo:sfWithin <window>` into a geometry
+    // lookup joined in as a union of ordinary patterns, and with a spatial index supplied it
+    // joins a `VALUES` of candidate geometries on top of that. All three node kinds had to be
+    // handled before any of it could use an index nested-loop join.
+    use holos_engine::spatial::SpatialIndex;
+    use holos_engine::topology::{self, Routing};
 
     const GEO: &str = "http://www.opengis.net/ont/geosparql#";
     const WINDOW: &str = "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))";
@@ -699,34 +705,15 @@ fn the_geosparql_filter_form_composes_and_the_property_form_does_not() {
         "PREFIX geo: <{GEO}> PREFIX geof: <http://www.opengis.net/def/function/geosparql/>"
     );
 
-    let parse = |text: &str| {
-        spargebra::SparqlParser::new()
-            .parse_query(text)
-            .expect("parse")
-    };
-
-    let filter_form = parse(&format!(
-        "{prefixes} SELECT ?f WHERE {{ ?f geo:asWKT ?g .          FILTER(geof:sfWithin(?g, \"{WINDOW}\"^^geo:wktLiteral)) }}"
-    ));
-    assert!(
-        holos_engine::bindjoin::plan(&topology::rewrite(&filter_form, None)).is_some(),
-        "the explicit FILTER form should be inside the fragment"
-    );
-
-    let property_form = parse(&format!(
-        "{prefixes} SELECT ?f WHERE {{ ?f geo:sfWithin \"{WINDOW}\"^^geo:wktLiteral }}"
-    ));
-    assert!(
-        holos_engine::bindjoin::plan(&topology::rewrite(&property_form, None)).is_none(),
-        "the property form rewrites to a join over a union, which this fragment refuses"
-    );
-
-    // And both still answer correctly, which is what makes refusing one of them acceptable.
     let mut engine = Engine::new();
     engine
         .bulk_load(
             format!(
-                "@prefix geo: <{GEO}> .\n                 <http://example.com/inside>  geo:asWKT \"POINT(5 5)\"^^geo:wktLiteral .\n                 <http://example.com/outside> geo:asWKT \"POINT(50 50)\"^^geo:wktLiteral .\n"
+                "@prefix geo: <{GEO}> .\n\
+                 <http://example.com/inside>  geo:asWKT \"POINT(5 5)\"^^geo:wktLiteral .\n\
+                 <http://example.com/outside> geo:asWKT \"POINT(50 50)\"^^geo:wktLiteral .\n\
+                 <http://example.com/viaGeom> geo:hasGeometry <http://example.com/g1> .\n\
+                 <http://example.com/g1>      geo:asWKT \"POINT(6 6)\"^^geo:wktLiteral .\n"
             )
             .as_bytes(),
             RdfFormat::Turtle,
@@ -734,19 +721,166 @@ fn the_geosparql_filter_form_composes_and_the_property_form_does_not() {
         )
         .expect("load");
 
-    for query in [
-        format!(
-            "{prefixes} SELECT ?f WHERE {{ ?f geo:asWKT ?g .              FILTER(geof:sfWithin(?g, \"{WINDOW}\"^^geo:wktLiteral)) }}"
+    let parse = |text: &str| {
+        spargebra::SparqlParser::new()
+            .parse_query(text)
+            .expect("parse")
+    };
+
+    let filter_form = format!(
+        "{prefixes} SELECT ?f WHERE {{ ?f geo:asWKT ?g . \
+         FILTER(geof:sfWithin(?g, \"{WINDOW}\"^^geo:wktLiteral)) }}"
+    );
+    let property_form =
+        format!("{prefixes} SELECT ?f WHERE {{ ?f geo:sfWithin \"{WINDOW}\"^^geo:wktLiteral }}");
+
+    // Unrouted: `Filter(Join(Bgp, Union(..)))`.
+    for query in [&filter_form, &property_form] {
+        assert!(
+            holos_engine::bindjoin::plan(&topology::rewrite(&parse(query), None)).is_some(),
+            "should be inside the fragment: {query}"
+        );
+    }
+
+    // Routed: the same, with a `VALUES` of candidates joined on. This is the shape the
+    // server actually produces, and the one the spatial index exists to create.
+    let index = SpatialIndex::build(engine.store()).expect("build");
+    let routing = Routing {
+        index: &index,
+        store: engine.store(),
+    };
+    let routed = topology::rewrite(&parse(&property_form), Some(routing));
+    assert!(
+        holos_engine::bindjoin::plan(&routed).is_some(),
+        "the routed property form is what the whole exercise was for"
+    );
+
+    // And every spelling still answers correctly, which is the only thing that matters.
+    //
+    // The two answers differ, and should: they are different questions. The filter form asks
+    // which *geometry-bearing* things lie in the window, so it finds the feature carrying its
+    // own `geo:asWKT` and the geometry node itself. The property form asks which *features*
+    // do, so it follows `geo:hasGeometry` and returns the feature rather than its geometry.
+    // That difference is the reason the shorthand exists, and a test that expected them to
+    // agree would be asserting the shorthand is pointless.
+    for (query, expected) in [
+        (
+            &filter_form,
+            vec![
+                "f=<http://example.com/g1>".to_owned(),
+                "f=<http://example.com/inside>".to_owned(),
+            ],
         ),
-        format!("{prefixes} SELECT ?f WHERE {{ ?f geo:sfWithin \"{WINDOW}\"^^geo:wktLiteral }}"),
+        (
+            &property_form,
+            // `g1` is here because the rewrite stands for
+            // `(geo:hasDefaultGeometry|geo:hasGeometry)?/geo:asWKT`, and that `?` means a
+            // resource carrying its own `geo:asWKT` matches through the zero-length hop.
+            vec![
+                "f=<http://example.com/g1>".to_owned(),
+                "f=<http://example.com/inside>".to_owned(),
+                "f=<http://example.com/viaGeom>".to_owned(),
+            ],
+        ),
+    ] {
+        let (fast, slow) = both(&engine, query);
+        assert_eq!(fast, slow, "disagreement on {query}");
+        assert_eq!(fast, expected, "wrong answer for {query}");
+    }
+}
+
+// --------------------------------------------------------------- join and union
+
+#[test]
+fn unions_agree_with_the_evaluator() {
+    // `UNION` is a multiset union, and the two things most easily got wrong are both about
+    // counting: a solution satisfying both branches must appear twice, and a variable bound
+    // in only one branch must come back unbound in rows from the other.
+    let engine = engine();
+    for query in [
+        // Disjoint branches.
+        format!("{P} SELECT ?n WHERE {{ {{ ?s ex:name ?n }} UNION {{ ?s ex:label ?n }} }}"),
+        // Overlapping branches: every row satisfies both, so every row appears twice.
+        format!("{P} SELECT ?s WHERE {{ {{ ?s ex:name ?x }} UNION {{ ?s ex:name ?y }} }}"),
+        // A variable bound on one side only.
+        format!(
+            "{P} SELECT ?s ?n ?k WHERE {{ {{ ?s ex:name ?n }} UNION {{ ?s ex:nickname ?k }} }}"
+        ),
+        // Three-way, which nests as Union(a, Union(b, c)) and must flatten to three.
+        format!(
+            "{P} SELECT ?s WHERE {{ {{ ?s ex:name ?n }} UNION {{ ?s ex:label ?n }} \
+             UNION {{ ?s ex:nickname ?n }} }}"
+        ),
+        // Joined with something outside it, which is the shape the geometry lookup makes.
+        format!(
+            "{P} SELECT ?s ?d WHERE {{ ?s ex:memberOf ?d . \
+             {{ ?s ex:name ?n }} UNION {{ ?s ex:nickname ?n }} }}"
+        ),
+        // With DISTINCT, which is the one thing that legitimately collapses the duplicates.
+        format!("{P} SELECT DISTINCT ?s WHERE {{ {{ ?s ex:name ?x }} UNION {{ ?s ex:name ?y }} }}"),
+        // A branch that binds nothing new, and a branch that cannot match at all.
+        format!("{P} SELECT ?s WHERE {{ {{ ?s ex:name ?n }} UNION {{ ?s ex:noSuchThing ?n }} }}"),
     ] {
         let (fast, slow) = both(&engine, &query);
         assert_eq!(fast, slow, "disagreement on {query}");
-        assert_eq!(
-            fast,
-            vec!["f=<http://example.com/inside>".to_owned()],
-            "only the point inside the window is within it: {query}"
+    }
+}
+
+#[test]
+fn values_agrees_with_the_evaluator() {
+    let engine = engine();
+    for query in [
+        format!("{P} SELECT ?s WHERE {{ VALUES ?s {{ ex:p1 ex:p2 ex:p3 }} ?s ex:name ?n }}"),
+        // A value the store has never seen. The plan gives up and the evaluator answers,
+        // which must produce the same rows as if it had never been offered the query.
+        format!("{P} SELECT ?s WHERE {{ VALUES ?s {{ ex:p1 ex:nobody }} ?s ex:name ?n }}"),
+        // Two columns, and UNDEF, which binds nothing for that row.
+        format!(
+            "{P} SELECT ?s ?d WHERE {{ VALUES (?s ?d) {{ (ex:p1 ex:d1) (ex:p2 UNDEF) }} \
+             ?s ex:memberOf ?d }}"
+        ),
+        // An empty VALUES is zero solutions, not one.
+        format!("{P} SELECT ?s WHERE {{ VALUES ?s {{ }} ?s ex:name ?n }}"),
+        // Joined the other way round, so the ordering has to pick it up rather than assume
+        // it comes first.
+        format!("{P} SELECT ?n WHERE {{ ?s ex:name ?n VALUES ?s {{ ex:p7 }} }}"),
+    ] {
+        let (fast, slow) = both(&engine, &query);
+        assert_eq!(fast, slow, "disagreement on {query}");
+    }
+}
+
+#[test]
+fn a_filter_is_not_hoisted_out_of_a_group_that_does_not_bind_it() {
+    // The counter-example that makes filter hoisting unsound, and the reason the plan tracks
+    // *certainly* bound variables rather than merely bound ones.
+    //
+    // `{ ?s ex:name ?n FILTER(?d = ex:d1) } { ?s ex:memberOf ?d }` scopes the filter to the
+    // first group, where `?d` is unbound — so it errors and eliminates every solution.
+    // Hoisting it above the join would find `?d` bound and let rows through. Refusing is the
+    // conservative answer, and the answers must still match.
+    let engine = engine();
+    for query in [
+        format!(
+            "{P} SELECT ?s WHERE {{ {{ ?s ex:name ?n FILTER(?d = ex:d1) }} \
+             {{ ?s ex:memberOf ?d }} }}"
+        ),
+        // The same hazard through a union: `?k` is bound in one branch only, so a filter
+        // naming it is not certainly evaluable.
+        format!(
+            "{P} SELECT ?s WHERE {{ {{ {{ ?s ex:name ?k }} UNION {{ ?s ex:memberOf ?d }} }} \
+             FILTER(?k != \"x\") }}"
+        ),
+    ] {
+        let parsed = spargebra::SparqlParser::new()
+            .parse_query(&query)
+            .expect("parse");
+        assert!(
+            holos_engine::bindjoin::plan(&parsed).is_none(),
+            "hoisting this filter would change its meaning: {query}"
         );
+        let (fast, slow) = both(&engine, &query);
+        assert_eq!(fast, slow, "disagreement on {query}");
     }
 }
 

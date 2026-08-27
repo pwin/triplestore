@@ -369,10 +369,11 @@ tuning problem rather than a missing operator, and a much less urgent one.
 
 Three things kept it honest:
 
-* **The fragment is small.** `SELECT` over one basic graph pattern in the default graph, with
-  `FILTER`, `DISTINCT`, `LIMIT`, `OFFSET` and a projection. `OPTIONAL`, `UNION`, `GRAPH`,
-  aggregation, `ORDER BY`, property paths, `FROM`, blank nodes and triple terms are all
-  refused and fall back. A fast path that is wrong is worse than no fast path.
+* **The fragment is small.** `SELECT` in the default graph over basic graph patterns, `JOIN`,
+  `UNION`, `VALUES` and `FILTER`, with `DISTINCT`, `LIMIT`, `OFFSET` and a projection.
+  `OPTIONAL`, `GRAPH`, `MINUS`, aggregation, `ORDER BY`, property paths, `FROM`, blank nodes
+  and triple terms are all refused and fall back. A fast path that is wrong is worse than no
+  fast path.
 * **Ordering is decided at each step, not once.** After the first pattern binds `?s`, the
   others stop being predicate scans and become subject-and-predicate lookups — a different
   estimate entirely. Ordering up front would miss the effect the operator exists for.
@@ -440,9 +441,13 @@ the join. On the same store, a selective filter over the three-pattern star:
 
 | | Rows | Time |
 |---|---:|---:|
-| Evaluator, filter after the join | 19 | 67.503 ms |
-| Bind join, filter pushed down | 19 | **0.948 ms** |
-| | | **71×** |
+| Evaluator, filter after the join | 19 | 20.7 ms |
+| Bind join, filter pushed down | 19 | **0.286 ms** |
+| | | **72×** |
+
+Steady-state over repeated runs. The first measurement taken was 67.5 ms against 0.948 ms —
+the same multiple, on a cold cache; the absolute numbers move by a factor of three between a
+cold and a warm store, and the ratio does not.
 
 Row counts are asserted equal in the benchmark, not reported and hoped over. The benchmark
 also asserts the filter matches *something*: the first version of it compared a string-typed
@@ -460,14 +465,54 @@ without an evaluation context: `EXISTS`, which would quietly answer `false` ever
 Conjunctions are split, because `A && B` can only be applied once the later half is bound and
 splitting lets the earlier half prune sooner.
 
-**What this does not do — a correction.** Bringing `FILTER` into the fragment was expected to
-make the spatial index and the bind join compose, and it does so for only one of the two
-spellings. A hand-written `FILTER(geof:sfWithin(?g, <window>))` is `Project(Filter(Bgp))` and
-is now inside the fragment. The *property* shorthand `?f geo:sfWithin <window>` is not:
-`topology::rewrite` turns it into a geometry lookup joined in as a union of ordinary
-patterns, so the rewritten query is `Filter(Join(Bgp, Union(..)))`. That needs `JOIN` and
-`UNION` in the fragment, which is a substantially larger piece of work. A test pins both
-halves of this so the claim cannot drift back to the broader one.
+#### 3f. `JOIN`, `UNION`, `VALUES` — and the spatial index finally pays
+
+`FILTER` alone was expected to make the spatial index and the bind join compose. It did not,
+and the reason is worth keeping: a routed GeoSPARQL query does not reach the planner as a
+filtered BGP. `topology::rewrite` turns `?f geo:sfWithin <window>` into a geometry lookup
+joined in as a *union* of ordinary patterns, and the spatial index then joins a `VALUES` of
+candidate geometries onto that. The actual shape is
+
+```text
+Filter(Join(Join(Bgp, Union(Bgp, Union(Bgp, Bgp))), Values))
+```
+
+so all four node kinds had to be in the fragment before any of it could use an index
+nested-loop join. With them in:
+
+| Geometries | Rows | Unindexed | Indexed | Speed-up |
+|---:|---:|---:|---:|---:|
+| 10,000 | 0 | 75.95 ms | **114.40 µs** | **664×** |
+| 50,000 | 4 | 381.22 ms | **158.30 µs** | **2,408×** |
+
+This is the same benchmark that, earlier in this work, showed the index making **no
+difference at all** — narrowing fifty thousand geometries to four changed nothing while the
+join scanned all fifty thousand regardless. Two components, each correct, that did not
+compose until there was an operator able to use a binding.
+
+Row counts are asserted equal at both scales, not reported and hoped over.
+
+The plan is a flat list of items rather than a tree, because evaluation is a nested loop:
+entering a `UNION` branch replaces that entry with the branch's own patterns and carries on.
+Ordering is still chosen per step, which is what puts a `VALUES` of four candidates ahead of
+a scan of fifty thousand — the whole behaviour the index exists to create. `UNION` is a
+multiset union: a solution satisfying two branches is produced twice, which the geometry
+lookup depends on for a resource carrying both `geo:hasGeometry` and
+`geo:hasDefaultGeometry`.
+
+Two boundaries are worth stating because they are not obvious:
+
+* **Hoisting a filter out of a join is only sound when its variables are certainly bound
+  inside the subtree it was written against.** `{ ?a ?b ?c FILTER(?d = 1) } { ?d ?e ?f }` is
+  the counter-example — `?d` is unbound where the filter sits, so it errors and eliminates
+  everything, while the same filter after the join would see `?d` bound. A `UNION` makes this
+  live rather than theoretical, since a variable bound in one branch may be unbound in
+  another, so the plan tracks *certainly* bound separately from *possibly* bound.
+* **A `VALUES` term the dictionary has never seen sends the query back to the evaluator.**
+  Such a term still binds — `VALUES ?x { <urn:absent> }` is one solution, not none — but
+  representing it needs a term id that does not exist, and interning one would be a write in
+  the middle of a read. It costs nothing where it matters: the `VALUES` the spatial index
+  generates holds geometries read out of the store.
 
 ### 4. A commit costs the size of its change, not the size of the scene
 

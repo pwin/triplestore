@@ -26,13 +26,40 @@
 //! path. [`plan`] returns `None` for anything outside it and the caller falls back to
 //! `spareval`, which is why the fragment can grow later without risk.
 //!
-//! Handled: `SELECT` over a single basic graph pattern in the default graph, optionally
-//! wrapped in `FILTER`, `DISTINCT`, `LIMIT` and `OFFSET`, with a projection.
+//! Handled: `SELECT` in the default graph over basic graph patterns, `JOIN`, `UNION` and
+//! `VALUES`, optionally wrapped in `FILTER`, `DISTINCT`, `LIMIT` and `OFFSET`, with a
+//! projection.
 //!
-//! Refused: `OPTIONAL`, `UNION`, `GRAPH`, `MINUS`, `VALUES`, `BIND`, aggregation,
-//! `ORDER BY`, property paths, subqueries, `ASK`/`CONSTRUCT`/`DESCRIBE`, `FROM`, and any
-//! pattern mentioning a blank node. Every one of those is a *silent* wrong answer if guessed
-//! at.
+//! Refused: `OPTIONAL`, `GRAPH`, `MINUS`, `BIND`, aggregation, `ORDER BY`, property paths,
+//! subqueries, `ASK`/`CONSTRUCT`/`DESCRIBE`, `FROM`, and any pattern mentioning a blank node.
+//! Every one of those is a *silent* wrong answer if guessed at.
+//!
+//! # Why `JOIN`, `UNION` and `VALUES` are here
+//!
+//! Not for their own sake. §17's topology rewrite turns `?f geo:sfWithin <window>` into a
+//! geometry lookup joined in as a *union* of ordinary patterns, and the spatial index then
+//! joins a `VALUES` of candidate geometries onto that. So the shape a routed GeoSPARQL query
+//! actually reaches the planner as is
+//!
+//! ```text
+//! Filter(Join(Join(Bgp, Union(Bgp, Union(Bgp, Bgp))), Values))
+//! ```
+//!
+//! and every one of those four node kinds has to be in the fragment before any of it can use
+//! an index nested-loop join. `FILTER` alone was not enough, which is what the previous round
+//! of this work established the hard way.
+//!
+//! # How they evaluate
+//!
+//! The plan is a flat list of [`Item`]s rather than a tree, because evaluation is a nested
+//! loop: entering a `UNION` branch simply replaces that entry with the branch's own patterns
+//! and carries on. Ordering is still chosen per step, so a `VALUES` of four candidate
+//! geometries sorts ahead of a scan of fifty thousand, which is the entire point of the
+//! spatial index.
+//!
+//! `UNION` is a **multiset** union: a solution satisfying two branches is produced twice.
+//! That is not untidiness to be deduplicated — the geometry lookup depends on it for a
+//! resource carrying both `geo:hasGeometry` and `geo:hasDefaultGeometry`.
 //!
 //! # Filters, and why they are not reimplemented
 //!
@@ -86,7 +113,7 @@ use holos_stats::Statistics;
 use rustc_hash::FxHashMap;
 use spareval::{CancellationToken, QueryableDataset};
 use spargebra::algebra::{Expression, Function, GraphPattern};
-use spargebra::term::{TermPattern, TriplePattern, Variable};
+use spargebra::term::{GroundTerm, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
 
 /// The two conditions under which the fast path gives up and defers to the evaluator.
@@ -184,9 +211,87 @@ struct Filter {
     needs: Vec<Variable>,
 }
 
+/// One step of a plan: something that binds variables.
+pub enum Item {
+    /// A single triple pattern, probed against the store's indexes.
+    Pattern(TriplePattern),
+    /// `UNION`, flattened to a list of alternatives, each a conjunction of patterns.
+    Union(Vec<Vec<TriplePattern>>),
+    /// `VALUES`: rows of terms bound directly rather than looked up.
+    Values(ValuesItem),
+}
+
+/// The rows of a `VALUES` clause.
+pub struct ValuesItem {
+    variables: Vec<Variable>,
+    /// `None` is `UNDEF`, which binds nothing for that variable in that row.
+    rows: Vec<Vec<Option<GroundTerm>>>,
+}
+
+/// What is left to evaluate, as borrowed pieces of the plan.
+///
+/// A list rather than a tree: entering a `UNION` branch replaces one entry with that
+/// branch's patterns and leaves the rest alone, so the remaining work is always "these
+/// things, in whatever order turns out cheapest".
+#[derive(Clone, Copy)]
+enum Todo<'p> {
+    Pattern(&'p TriplePattern),
+    Union(&'p [Vec<TriplePattern>]),
+    Values(&'p ValuesItem),
+}
+
+impl<'p> From<&'p Item> for Todo<'p> {
+    fn from(item: &'p Item) -> Self {
+        match item {
+            Item::Pattern(triple) => Todo::Pattern(triple),
+            Item::Union(branches) => Todo::Union(branches),
+            Item::Values(values) => Todo::Values(values),
+        }
+    }
+}
+
+/// The variables a subtree binds.
+#[derive(Default, Clone)]
+struct Bound {
+    /// Bound on *every* path through the subtree. The only variables a hoisted `FILTER` may
+    /// reference, because they are the ones whose value does not depend on which `UNION`
+    /// branch was taken.
+    certain: Vec<Variable>,
+    /// Bound on at least one path. What a projection may name; the rest come back unbound.
+    possible: Vec<Variable>,
+}
+
+impl Bound {
+    /// Both subtrees run, so everything either binds is bound.
+    fn joined(mut self, other: Self) -> Self {
+        for v in other.certain {
+            if !self.certain.contains(&v) {
+                self.certain.push(v);
+            }
+        }
+        for v in other.possible {
+            if !self.possible.contains(&v) {
+                self.possible.push(v);
+            }
+        }
+        self
+    }
+
+    /// One branch or the other runs, so only what *both* bind is certain.
+    fn alternated(mut self, other: Self) -> Self {
+        self.certain.retain(|v| other.certain.contains(v));
+        for v in other.possible {
+            if !self.possible.contains(&v) {
+                self.possible.push(v);
+            }
+        }
+        self
+    }
+}
+
 /// A query this module can answer, reduced to what evaluation needs.
 pub struct Plan {
-    patterns: Vec<TriplePattern>,
+    items: Vec<Item>,
     filters: Vec<Filter>,
     /// Variables the query projects, in order.
     variables: Vec<Variable>,
@@ -254,10 +359,13 @@ pub fn plan(query: &Query) -> Option<Plan> {
                 node = inner;
             }
             GraphPattern::Project { inner, variables } => {
-                let (patterns, filters) = as_bgp_with_filters(inner)?;
+                let mut items = Vec::new();
+                let mut filters = Vec::new();
+                let bound = collect(inner, &mut items, &mut filters)?;
                 return finish(
-                    patterns,
-                    &filters,
+                    items,
+                    filters,
+                    &bound,
                     variables.clone(),
                     distinct,
                     offset,
@@ -269,24 +377,141 @@ pub fn plan(query: &Query) -> Option<Plan> {
     }
 }
 
-/// The patterns of a BGP, and any `FILTER`s wrapped around it.
+/// Walks the pattern tree into a flat list of items, hoisting filters as it goes.
 ///
-/// `FILTER` is a wrapper in the SPARQL algebra and several of them nest, so this peels until
-/// it reaches the BGP underneath. Anything else in between — a `UNION`, a `GRAPH`, a join —
-/// ends the fragment.
-fn as_bgp_with_filters(pattern: &GraphPattern) -> Option<(&[TriplePattern], Vec<&Expression>)> {
-    let mut filters = Vec::new();
-    let mut node = pattern;
-    loop {
-        match node {
-            GraphPattern::Bgp { patterns } => return Some((patterns, filters)),
-            GraphPattern::Filter { expr, inner } => {
-                filters.push(expr);
-                node = inner;
+/// Returns the variables the subtree binds, or `None` if anything in it is outside the
+/// fragment. The return value is what makes filter hoisting safe — see below.
+fn collect(
+    pattern: &GraphPattern,
+    items: &mut Vec<Item>,
+    filters: &mut Vec<Filter>,
+) -> Option<Bound> {
+    match pattern {
+        GraphPattern::Bgp { patterns } => {
+            let mut bound = Bound::default();
+            for triple in patterns {
+                if !usable_pattern(triple) {
+                    return None;
+                }
+                collect_variables(triple, &mut bound.certain);
+                items.push(Item::Pattern(triple.clone()));
             }
-            _ => return None,
+            bound.possible.clone_from(&bound.certain);
+            Some(bound)
+        }
+
+        // A join of conjunctions is a conjunction, so the two sides simply concatenate. The
+        // nested loop then orders the whole lot together rather than respecting a tree shape
+        // that carries no information about cost.
+        GraphPattern::Join { left, right } => {
+            let a = collect(left, items, filters)?;
+            let b = collect(right, items, filters)?;
+            Some(a.joined(b))
+        }
+
+        // Hoisting a filter out of a join is only sound when every variable it names is
+        // bound *inside the subtree it was written against*. `{ ?a ?b ?c FILTER(?d = 1) }
+        // { ?d ?e ?f }` is the counter-example: `?d` is unbound where the filter sits, so
+        // the filter errors and eliminates everything, while the same filter applied after
+        // the join would see `?d` bound and could pass. Requiring the variables to be
+        // certainly bound in the subtree makes the two orders agree, because a compatible
+        // join cannot change the value of a variable the subtree already fixed.
+        GraphPattern::Filter { expr, inner } => {
+            let bound = collect(inner, items, filters)?;
+            let mut conjuncts = Vec::new();
+            flatten_conjunction(expr, &mut conjuncts);
+            for conjunct in conjuncts {
+                let mut needs = Vec::new();
+                if !inspect_expression(conjunct, &mut needs) {
+                    return None;
+                }
+                if !needs.iter().all(|v| bound.certain.contains(v)) {
+                    return None;
+                }
+                let expression = to_sparopt(conjunct)?;
+                filters.push(Filter { expression, needs });
+            }
+            Some(bound)
+        }
+
+        GraphPattern::Union { .. } => {
+            let mut branches = Vec::new();
+            let bound = union_branches(pattern, &mut branches)?;
+            items.push(Item::Union(branches));
+            Some(bound)
+        }
+
+        GraphPattern::Values {
+            variables,
+            bindings,
+        } => {
+            let mut bound = Bound {
+                certain: Vec::new(),
+                possible: variables.clone(),
+            };
+            // `UNDEF` in even one row makes the variable only *possibly* bound, which is
+            // what stops a filter naming it from being hoisted above the `VALUES`.
+            for (column, variable) in variables.iter().enumerate() {
+                if bindings
+                    .iter()
+                    .all(|row| row.get(column).is_some_and(Option::is_some))
+                {
+                    bound.certain.push(variable.clone());
+                }
+            }
+            items.push(Item::Values(ValuesItem {
+                variables: variables.clone(),
+                rows: bindings.clone(),
+            }));
+            Some(bound)
+        }
+
+        _ => None,
+    }
+}
+
+/// Flattens nested `UNION`s into a list of alternatives, each of which must be a plain BGP.
+///
+/// A branch containing anything else — a filter, a nested join — ends the fragment. That is
+/// narrower than SPARQL allows and wide enough for what produces unions here.
+fn union_branches(pattern: &GraphPattern, out: &mut Vec<Vec<TriplePattern>>) -> Option<Bound> {
+    match pattern {
+        GraphPattern::Union { left, right } => {
+            let a = union_branches(left, out)?;
+            let b = union_branches(right, out)?;
+            Some(a.alternated(b))
+        }
+        GraphPattern::Bgp { patterns } => {
+            if patterns.is_empty() {
+                return None;
+            }
+            let mut bound = Bound::default();
+            for triple in patterns {
+                if !usable_pattern(triple) {
+                    return None;
+                }
+                collect_variables(triple, &mut bound.certain);
+            }
+            bound.possible.clone_from(&bound.certain);
+            out.push(patterns.clone());
+            Some(bound)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a triple pattern is one this path can probe with.
+///
+/// A blank node behaves as a variable that cannot be projected, and an RDF 1.2 triple term
+/// needs the term encoding's side table. Neither is modelled here, and both are rare in the
+/// shapes this exists for.
+fn usable_pattern(triple: &TriplePattern) -> bool {
+    for term in [&triple.subject, &triple.object] {
+        if matches!(term, TermPattern::BlankNode(_) | TermPattern::Triple(_)) {
+            return false;
         }
     }
+    true
 }
 
 /// Splits `A && B` into its conjuncts.
@@ -386,66 +611,26 @@ fn to_sparopt(expr: &Expression) -> Option<sparopt::algebra::Expression> {
 }
 
 fn finish(
-    patterns: &[TriplePattern],
-    filters: &[&Expression],
+    items: Vec<Item>,
+    filters: Vec<Filter>,
+    bound: &Bound,
     variables: Vec<Variable>,
     distinct: bool,
     offset: usize,
     limit: Option<usize>,
 ) -> Option<Plan> {
-    if patterns.is_empty() {
+    if items.is_empty() {
         return None;
     }
-    // A blank node in a pattern behaves as a variable that cannot be projected. Rather than
-    // model that, refuse: it is rare in the shapes this exists for.
-    for triple in patterns {
-        for term in [&triple.subject, &triple.object] {
-            if matches!(term, TermPattern::BlankNode(_)) {
-                return None;
-            }
-        }
-        if matches!(triple.subject, TermPattern::Triple(_))
-            || matches!(triple.object, TermPattern::Triple(_))
-        {
-            // RDF 1.2 triple terms in a pattern need the term encoding's side table, which
-            // this path does not reach into.
-            return None;
-        }
-    }
-    // Every projected variable must be bound by the patterns, or the result would need
-    // unbound columns this path does not produce.
-    let mut bound = Vec::new();
-    for triple in patterns {
-        collect_variables(triple, &mut bound);
-    }
-    if !variables.iter().all(|v| bound.contains(v)) {
+    // A projected variable no part of the plan binds would come back unbound on every row.
+    // That is what SPARQL says should happen, and it is also a sign the query was not
+    // understood, so it goes back to the evaluator rather than being answered here.
+    if !variables.iter().all(|v| bound.possible.contains(v)) {
         return None;
     }
-
-    let mut conjuncts = Vec::new();
-    for filter in filters {
-        flatten_conjunction(filter, &mut conjuncts);
-    }
-    let mut prepared = Vec::with_capacity(conjuncts.len());
-    for conjunct in conjuncts {
-        let mut needs = Vec::new();
-        if !inspect_expression(conjunct, &mut needs) {
-            return None;
-        }
-        // A filter naming a variable the patterns never bind is evaluating an unbound
-        // variable, which has its own rules — `BOUND`, `COALESCE` and error propagation all
-        // behave differently there. Every variable this path binds is bound by
-        // construction, so rather than model the unbound case, refuse it.
-        if !needs.iter().all(|v| bound.contains(v)) {
-            return None;
-        }
-        let expression = to_sparopt(conjunct)?;
-        prepared.push(Filter { expression, needs });
-    }
-
     Some(Plan {
-        patterns: patterns.to_vec(),
-        filters: prepared,
+        items,
+        filters,
         variables,
         distinct,
         offset,
@@ -491,9 +676,9 @@ impl Plan {
             since_check: 0,
         };
 
-        let remaining: Vec<usize> = (0..self.patterns.len()).collect();
+        let todo: Vec<Todo<'_>> = self.items.iter().map(Todo::from).collect();
         let pending: Vec<usize> = (0..self.filters.len()).collect();
-        self.step(view, stats, &remaining, &pending, &mut bindings, &mut run)?;
+        self.step(view, stats, &todo, &pending, &mut bindings, &mut run)?;
 
         // Discarded, not truncated. A partial answer returned as a whole one is precisely
         // the failure this operator must not introduce.
@@ -510,15 +695,14 @@ impl Plan {
     /// which is a different — and far smaller — estimate. Ordering once, before anything is
     /// bound, would miss exactly the effect the operator exists to exploit.
     fn cheapest(
-        &self,
         view: &DatasetView<'_>,
         stats: Option<&Statistics>,
-        remaining: &[usize],
+        todo: &[Todo<'_>],
         bindings: &FxHashMap<&Variable, TermId>,
     ) -> Option<usize> {
-        remaining.iter().copied().min_by(|a, b| {
-            let ca = estimate(&self.patterns[*a], view, bindings, stats);
-            let cb = estimate(&self.patterns[*b], view, bindings, stats);
+        (0..todo.len()).min_by(|a, b| {
+            let ca = estimate_todo(&todo[*a], view, bindings, stats);
+            let cb = estimate_todo(&todo[*b], view, bindings, stats);
             ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
         })
     }
@@ -528,7 +712,7 @@ impl Plan {
         &'p self,
         view: &DatasetView<'_>,
         stats: Option<&Statistics>,
-        remaining: &[usize],
+        todo: &[Todo<'p>],
         pending: &[usize],
         bindings: &mut FxHashMap<&'p Variable, TermId>,
         run: &mut Run<'_>,
@@ -562,7 +746,7 @@ impl Plan {
                 return Ok(());
             }
         }
-        let Some(index) = self.cheapest(view, stats, remaining, bindings) else {
+        let Some(index) = Self::cheapest(view, stats, todo, bindings) else {
             let row = self.project(bindings);
             if self.distinct && !run.seen.insert(row.clone()) {
                 return Ok(());
@@ -575,9 +759,60 @@ impl Plan {
             return Ok(());
         };
 
-        let triple = &self.patterns[index];
+        // Everything except the chosen entry, which is what the next depth still has to do.
+        let rest: Vec<Todo<'p>> = todo
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| *position != index)
+            .map(|(_, entry)| *entry)
+            .collect();
+
+        match todo[index] {
+            Todo::Pattern(triple) => {
+                self.probe(view, stats, triple, &rest, pending, bindings, run)?;
+            }
+
+            // Each alternative is tried in turn, with its own patterns prepended to whatever
+            // was left. Bindings made inside a branch are undone by the frames that made
+            // them, so the next branch starts from the same place this one did — which is
+            // what makes this a union rather than a join.
+            Todo::Union(branches) => {
+                for branch in branches {
+                    let mut next: Vec<Todo<'p>> = branch.iter().map(Todo::Pattern).collect();
+                    next.extend_from_slice(&rest);
+                    self.step(view, stats, &next, pending, bindings, run)?;
+                    if run.abandoned {
+                        break;
+                    }
+                    if let Some(limit) = self.limit {
+                        if run.out.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            Todo::Values(values) => {
+                self.rows_of(view, stats, values, &rest, pending, bindings, run)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One triple pattern: resolve what is already known, then scan what is not.
+    #[allow(clippy::too_many_arguments)]
+    fn probe<'p>(
+        &'p self,
+        view: &DatasetView<'_>,
+        stats: Option<&Statistics>,
+        triple: &'p TriplePattern,
+        rest: &[Todo<'p>],
+        pending: &[usize],
+        bindings: &mut FxHashMap<&'p Variable, TermId>,
+        run: &mut Run<'_>,
+    ) -> Result<(), ViewError> {
         // A constant absent from the dictionary kills the branch before any scan.
-        let Some((subject, predicate, object)) = self.resolve(triple, view, bindings)? else {
+        let Some((subject, predicate, object)) = Self::resolve(triple, view, bindings)? else {
             return Ok(());
         };
 
@@ -607,8 +842,71 @@ impl Plan {
                 }
                 continue;
             }
-            let rest: Vec<usize> = remaining.iter().copied().filter(|i| *i != index).collect();
-            self.step(view, stats, &rest, pending, bindings, run)?;
+            self.step(view, stats, rest, pending, bindings, run)?;
+            for variable in added {
+                bindings.remove(variable);
+            }
+            if run.abandoned {
+                break;
+            }
+            if let Some(limit) = self.limit {
+                if run.out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One `VALUES` clause: each row is a set of bindings to try.
+    ///
+    /// A row whose term the dictionary has never seen is the awkward case. Such a term still
+    /// *binds* — `VALUES ?x { <urn:absent> }` is one solution, not none — but representing it
+    /// needs a term id that does not exist, and interning one would be a write in the middle
+    /// of a read. So the whole query goes back to the evaluator instead. It costs nothing
+    /// where this matters: the `VALUES` §17 generates holds geometries read out of the store,
+    /// which are interned by construction.
+    #[allow(clippy::too_many_arguments)]
+    fn rows_of<'p>(
+        &'p self,
+        view: &DatasetView<'_>,
+        stats: Option<&Statistics>,
+        values: &'p ValuesItem,
+        rest: &[Todo<'p>],
+        pending: &[usize],
+        bindings: &mut FxHashMap<&'p Variable, TermId>,
+        run: &mut Run<'_>,
+    ) -> Result<(), ViewError> {
+        for row in &values.rows {
+            if run.done() {
+                break;
+            }
+            let mut added: Vec<&'p Variable> = Vec::new();
+            let mut compatible = true;
+            for (variable, term) in values.variables.iter().zip(row) {
+                // `UNDEF` binds nothing, which is exactly what leaving it out does.
+                let Some(term) = term else { continue };
+                let term: oxrdf::Term = term.clone().into();
+                match lookup(view, term.as_ref())? {
+                    Slot::Fixed(id) => {
+                        if !bind_variable(variable, id, bindings, &mut added) {
+                            compatible = false;
+                            break;
+                        }
+                    }
+                    Slot::Missing => {
+                        for variable in added {
+                            bindings.remove(variable);
+                        }
+                        run.abandoned = true;
+                        return Ok(());
+                    }
+                    Slot::Any => unreachable!("a ground term is never a wildcard"),
+                }
+            }
+            if compatible {
+                self.step(view, stats, rest, pending, bindings, run)?;
+            }
             for variable in added {
                 bindings.remove(variable);
             }
@@ -661,7 +959,6 @@ impl Plan {
     /// no quad can match and the branch is dead. That is a common and cheap win: a query
     /// naming a predicate the store has never seen returns immediately.
     fn resolve(
-        &self,
         triple: &TriplePattern,
         view: &DatasetView<'_>,
         bindings: &FxHashMap<&Variable, TermId>,
@@ -769,6 +1066,26 @@ fn bind<'p>(
     }
 }
 
+/// Binds a variable to a term id, or reports that it is already bound to something else.
+///
+/// The second case is what makes a repeated variable mean equality rather than two
+/// independent bindings.
+fn bind_variable<'p>(
+    variable: &'p Variable,
+    id: TermId,
+    bindings: &mut FxHashMap<&'p Variable, TermId>,
+    added: &mut Vec<&'p Variable>,
+) -> bool {
+    match bindings.get(variable) {
+        Some(existing) => *existing == id,
+        None => {
+            bindings.insert(variable, id);
+            added.push(variable);
+            true
+        }
+    }
+}
+
 fn bind_predicate<'p>(
     predicate: &'p spargebra::term::NamedNodePattern,
     actual: TermId,
@@ -796,6 +1113,34 @@ fn bind_predicate<'p>(
 ///
 /// A pattern position already *bound* by an earlier pattern counts as a constant here, which
 /// is the whole point — it is why a star query orders itself into one scan and then probes.
+/// What one entry of the todo list is likely to cost, given what is already bound.
+///
+/// Rough on purpose: this decides an order, and a wrong order is slow rather than wrong. A
+/// `VALUES` is the one exact number here, which is why a handful of candidate geometries
+/// reliably sorts ahead of a scan — the behaviour the spatial index exists to produce.
+fn estimate_todo(
+    todo: &Todo<'_>,
+    view: &DatasetView<'_>,
+    bindings: &FxHashMap<&Variable, TermId>,
+    stats: Option<&Statistics>,
+) -> f64 {
+    match todo {
+        Todo::Pattern(triple) => estimate(triple, view, bindings, stats),
+        // Each branch yields at most what its most selective pattern does, and the union
+        // yields the sum of the branches.
+        Todo::Union(branches) => branches
+            .iter()
+            .map(|branch| {
+                branch
+                    .iter()
+                    .map(|triple| estimate(triple, view, bindings, stats))
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .sum(),
+        Todo::Values(values) => values.rows.len() as f64,
+    }
+}
+
 fn estimate(
     triple: &TriplePattern,
     view: &DatasetView<'_>,

@@ -283,12 +283,13 @@ An index nested-loop join closes it: **0.535 ms on the query path, about 82×**.
 10× to hand-written is generality — per-step re-estimation, hashed bindings, dictionary
 decoding — not a missing operator.
 
-**The fragment is deliberately tiny.** `SELECT` over one basic graph pattern in the default
-graph, with `FILTER`, `DISTINCT`, `LIMIT`, `OFFSET` and a projection. Everything else is
-refused and falls back, so the fragment can grow later without the growth being a risk to
-what already works — `FILTER` was the first such growth, and it cost **71×** on a selective
-filtered star (67.5 ms to 0.948 ms) because the predicate now prunes branches before the
-remaining patterns are scanned at all.
+**The fragment is deliberately small.** `SELECT` in the default graph over basic graph
+patterns, `JOIN`, `UNION`, `VALUES` and `FILTER`, with `DISTINCT`, `LIMIT`, `OFFSET` and a
+projection. Everything else is refused and falls back, so the fragment can grow without the
+growth risking what already works. It has grown twice: `FILTER` bought **72×** on a selective
+filtered star, because the predicate prunes branches before the remaining patterns are
+scanned at all; `JOIN`, `UNION` and `VALUES` bought **2,408×** on a spatial query, for the
+reason below.
 
 **Filters are borrowed, not reimplemented.** The predicate is evaluated by `spareval`'s own
 expression evaluator through this engine's function registry, so `FILTER` semantics here are
@@ -346,15 +347,27 @@ The general lesson is worth more than the operator: **a fast path attached to on
 inherits the reputation of the test suites it never runs under.** Coverage is a property of
 the path taken, not of the tests that exist.
 
-**Where this still does not reach.** Bringing `FILTER` in was expected to make §17's spatial
-index and this operator compose, and it does so for only one of the two spellings. A
-hand-written `FILTER(geof:sfWithin(?g, <window>))` is `Project(Filter(Bgp))` and is inside
-the fragment. The property shorthand `?f geo:sfWithin <window>` is not: the rewrite above
-turns it into a geometry lookup joined in as a *union* of ordinary patterns, so what reaches
-the planner is `Filter(Join(Bgp, Union(..)))`. Composing those needs `JOIN` and `UNION` in
-the fragment, which is the next substantial piece rather than an increment on this one. Both
-halves are pinned by a test, because the broader claim was made once already before anything
-checked it.
+**What it took to make the spatial index pay.** `FILTER` was expected to be enough and was
+not, which is worth recording because the mistake was a failure to look. A routed GeoSPARQL
+query does not reach the planner as a filtered BGP: §17's rewrite turns
+`?f geo:sfWithin <window>` into a geometry lookup joined in as a *union* of ordinary
+patterns, and the spatial index joins a `VALUES` of candidate geometries onto that, giving
+`Filter(Join(Join(Bgp, Union(Bgp, Union(Bgp, Bgp))), Values))`. All four node kinds had to be
+in the fragment before any of it could use a bind join.
+
+With them in, the spatial benchmark goes from **no measurable difference** — the state §17
+recorded, where narrowing fifty thousand geometries to four changed nothing because the join
+scanned all fifty thousand anyway — to **2,408×** at fifty thousand geometries. Two
+components, each individually correct and individually tested, that did not compose until a
+third existed.
+
+Two boundaries fell out of it, both about `UNION` making possibilities that a conjunctive
+plan never had. A filter can only be hoisted out of a join when its variables are *certainly*
+bound in the subtree it was written against — `{ ?a ?b ?c FILTER(?d = 1) } { ?d ?e ?f }`
+being the counter-example — so the plan tracks certainly-bound separately from
+possibly-bound. And a `VALUES` term absent from the dictionary sends the query back to the
+evaluator, because such a term still binds while having no term id, and interning one would
+be a write in the middle of a read.
 
 ---
 
