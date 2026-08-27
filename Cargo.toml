@@ -18,11 +18,11 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/pwin/new_triplestore_sparql_engine"
+repository = "https://github.com/pwin/triplestore"
 authors = ["HOLOS contributors"]
 
 [workspace.dependencies]
@@ -52,16 +52,16 @@ wkt = "0.14"
 geojson = "0.24"
 
 # --- internal
-holos-core = { path = "crates/holos-core", version = "0.1.1" }
-holos-store = { path = "crates/holos-store", version = "0.1.1" }
-holos-engine = { path = "crates/holos-engine", version = "0.1.1" }
-holos-security = { path = "crates/holos-security", version = "0.1.1" }
-holos-conformance = { path = "crates/holos-conformance", version = "0.1.1" }
-holos-shacl = { path = "crates/holos-shacl", version = "0.1.1" }
-holos-shacl-engine = { path = "crates/holos-shacl-engine", version = "0.1.1" }
-holos-holon = { path = "crates/holos-holon", version = "0.1.1" }
-holos-stats = { path = "crates/holos-stats", version = "0.1.1" }
-holos-tabular = { path = "crates/holos-tabular", version = "0.1.1" }
+holos-core = { path = "crates/holos-core", version = "0.2.0" }
+holos-store = { path = "crates/holos-store", version = "0.2.0" }
+holos-engine = { path = "crates/holos-engine", version = "0.2.0" }
+holos-security = { path = "crates/holos-security", version = "0.2.0" }
+holos-conformance = { path = "crates/holos-conformance", version = "0.2.0" }
+holos-shacl = { path = "crates/holos-shacl", version = "0.2.0" }
+holos-shacl-engine = { path = "crates/holos-shacl-engine", version = "0.2.0" }
+holos-holon = { path = "crates/holos-holon", version = "0.2.0" }
+holos-stats = { path = "crates/holos-stats", version = "0.2.0" }
+holos-tabular = { path = "crates/holos-tabular", version = "0.2.0" }
 
 # --- everything else
 anyhow = "1"
