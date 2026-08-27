@@ -79,6 +79,16 @@ SERVER
     --no-ui                  Do not serve the console. The endpoints still work, and the
                              server then needs no network access of any kind.
 
+MAINTENANCE
+    --backup-dir <DIR>       Parent directory for `POST /backup` checkpoints. The endpoint
+                             does not exist unless this and --backup-role are both set: a
+                             client never names a path, so it cannot be aimed at one.
+    --backup-role <ROLE>     Role a principal must hold to trigger a backup.
+    --purge-role <ROLE>      Role a principal must hold to call POST /maintenance/purge,
+                             which reclaims spatial index entries for geometries no longer
+                             referenced by any quad. There is no timer: schedule it with
+                             cron or a systemd timer, as with backups.
+
 IDENTITY  (see DESIGN.md §14.5)
     --trust-forwarded-identity
                              Read the principal from X-Holos-Principal, X-Holos-Roles and
@@ -108,6 +118,9 @@ struct Config {
     backup_dir: Option<String>,
     /// The role a principal must hold to trigger a backup. `None` disables the endpoint.
     backup_role: Option<String>,
+    /// The role a principal must hold to purge the spatial index. `None` disables the
+    /// endpoint, on the same reasoning as `backup_role`.
+    purge_role: Option<String>,
     threads: usize,
     ui: bool,
     trust_forwarded: bool,
@@ -133,6 +146,7 @@ impl Default for Config {
             store: None,
             backup_dir: None,
             backup_role: None,
+            purge_role: None,
             threads: 8,
             ui: true,
             trust_forwarded: false,
@@ -257,10 +271,15 @@ fn main() -> Result<()> {
         statistics: RwLock::new(None),
         spatial: RwLock::new(None),
     });
+    // Built unconditionally, and deliberately not inside the `--reorder` block below. The
+    // two were coupled, which meant a server started without `--reorder` — the default — had
+    // no spatial index at all until its first write, and every GeoSPARQL query until then
+    // did a full scan. Reordering and spatial routing are unrelated features that happened
+    // to be refreshed together.
+    state.refresh_spatial();
     if state.config.reorder {
         let started = std::time::Instant::now();
         state.refresh_statistics();
-        state.refresh_spatial();
         eprintln!(
             "  reorder  statistics built in {:.2}s",
             started.elapsed().as_secs_f64()
@@ -417,6 +436,7 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
             apply_update(state, request, &update, &merged)
         }
         ("POST", "/backup") => backup(state, request),
+        ("POST", "/maintenance/purge") => purge(state, request),
         ("OPTIONS", _) => respond(request, 204, "text/plain", Vec::new()),
         (method, p)
             if matches!(method, "GET" | "HEAD" | "PUT" | "POST" | "DELETE")
@@ -527,6 +547,81 @@ fn is_graph_store_path(state: &State, path: &str) -> bool {
 ///    is anonymous and holds no roles, so the endpoint answers 403 to everyone. That is the
 ///    correct default: an unauthenticated server should not be able to be told to copy
 ///    itself.
+/// `POST /maintenance/purge` — reclaim spatial index entries for departed geometries.
+///
+/// # Why this is a maintenance step and not automatic
+///
+/// The spatial index tracks the **dictionary**, which never forgets, rather than the store.
+/// That is what lets it catch up with a write in a fraction of a millisecond instead of
+/// rebuilding — but it means deleting geometries leaves entries behind. Nothing is wrong
+/// while they are there: the index is a superset filter, and a geometry with no quads fails
+/// to join and contributes no row. It is memory, not correctness.
+///
+/// **Restarting does not clear them.** The index is rebuilt at startup from the dictionary,
+/// so it comes back holding every geometry ever interned. Reclaiming really does need an
+/// explicit step, which is why this exists.
+///
+/// # Scheduling
+///
+/// There is no timer inside the server. This is an endpoint so that whatever already
+/// schedules things on the host — cron, a systemd timer, a Kubernetes CronJob — can call it,
+/// the same way `deploy/backup.sh` calls `/backup`. A server that schedules its own
+/// maintenance is a server that does something surprising at three in the morning.
+///
+/// # The guard
+///
+/// The same shape as [`backup`]: the endpoint does not exist unless `--purge-role` is set,
+/// the principal must hold that role, and without `--trust-forwarded-identity` every request
+/// is anonymous and holds no roles. Purging cannot destroy data — it only drops derived
+/// entries — but it is a whole-store operation whose cost is proportional to the index, and
+/// an unauthenticated server should not be able to be told to do work.
+fn purge(state: &State, request: Request) -> Result<()> {
+    let Some(role) = &state.config.purge_role else {
+        // Not 403: a switched-off endpoint should be indistinguishable from one that was
+        // never built, so probing cannot map the configuration.
+        return respond(request, 404, "text/plain", b"not found".to_vec());
+    };
+
+    let principal = principal_for(state, &request);
+    if !principal.has_role(role) {
+        return respond(
+            request,
+            403,
+            "text/plain",
+            format!("a purge requires the `{role}` role").into_bytes(),
+        );
+    }
+
+    let Some(index) = state.spatial() else {
+        return respond(
+            request,
+            409,
+            "text/plain",
+            b"there is no spatial index to purge".to_vec(),
+        );
+    };
+
+    // A read lock: purging reads the store to ask which geometries are still referenced, and
+    // mutates only the index, which has its own lock.
+    let guard = state
+        .engine
+        .read()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let outcome = index.purge(guard.store());
+    drop(guard);
+
+    match outcome {
+        Ok(report) => {
+            let body = format!(
+                r#"{{"examined":{},"dropped":{},"retained":{}}}"#,
+                report.examined, report.dropped, report.retained
+            );
+            respond(request, 200, "application/json", body.into_bytes())
+        }
+        Err(e) => respond(request, 500, "text/plain", e.to_string().into_bytes()),
+    }
+}
+
 fn backup(state: &State, request: Request) -> Result<()> {
     let (Some(dir), Some(role)) = (&state.config.backup_dir, &state.config.backup_role) else {
         // Not 403: an endpoint that is switched off should be indistinguishable from one
@@ -1224,6 +1319,7 @@ fn parse_args(args: &[String]) -> Result<Config> {
             "--store" => c.store = Some(value(&mut i)?),
             "--backup-dir" => c.backup_dir = Some(value(&mut i)?),
             "--backup-role" => c.backup_role = Some(value(&mut i)?),
+            "--purge-role" => c.purge_role = Some(value(&mut i)?),
             "--threads" => c.threads = value(&mut i)?.parse()?,
             "--timeout" => {
                 let seconds: f64 = value(&mut i)?.parse()?;

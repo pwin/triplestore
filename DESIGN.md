@@ -1345,6 +1345,48 @@ across several probe windows and rounds of writing; the other deletes every geom
 asserts the leftover entries produce no rows, which is what makes over-inclusion safe rather
 than merely convenient.
 
+### Reclaiming what the index keeps: `POST /maintenance/purge`
+
+Tracking the dictionary rather than the store buys a refresh in a fraction of a millisecond,
+and costs entries for geometries whose quads have been deleted. Nothing is wrong while they
+sit there — a departed geometry fails to join and contributes no row — but the index grows
+with everything ever interned, and **a restart does not clear it**, because it is rebuilt
+from the dictionary. Reclaiming needs an explicit step.
+
+The trap is that a purge cannot simply forget what it drops. Re-inserting a quad over an
+already-interned literal interns nothing, so the literal count does not move and the
+dictionary walk would never revisit it — the geometry would be back in the store and absent
+from the index, which is a silently missing answer rather than a slow one. Verified rather
+than assumed: a delete followed by a re-insert leaves the literal count exactly where it was.
+
+So a purge converts an index entry into a **watchlist** entry: a bare term id instead of a
+bounding box in a tree, checked on each subsequent refresh for whether it has been referenced
+again, and skipped entirely unless the store has grown. That leaves the reclaim worthwhile —
+a term id against a tree node — and costs one index probe per watchlist entry on refreshes
+that follow a write. While the watchlist is non-empty, staleness falls back to comparing quad
+counts, which is the heuristic this design otherwise avoids, confined to the one case that
+needs it.
+
+**No timer.** The endpoint exists so that whatever already schedules work on the host — cron,
+a systemd timer, a Kubernetes CronJob — can call it, exactly as `deploy/backup.sh` calls
+`/backup`. A server that schedules its own maintenance is a server that does something
+surprising at three in the morning. The guard is the same three-way shape as `/backup`:
+absent unless `--purge-role` is set, the principal must hold that role, and identity is
+untrusted by default.
+
+### The spatial index was gated on an unrelated flag
+
+Found while testing the purge endpoint, and older than any of this work. `refresh_spatial()`
+at startup sat inside `if config.reorder`, so a server started **without** `--reorder` — the
+default — had no spatial index at all until its first write, and every GeoSPARQL query until
+then did a full scan. Reordering and spatial routing are unrelated features that happened to
+be refreshed in the same place.
+
+Worth recording because of how it survived: every test that exercised routing supplied the
+index directly through `QueryOptions`, and every server test that wrote to the store built
+one as a side effect. The only configuration that showed it was the default one, queried
+before anything was written.
+
 ### `geof:distance` only worked between two points
 
 Found by re-running the OGC GeoSPARQL example dataset through a live server, query by query,

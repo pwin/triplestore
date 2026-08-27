@@ -668,3 +668,197 @@ ex:b geo:asWKT "{\"type\":\"Point\",\"coordinates\":[2,2]}"^^geo:geoJSONLiteral 
     let index = SpatialIndex::build(engine.store()).expect("build");
     assert_eq!(index.len(), 2, "both geometry spellings should be indexed");
 }
+
+// ------------------------------------------------------------------------ purge
+
+/// Applies a SPARQL update to `engine`.
+fn run_update(engine: &mut Engine, sparql: &str) {
+    use holos_security::Session;
+    let mut session = Session::unrestricted(engine.store()).expect("session");
+    let parsed = spargebra::SparqlParser::new()
+        .parse_update(sparql)
+        .expect("parse update");
+    holos_engine::update::apply(engine, &mut session, &parsed).expect("apply update");
+}
+
+const GEO_PREFIX: &str = "PREFIX geo: <http://www.opengis.net/ont/geosparql#> \
+                          PREFIX ex: <http://example.com/>";
+
+#[test]
+fn a_purge_drops_geometries_no_quad_refers_to() {
+    let mut engine = Engine::new();
+    engine
+        .bulk_load(
+            br#"@prefix ex: <http://example.com/> .
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+ex:a geo:asWKT "POINT(1 1)"^^geo:wktLiteral .
+ex:b geo:asWKT "POINT(2 2)"^^geo:wktLiteral .
+ex:c geo:asWKT "POINT(3 3)"^^geo:wktLiteral .
+"#
+            .as_ref(),
+            RdfFormat::Turtle,
+            None,
+        )
+        .expect("load");
+    let index = SpatialIndex::build(engine.store()).expect("build");
+    assert_eq!(index.len(), 3);
+
+    run_update(
+        &mut engine,
+        &format!("{GEO_PREFIX} DELETE WHERE {{ ex:b geo:asWKT ?g }}"),
+    );
+    index.refresh(engine.store()).expect("refresh");
+    assert_eq!(index.len(), 3, "a refresh alone does not reclaim anything");
+
+    let report = index.purge(engine.store()).expect("purge");
+    assert_eq!(report.examined, 3);
+    assert_eq!(report.dropped, 1);
+    assert_eq!(report.retained, 2);
+    assert_eq!(index.len(), 2, "the departed geometry should be gone");
+    assert!(index.is_current_for(engine.store()));
+}
+
+#[test]
+fn a_purged_geometry_that_comes_back_is_found_again() {
+    // The reason a purge cannot simply forget what it drops, and the bug this would be
+    // without the watchlist.
+    //
+    // Re-inserting a quad over an already-interned literal interns nothing, so the literal
+    // count does not move and the dictionary walk never revisits it. A purge that merely
+    // deleted the entry would leave the geometry back in the store and absent from the
+    // index — a routed query would silently miss it.
+    let mut engine = Engine::new();
+    engine
+        .bulk_load(
+            br#"@prefix ex: <http://example.com/> .
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+ex:a geo:asWKT "POINT(1 1)"^^geo:wktLiteral .
+"#
+            .as_ref(),
+            RdfFormat::Turtle,
+            None,
+        )
+        .expect("load");
+    let index = SpatialIndex::build(engine.store()).expect("build");
+
+    run_update(
+        &mut engine,
+        &format!("{GEO_PREFIX} DELETE WHERE {{ ?s geo:asWKT ?g }}"),
+    );
+    assert_eq!(index.purge(engine.store()).expect("purge").dropped, 1);
+    assert_eq!(index.len(), 0);
+
+    // The literal is still interned, so this interns nothing new.
+    let before = engine
+        .store()
+        .dictionary_count_for(holos_core::Tag::Literal);
+    run_update(
+        &mut engine,
+        &format!("{GEO_PREFIX} INSERT DATA {{ ex:back geo:asWKT \"POINT(1 1)\"^^geo:wktLiteral }}"),
+    );
+    assert_eq!(
+        engine
+            .store()
+            .dictionary_count_for(holos_core::Tag::Literal),
+        before,
+        "the fixture depends on this interning nothing; if it does not, the test is not \
+         exercising the hazard"
+    );
+
+    assert!(
+        !index.is_current_for(engine.store()),
+        "with a non-empty watchlist and the store grown, the index must admit it is behind"
+    );
+    index.refresh(engine.store()).expect("refresh");
+    assert_eq!(
+        index.len(),
+        1,
+        "the geometry came back and the watchlist should have caught it"
+    );
+    assert!(index.is_current_for(engine.store()));
+
+    let probe = geo::Rect::new((0.5, 0.5), (1.5, 1.5));
+    assert_eq!(
+        index.candidates_in(&probe).len(),
+        1,
+        "and it must be findable, which is the whole point"
+    );
+}
+
+#[test]
+fn a_purge_does_not_change_any_answer() {
+    // Purging is a memory operation, so the only thing that must be true of it is that the
+    // answers do not move.
+    use std::sync::Arc;
+
+    let mut engine = Engine::new();
+    engine
+        .bulk_load(data().as_bytes(), RdfFormat::Turtle, None)
+        .expect("load");
+    // Remove a band of the grid, so there is something real to reclaim.
+    run_update(
+        &mut engine,
+        &format!("{GEO_PREFIX} DELETE WHERE {{ ex:p0_0 geo:asWKT ?g }}"),
+    );
+
+    let query = format!(
+        "{PREFIXES} SELECT ?s WHERE {{ ?s geo:sfWithin \
+         \"POLYGON((-1 -1, 4 -1, 4 4, -1 4, -1 -1))\"^^geo:wktLiteral }}"
+    );
+
+    let index = SpatialIndex::build(engine.store()).expect("build");
+    index.refresh(engine.store()).expect("refresh");
+
+    let answer = |options: &holos_engine::QueryOptions| {
+        let session = holos_security::Session::unrestricted(engine.store()).expect("session");
+        let view = engine.view(&session);
+        let (results, _) = holos_engine::Engine::query_with(&view, &query, options).expect("query");
+        let mut rows: Vec<String> = match results {
+            spareval::QueryResults::Solutions(iter) => iter
+                .map(|s| s.expect("solution").get("s").unwrap().to_string())
+                .collect(),
+            _ => panic!("expected solutions"),
+        };
+        rows.sort();
+        rows
+    };
+
+    let plain = answer(&holos_engine::QueryOptions::new());
+    let before = answer(&holos_engine::QueryOptions::new().with_spatial(Arc::new(
+        SpatialIndex::build(engine.store()).expect("build"),
+    )));
+    assert_eq!(plain, before, "routing changed the answer before any purge");
+
+    index.purge(engine.store()).expect("purge");
+    let after = {
+        let session = holos_security::Session::unrestricted(engine.store()).expect("session");
+        let view = engine.view(&session);
+        let options = holos_engine::QueryOptions::new();
+        let (results, _) =
+            holos_engine::Engine::query_with(&view, &query, &options).expect("query");
+        let mut rows: Vec<String> = match results {
+            spareval::QueryResults::Solutions(iter) => iter
+                .map(|s| s.expect("solution").get("s").unwrap().to_string())
+                .collect(),
+            _ => panic!("expected solutions"),
+        };
+        rows.sort();
+        rows
+    };
+    assert_eq!(plain, after, "purging changed the answer");
+}
+
+#[test]
+fn purging_an_index_with_nothing_to_drop_is_a_no_op() {
+    let mut engine = Engine::new();
+    engine
+        .bulk_load(data().as_bytes(), RdfFormat::Turtle, None)
+        .expect("load");
+    let index = SpatialIndex::build(engine.store()).expect("build");
+    let before = index.len();
+    let report = index.purge(engine.store()).expect("purge");
+    assert_eq!(report.dropped, 0);
+    assert_eq!(report.retained, before);
+    assert_eq!(index.len(), before);
+    assert!(index.is_current_for(engine.store()));
+}

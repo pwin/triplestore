@@ -87,6 +87,22 @@ struct Inner {
     /// current count. Remembering how far it has read is all the index needs to find
     /// everything added since — no scan of the store, and no set of terms already examined.
     watermark: usize,
+    /// Geometries a purge removed, which are still interned.
+    ///
+    /// A purge cannot simply forget them. Re-inserting a quad over an already-interned
+    /// literal does not intern anything, so the literal count does not move and the walk
+    /// above would never revisit it — the geometry would be back in the store and absent
+    /// from the index, which is a silently missing answer.
+    ///
+    /// So what a purge really does is convert an index entry into a *watchlist* entry: a
+    /// bare term id rather than a bounding box in a tree, checked on refresh for whether it
+    /// has been referenced again.
+    dormant: rustc_hash::FxHashSet<TermId>,
+    /// The store's quad count when the watchlist was last checked.
+    ///
+    /// Deletions cannot resurrect anything, so the check is skipped unless the store has
+    /// grown.
+    quads_at_last_check: usize,
     /// Entries inserted one at a time since the last bulk load.
     ///
     /// `rstar` packs a far better tree from a bulk load than from repeated inserts, so a
@@ -178,8 +194,19 @@ impl SpatialIndex {
     /// Reads literal ids from `from` upwards, indexing every geometry among them.
     fn catch_up(&self, store: &Store, from: usize) -> Result<(), holos_store::StorageError> {
         let count = store.dictionary_count_for(Tag::Literal);
-        if count <= from {
-            return Ok(());
+        let quads = store.len();
+
+        // Nothing interned *and* nothing on the watchlist to re-check: already level. Both
+        // halves matter — a geometry can come back without anything being interned, which is
+        // exactly what the watchlist exists for, so returning on the literal count alone
+        // would skip the check that catches it.
+        {
+            let Ok(inner) = self.inner.read() else {
+                return Ok(());
+            };
+            if count <= from && inner.quads_at_last_check == quads {
+                return Ok(());
+            }
         }
 
         // Decoded and parsed before the write lock is taken: that is the expensive part and
@@ -198,13 +225,15 @@ impl SpatialIndex {
             }
         }
 
+        let resurrected = self.resurrect(store)?;
+
         let Ok(mut inner) = self.inner.write() else {
             return Ok(());
         };
         // Another thread may have caught up further while this one was parsing; taking the
         // larger watermark keeps the invariant "everything below the watermark is indexed",
         // and the duplicate inserts that implies are harmless to a superset filter.
-        if inner.tree.size() == 0 && inner.watermark == 0 {
+        if inner.tree.size() == 0 && inner.watermark == 0 && resurrected.is_empty() {
             inner.tree = RTree::bulk_load(fresh);
         } else {
             for entry in fresh {
@@ -212,6 +241,12 @@ impl SpatialIndex {
                 inner.inserted_since_pack += 1;
             }
         }
+        for entry in resurrected {
+            inner.dormant.remove(&entry.term);
+            inner.tree.insert(entry);
+            inner.inserted_since_pack += 1;
+        }
+        inner.quads_at_last_check = quads;
         inner.watermark = inner.watermark.max(count);
         if inner.inserted_since_pack >= REPACK_AFTER {
             // Repacking uses what is already in the tree, so no parsing is repeated.
@@ -220,6 +255,98 @@ impl SpatialIndex {
             inner.inserted_since_pack = 0;
         }
         Ok(())
+    }
+
+    /// Watchlist entries that have been referenced again.
+    ///
+    /// Skipped entirely when the store has not grown, because a deletion cannot bring a
+    /// geometry back. When it does run it costs one index probe per dormant entry, which is
+    /// the standing price of having purged.
+    fn resurrect(&self, store: &Store) -> Result<Vec<Indexed>, holos_store::StorageError> {
+        let dormant: Vec<TermId> = {
+            let Ok(inner) = self.inner.read() else {
+                return Ok(Vec::new());
+            };
+            if inner.dormant.is_empty() || store.len() <= inner.quads_at_last_check {
+                return Ok(Vec::new());
+            }
+            inner.dormant.iter().copied().collect()
+        };
+
+        let mut back = Vec::new();
+        for term in dormant {
+            if !referenced(store, term)? {
+                continue;
+            }
+            let Some(decoded) = store.decode_term(term)? else {
+                continue;
+            };
+            let Some(geometry) = geo_ext::geometry_of(&decoded) else {
+                continue;
+            };
+            if let Some(entry) = index_entry(term, &geometry) {
+                back.push(entry);
+            }
+        }
+        Ok(back)
+    }
+
+    /// Drops indexed geometries that no quad refers to any more.
+    ///
+    /// # What this is for
+    ///
+    /// The index tracks the dictionary, and the dictionary never forgets — so a store that
+    /// deletes geometries accumulates entries for them. Nothing is *wrong* while it does:
+    /// the index is a superset filter and a departed geometry fails to join. But the entries
+    /// cost memory in proportion to everything ever interned, and this is how that is
+    /// reclaimed.
+    ///
+    /// # What it costs, afterwards
+    ///
+    /// Purging is not free forever. A dropped geometry becomes a **watchlist** entry rather
+    /// than being forgotten, because re-inserting a quad over an already-interned literal
+    /// interns nothing — so the dictionary walk that finds everything else would never
+    /// revisit it. Each refresh after a purge therefore probes once per watchlist entry,
+    /// though only when the store has actually grown.
+    ///
+    /// The trade is still strongly favourable: a watchlist entry is a bare term id, against
+    /// a bounding box inside a tree.
+    ///
+    /// # Errors
+    ///
+    /// Propagates storage failures from the reference checks.
+    pub fn purge(&self, store: &Store) -> Result<PurgeReport, holos_store::StorageError> {
+        let entries: Vec<Indexed> = {
+            let Ok(inner) = self.inner.read() else {
+                return Ok(PurgeReport::default());
+            };
+            inner.tree.iter().copied().collect()
+        };
+        let examined = entries.len();
+
+        let mut kept = Vec::with_capacity(examined);
+        let mut dropped = Vec::new();
+        for entry in entries {
+            if referenced(store, entry.term)? {
+                kept.push(entry);
+            } else {
+                dropped.push(entry.term);
+            }
+        }
+
+        let Ok(mut inner) = self.inner.write() else {
+            return Ok(PurgeReport::default());
+        };
+        let report = PurgeReport {
+            examined,
+            dropped: dropped.len(),
+            retained: kept.len(),
+        };
+        inner.tree = RTree::bulk_load(kept);
+        inner.inserted_since_pack = 0;
+        inner.dormant.extend(dropped);
+        inner.quads_at_last_check = store.len();
+        Ok(report)
     }
 
     /// Whether this index still describes `store`.
@@ -233,11 +360,18 @@ impl SpatialIndex {
     /// dictionary. So a watermark level with the dictionary means nothing can be missing —
     /// including after a write that only added quads over geometries already interned, which
     /// a quad-count comparison would have called stale for no reason.
+    ///
+    /// After a purge the watermark alone is no longer sufficient, because a watchlist entry
+    /// can be referenced again without anything being interned. While the watchlist is
+    /// non-empty the store's quad count has to match what it was when the list was last
+    /// checked — which is the heuristic this design otherwise avoids, confined to the one
+    /// case that needs it.
     #[must_use]
     pub fn is_current_for(&self, store: &Store) -> bool {
-        self.inner
-            .read()
-            .is_ok_and(|inner| inner.watermark >= store.dictionary_count_for(Tag::Literal))
+        self.inner.read().is_ok_and(|inner| {
+            inner.watermark >= store.dictionary_count_for(Tag::Literal)
+                && (inner.dormant.is_empty() || inner.quads_at_last_check == store.len())
+        })
     }
 
     /// How many geometries are indexed.
@@ -281,6 +415,29 @@ impl SpatialIndex {
             .map(|indexed| indexed.term)
             .collect()
     }
+}
+
+/// What a purge did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PurgeReport {
+    /// Geometries the index held before the purge.
+    pub examined: usize,
+    /// Of those, how many no quad refers to any more.
+    pub dropped: usize,
+    /// How many remain indexed.
+    pub retained: usize,
+}
+
+/// Whether any quad, in any graph, has `term` as its object.
+///
+/// One probe of the object-first index rather than a scan — which is what makes a purge
+/// proportional to what is indexed rather than to the store.
+fn referenced(store: &Store, term: TermId) -> Result<bool, holos_store::StorageError> {
+    for quad in store.quads_for_pattern(None, None, Some(term), holos_store::GraphFilter::Any) {
+        quad?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// The index entry for a geometry, if it has a bounding box.
