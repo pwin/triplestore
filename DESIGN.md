@@ -1310,31 +1310,40 @@ property of a read-only store. One write to a 200,000-geometry store cost about 
 probes' worth of work, and `is_current_for` correctly made every query in the meantime fall
 back to a full scan.
 
-Measuring where a rebuild's time went decided the fix. The quad scan is **7%**; decoding
-terms and parsing their WKT is **57%**; packing the tree is **36%**. So the refresh keeps the
-scan and avoids the other two: a term already examined is skipped without being decoded, and
-new entries are inserted into the existing tree rather than bulk-loaded into a new one.
-Between 6× and 18× depending on scale, over three runs.
+Measuring where a rebuild's time went pointed at the answer. The quad scan is **7%**;
+decoding terms and parsing their WKT is **57%**; packing the tree is **36%**. Avoiding the
+decode and the parse was clearly the prize — but it turned out the scan could go too.
+
+**§5's dictionary makes the scan unnecessary.** Each dictionary-backed kind has its own
+dense, append-only index space, so every literal ever interned is `TermId::new(Tag::Literal,
+i)` for some `i` below the current count. An index that remembers how far it has read finds
+everything since by reading from there. No scan of the store, no set of terms already
+examined, and a cost proportional to what was interned rather than to what is held:
+**0.1–0.3 ms whether the store holds 50,000 geometries or 200,000**, against a 56–271 ms
+rebuild.
 
 **Why it may insert and never delete.** The index is a superset filter, and §17's rewrite
 joins the `VALUES` it produces back against the store — so a geometry the index still lists
-after its quads are gone fails to join and contributes no row. Omitting a *new* geometry is a
-silently missing answer; keeping a departed one costs space. The asymmetry is the whole
-design, and the store shrinking is the one signal that triggers a rebuild, for memory rather
-than for correctness.
+after its quads are gone fails to join and contributes no row. Omitting a geometry is a
+silently missing answer; keeping one that has left is invisible. So the index tracks the
+*dictionary* rather than the store, and the dictionary is append-only by construction. What
+it holds is bounded by how many distinct geometries have ever been interned, not by how many
+are currently reachable — the same growth §5 already accepts for the dictionary itself.
 
-Negative results are cached alongside the positive ones. Without them a refresh would
-re-decode every ordinary literal in the store to rediscover it is not a geometry, which is
-most of the 57%. And past ten thousand one-at-a-time inserts the tree repacks itself from
-what it already holds, because `rstar` builds a far better tree from a bulk load than from
-repeated insertion — that costs the 36% and none of the 57%.
+That also made the staleness check **exact rather than heuristic**. It compared quad and term
+counts, which declared the index stale after any write whatsoever. Now the index holds a
+geometry for every literal below its watermark, and every geometry in the store is a literal
+in the dictionary, so a level watermark means nothing can be missing — and a write that adds
+quads over geometries already interned costs nothing at all.
 
-A test asserts a refreshed index answers *identically* to a rebuilt one across several probe
-windows and several rounds of writing, rather than merely faster.
+Past ten thousand one-at-a-time inserts the tree repacks itself from what it already holds,
+because `rstar` builds a far better tree from a bulk load than from repeated insertion. That
+pays the tree construction and none of the parsing.
 
-The refresh is still O(quads), because a scan is the only way to learn what changed without
-the writer saying so. Feeding it the term ids a write touched would remove that, and is the
-next step rather than part of this one.
+Two tests carry it: one asserts a refreshed index answers *identically* to a rebuilt one
+across several probe windows and rounds of writing; the other deletes every geometry quad and
+asserts the leftover entries produce no rows, which is what makes over-inclusion safe rather
+than merely convenient.
 
 ### `geof:distance` only worked between two points
 

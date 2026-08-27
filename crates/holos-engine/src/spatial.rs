@@ -41,8 +41,9 @@
 
 use crate::geo_ext;
 use geo::{BoundingRect, Geometry, Rect};
+use holos_core::Tag;
 use holos_core::TermId;
-use holos_store::{GraphFilter, Store};
+use holos_store::Store;
 use rstar::{RTree, RTreeObject, AABB};
 
 /// One indexed geometry: its bounding box and the term it belongs to.
@@ -75,42 +76,29 @@ pub struct SpatialIndex {
     inner: std::sync::RwLock<Inner>,
 }
 
-/// What the index holds, and what it has already looked at.
+/// What the index holds, and how far through the dictionary it has read.
 #[derive(Debug, Default)]
 struct Inner {
     tree: RTree<Indexed>,
-    /// Every term id already examined, **whether or not it turned out to be a geometry**.
+    /// How many literal ids had been issued when this index last caught up.
     ///
-    /// This is what makes a refresh cheap. Decoding a term and parsing its WKT is 57% of a
-    /// rebuild; the scan that finds the terms is 7%. Remembering the negatives matters as
-    /// much as the positives — without them every refresh would re-decode every ordinary
-    /// literal in the store to discover, again, that it is not a geometry.
-    ///
-    /// It costs memory proportional to the number of distinct objects in the store, which is
-    /// the trade being made: a few tens of megabytes at a million distinct objects, against
-    /// re-parsing all of them on every write.
-    examined: rustc_hash::FxHashSet<TermId>,
+    /// The dictionary gives each kind its own dense, append-only index space, so every
+    /// literal ever interned is `TermId::new(Tag::Literal, i)` for some `i` below the
+    /// current count. Remembering how far it has read is all the index needs to find
+    /// everything added since — no scan of the store, and no set of terms already examined.
+    watermark: usize,
     /// Entries inserted one at a time since the last bulk load.
     ///
     /// `rstar` packs a far better tree from a bulk load than from repeated inserts, so a
     /// long run of incremental updates slowly degrades lookup. Past a threshold the index
     /// rebuilds from what it already holds — no re-parsing, just a repack.
     inserted_since_pack: usize,
-    /// What the store looked like when this was last brought up to date.
-    ///
-    /// A spatial index can only ever *narrow* a scan, so the way it goes wrong is by
-    /// omitting a geometry that was added after it was built — and an omission is a missing
-    /// row, which nothing notices. Rather than rely on every caller refreshing it, the index
-    /// carries the shape of the store it came from and [`SpatialIndex::is_current_for`]
-    /// checks it. A mismatch means the index is not used and the query does the full scan:
-    /// slower, and right.
-    shape: StoreShape,
 }
 
 /// How many one-at-a-time inserts are tolerated before the tree is repacked.
 ///
-/// Repacking re-runs `bulk_load` over entries the index already has, so it costs the 36% of
-/// a rebuild that is tree construction and none of the 57% that is parsing.
+/// Repacking re-runs `bulk_load` over entries the index already has, so it costs the tree
+/// construction and none of the parsing.
 const REPACK_AFTER: usize = 10_000;
 
 /// A cheap description of a store's contents, for staleness detection.
@@ -153,118 +141,80 @@ impl SpatialIndex {
     /// an error: a store may hold a malformed literal, and refusing to build the index over
     /// the whole store because of one is worse than indexing the rest.
     pub fn build(store: &Store) -> Result<Self, holos_store::StorageError> {
-        // A term appears as the object of many quads; indexing it once is both correct and
-        // very much cheaper on data where geometries are shared.
-        let mut seen = rustc_hash::FxHashSet::default();
-        let mut entries = Vec::new();
-        for encoded in store.quads_for_pattern(None, None, None, GraphFilter::Any) {
-            let object = encoded?.object;
-            if !seen.insert(object) {
-                continue;
-            }
-            let Some(term) = store.decode_term(object)? else {
+        let index = Self::default();
+        index.catch_up(store, 0)?;
+        Ok(index)
+    }
+
+    /// Brings the index up to date with `store`.
+    ///
+    /// # What it costs
+    ///
+    /// Proportional to the literals interned since the last call, and nothing else. There is
+    /// no scan of the store: the dictionary hands out literal ids densely and never reuses
+    /// one, so everything new sits above the watermark.
+    ///
+    /// # Why it never removes anything
+    ///
+    /// The index is a **superset filter**. `candidates` proposes, the exact predicate
+    /// decides, and the `VALUES` clause built from its answers is joined back against the
+    /// store — so a geometry whose quads have been deleted simply fails to join and
+    /// contributes no row.
+    ///
+    /// That asymmetry is the whole design. **Omitting a geometry is a silently missing
+    /// answer; keeping one that has left is invisible.** So the index tracks the
+    /// *dictionary* rather than the store, and the dictionary is append-only by
+    /// construction. What it holds is bounded by how many distinct geometries have ever been
+    /// interned, not by how many are currently reachable.
+    ///
+    /// # Errors
+    ///
+    /// Propagates decoding failures from the store.
+    pub fn refresh(&self, store: &Store) -> Result<(), holos_store::StorageError> {
+        let from = self.inner.read().map_or(0, |inner| inner.watermark);
+        self.catch_up(store, from)
+    }
+
+    /// Reads literal ids from `from` upwards, indexing every geometry among them.
+    fn catch_up(&self, store: &Store, from: usize) -> Result<(), holos_store::StorageError> {
+        let count = store.dictionary_count_for(Tag::Literal);
+        if count <= from {
+            return Ok(());
+        }
+
+        // Decoded and parsed before the write lock is taken: that is the expensive part and
+        // there is no reason to hold readers off during it.
+        let mut fresh = Vec::new();
+        for i in from..count {
+            let id = TermId::new(Tag::Literal, i as u64);
+            let Some(term) = store.decode_term(id)? else {
                 continue;
             };
             let Some(geometry) = geo_ext::geometry_of(&term) else {
                 continue;
             };
-            if let Some(entry) = index_entry(object, &geometry) {
-                entries.push(entry);
-            }
-        }
-        Ok(Self {
-            inner: std::sync::RwLock::new(Inner {
-                tree: RTree::bulk_load(entries),
-                examined: seen,
-                inserted_since_pack: 0,
-                shape: StoreShape::of(store),
-            }),
-        })
-    }
-
-    /// Brings the index up to date with `store`, without rebuilding it.
-    ///
-    /// # What it does and does not have to guarantee
-    ///
-    /// The index is a **superset filter**: `candidates` proposes, and the exact predicate
-    /// still decides. The `VALUES` clause built from its answers is joined back against the
-    /// store, so a geometry the index still lists after its quads are gone simply fails to
-    /// join and contributes no row.
-    ///
-    /// That asymmetry is the whole design. **Omitting a new geometry is a silently missing
-    /// answer; keeping a departed one costs nothing but space.** So this inserts and never
-    /// deletes, and the store shrinking is the one signal that triggers a full rebuild —
-    /// which is about reclaiming memory, not about being right.
-    ///
-    /// # Cost
-    ///
-    /// The quad scan is unavoidable without the writer handing over a delta, and at 200,000
-    /// geometries it is 7% of a rebuild. Everything expensive — decoding, parsing, packing —
-    /// happens only for terms not seen before.
-    ///
-    /// # Errors
-    ///
-    /// Propagates storage failures from the scan and from decoding.
-    pub fn refresh(&self, store: &Store) -> Result<(), holos_store::StorageError> {
-        let shape = StoreShape::of(store);
-        {
-            let Ok(inner) = self.inner.read() else {
-                return Ok(());
-            };
-            if inner.shape == shape {
-                return Ok(());
-            }
-            // Quads went away, so the index is holding geometries the store no longer has.
-            // Correctness does not require doing anything about that; memory does.
-            if shape.quads < inner.shape.quads {
-                drop(inner);
-                let rebuilt = Self::build(store)?;
-                if let (Ok(mut ours), Ok(theirs)) = (self.inner.write(), rebuilt.inner.into_inner())
-                {
-                    *ours = theirs;
-                }
-                return Ok(());
-            }
-        }
-
-        // Collected before taking the write lock: decoding and parsing are the slow part and
-        // there is no reason to hold writers off during them.
-        let mut fresh = Vec::new();
-        let mut examined = Vec::new();
-        {
-            let Ok(inner) = self.inner.read() else {
-                return Ok(());
-            };
-            let mut local = rustc_hash::FxHashSet::default();
-            for encoded in store.quads_for_pattern(None, None, None, GraphFilter::Any) {
-                let object = encoded?.object;
-                if inner.examined.contains(&object) || !local.insert(object) {
-                    continue;
-                }
-                examined.push(object);
-                let Some(term) = store.decode_term(object)? else {
-                    continue;
-                };
-                let Some(geometry) = geo_ext::geometry_of(&term) else {
-                    continue;
-                };
-                if let Some(entry) = index_entry(object, &geometry) {
-                    fresh.push(entry);
-                }
+            if let Some(entry) = index_entry(id, &geometry) {
+                fresh.push(entry);
             }
         }
 
         let Ok(mut inner) = self.inner.write() else {
             return Ok(());
         };
-        for entry in fresh {
-            inner.tree.insert(entry);
-            inner.inserted_since_pack += 1;
+        // Another thread may have caught up further while this one was parsing; taking the
+        // larger watermark keeps the invariant "everything below the watermark is indexed",
+        // and the duplicate inserts that implies are harmless to a superset filter.
+        if inner.tree.size() == 0 && inner.watermark == 0 {
+            inner.tree = RTree::bulk_load(fresh);
+        } else {
+            for entry in fresh {
+                inner.tree.insert(entry);
+                inner.inserted_since_pack += 1;
+            }
         }
-        inner.examined.extend(examined);
-        inner.shape = shape;
+        inner.watermark = inner.watermark.max(count);
         if inner.inserted_since_pack >= REPACK_AFTER {
-            // Repacking uses what is already in the tree, so none of the parsing is repeated.
+            // Repacking uses what is already in the tree, so no parsing is repeated.
             let entries: Vec<Indexed> = inner.tree.iter().copied().collect();
             inner.tree = RTree::bulk_load(entries);
             inner.inserted_since_pack = 0;
@@ -274,14 +224,20 @@ impl SpatialIndex {
 
     /// Whether this index still describes `store`.
     ///
-    /// **Routing must check this.** An index built before a write is missing whatever the
-    /// write added, and using it would drop rows silently. Returning `false` costs a full
+    /// **Routing must check this.** An index that has not caught up is missing whatever was
+    /// interned since, and using it would drop rows silently. Returning `false` costs a full
     /// scan; returning `true` wrongly costs a wrong answer.
+    ///
+    /// The check is exact rather than a heuristic: the index holds a geometry for every
+    /// literal id below its watermark, and every geometry in the store is a literal in the
+    /// dictionary. So a watermark level with the dictionary means nothing can be missing —
+    /// including after a write that only added quads over geometries already interned, which
+    /// a quad-count comparison would have called stale for no reason.
     #[must_use]
     pub fn is_current_for(&self, store: &Store) -> bool {
         self.inner
             .read()
-            .is_ok_and(|inner| inner.shape == StoreShape::of(store))
+            .is_ok_and(|inner| inner.watermark >= store.dictionary_count_for(Tag::Literal))
     }
 
     /// How many geometries are indexed.

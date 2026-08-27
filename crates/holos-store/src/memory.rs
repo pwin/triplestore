@@ -66,6 +66,10 @@ impl Storage for MemoryStorage {
         self.dictionary.len()
     }
 
+    fn dictionary_count_for(&self, tag: holos_core::Tag) -> usize {
+        self.dictionary.count_for(tag)
+    }
+
     fn insert_encoded(&mut self, quad: EncodedQuad) -> Result<bool> {
         if self.index.insert(quad)? {
             *self.predicate_counts.entry(quad.predicate).or_insert(0) += 1;

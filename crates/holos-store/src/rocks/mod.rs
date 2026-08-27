@@ -619,6 +619,13 @@ impl Storage for RocksStorage {
         usize::try_from(self.next.values().sum::<u64>()).unwrap_or(usize::MAX)
     }
 
+    fn dictionary_count_for(&self, tag: Tag) -> usize {
+        self.next
+            .get(&tag)
+            .copied()
+            .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX))
+    }
+
     fn insert_encoded(&mut self, quad: EncodedQuad) -> Result<bool> {
         // During a bulk load the buffer is not visible to a `get`, so duplicate detection
         // is deferred: writing the same key twice is idempotent in RocksDB, and the

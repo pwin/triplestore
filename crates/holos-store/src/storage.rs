@@ -49,6 +49,14 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// a staleness signal, so it must be cheap: a counter, never a scan.
     fn dictionary_len(&self) -> usize;
 
+    /// How many ids have been issued for one dictionary-backed tag.
+    ///
+    /// Each kind has its own dense index space, so this is also an enumeration bound:
+    /// `TermId::new(tag, i)` for `i` in `0..dictionary_count_for(tag)` is every id issued for
+    /// that tag. Must be a counter rather than a scan, for the same reason
+    /// [`Storage::dictionary_len`] must be.
+    fn dictionary_count_for(&self, tag: holos_core::Tag) -> usize;
+
     // --- quads --------------------------------------------------------------------
 
     /// Indexes an already-encoded quad. `Ok(true)` if it was not already present.

@@ -89,6 +89,18 @@ impl Store {
         self.inner.dictionary_len()
     }
 
+    /// How many ids have been issued for one dictionary-backed tag.
+    ///
+    /// Each kind has its own dense index space, so this is an enumeration bound as well as a
+    /// count: `TermId::new(tag, i)` for `i` in `0..dictionary_count_for(tag)` is every id
+    /// issued for that tag, in issue order. Something that has examined the first `n` can
+    /// find everything added since by walking from `n` — which is how the spatial index
+    /// catches up with a write without rescanning the store.
+    #[must_use]
+    pub fn dictionary_count_for(&self, tag: holos_core::Tag) -> usize {
+        self.inner.dictionary_count_for(tag)
+    }
+
     /// How many quads use a given predicate.
     #[must_use]
     pub fn predicate_count(&self, predicate: TermId) -> u64 {

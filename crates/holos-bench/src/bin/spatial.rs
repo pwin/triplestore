@@ -196,8 +196,8 @@ fn rebuild_cost() {
 /// What a write costs the index, rebuilt against refreshed.
 ///
 /// This is the number that decides whether the index is usable on a store that is written
-/// to. A rebuild re-decodes and re-parses every geometry already indexed; a refresh pays
-/// that only for terms it has not seen.
+/// to. A rebuild re-decodes and re-parses every geometry already indexed; a refresh reads
+/// only the literal ids interned since it last looked.
 fn refresh_cost() {
     println!("\n## What one write costs the index\n");
     println!("| Geometries | Added | Rebuild | Refresh | Saved |");
@@ -246,10 +246,10 @@ fn refresh_cost() {
         );
     }
     println!(
-        "\nThe refreshed index is asserted to hold exactly what a rebuilt one would, at every\n\
-         scale, rather than merely being faster. What remains in the refresh is the quad scan,\n\
-         which is 7% of a rebuild and the part no index can skip without the writer handing\n\
-         over a delta."
+        "\nThe refresh time is the same at both scales, because it is proportional to the\n\
+         geometries added and not to the ones already there: the dictionary hands out literal\n\
+         ids densely and never reuses one, so everything new sits above a watermark and the\n\
+         store is never scanned. Answers are asserted equal to a rebuild's, not just faster."
     );
 }
 

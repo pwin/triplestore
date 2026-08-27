@@ -533,37 +533,43 @@ seen, and never re-packs the whole tree.
 
 | Geometries | Added | Rebuild | Refresh | Saved |
 |---:|---:|---:|---:|---:|
-| 50,000 | 100 | 52–70 ms | 2.9–5.1 ms | **11–18×** |
-| 200,000 | 100 | 178–208 ms | 16–31 ms | **6–12×** |
+| 50,000 | 100 | 56–61 ms | 0.10–0.29 ms | **196–547×** |
+| 200,000 | 100 | 222–271 ms | 0.14–0.27 ms | **813–1,895×** |
 
-Ranges over three runs, because the variance is real and quoting the best number would
-misrepresent it.
+Ranges over three runs. The ratio swings because the rebuild does, and because the refresh is
+small enough that noise shows; the number that matters is that **the refresh takes the same
+time at 200,000 geometries as at 50,000**. It is proportional to what was added, not to what
+was already there.
+
+That is possible because the index stopped scanning the store at all. The dictionary gives
+each kind of term its own dense, append-only index space, so every literal ever interned is
+`TermId::new(Tag::Literal, i)` for some `i` below the current count. The index remembers how
+far it has read; catching up means reading from there.
 
 The design turns on an asymmetry worth stating plainly. The index is a **superset filter**:
 the `VALUES` it produces is joined back against the store, so a geometry it still lists after
-its quads are deleted simply fails to join and contributes no row. **Omitting a new geometry
-is a silently missing answer; keeping a departed one costs only space.** So the refresh
-inserts and never deletes, and the store *shrinking* is the one signal that triggers a full
-rebuild — which is about reclaiming memory, not about being right.
+its quads are deleted simply fails to join and contributes no row. **Omitting a geometry is a
+silently missing answer; keeping one that has left is invisible.** So the index tracks the
+*dictionary* rather than the store — and the dictionary is append-only by construction, so it
+never removes anything. What it holds is bounded by how many distinct geometries have ever
+been interned, not by how many are currently reachable.
 
-Two details that are not obvious:
+Two consequences worth naming:
 
-* **Negative results are cached too.** The set of examined terms holds everything looked at,
-  not just the geometries. Without the negatives, every refresh would re-decode every
-  ordinary literal in the store to rediscover that it is not a geometry — which is most of
-  the 57%.
+* **The staleness check became exact, and cheaper.** It was a heuristic comparing quad and
+  term counts, which called the index stale after any write at all. Now the index holds a
+  geometry for every literal id below its watermark, and every geometry in the store is a
+  literal in the dictionary — so a watermark level with the dictionary means nothing can be
+  missing. A write that only adds quads over geometries already interned no longer costs a
+  refresh, because nothing was interned.
 * **The tree repacks itself.** `rstar` packs a far better tree from a bulk load than from
   repeated inserts, so past ten thousand incremental inserts the index rebuilds from what it
-  already holds. That costs the 36% that is tree construction and none of the 57% that is
-  parsing.
+  already holds — the tree construction, none of the parsing.
 
-A test asserts that a refreshed index answers *identically* to a rebuilt one, over four probe
-windows and three rounds of writing — not merely that it is faster.
-
-**What is left.** The refresh is still O(quads), because the scan is the only way to learn
-what changed without the writer saying so. Removing it means feeding the index the term ids a
-write touched, which would take the 200,000-geometry case from ~25 ms to the cost of the new
-geometries alone. That is the next step rather than part of this one.
+Two tests carry the weight: one asserts a refreshed index answers *identically* to a rebuilt
+one over several probe windows and rounds of writing; the other deletes every geometry quad
+and asserts that the entries the index still holds produce no rows, which is what makes
+over-inclusion safe rather than merely convenient.
 
 ### 4. A commit costs the size of its change, not the size of the scene
 

@@ -520,37 +520,69 @@ fn a_geometry_added_after_the_build_is_found() {
 }
 
 #[test]
-fn deleting_quads_rebuilds_rather_than_leaking() {
-    // Deletion is not tracked incrementally, because a departed geometry costs space and not
-    // correctness — the `VALUES` it appears in simply fails to join. What is tracked is the
-    // store getting *smaller*, which triggers a rebuild so the index does not grow for ever.
+fn a_deleted_geometry_stays_indexed_and_stays_harmless() {
+    // The design decision this pins, and the reason it is safe.
+    //
+    // The index tracks the *dictionary*, which is append-only, rather than the store. So
+    // deleting every quad that mentions a geometry does not remove it from the index — and
+    // that is deliberate, not an oversight. The index is a superset filter: the `VALUES` it
+    // produces is joined back against the store, so a geometry with no quads left simply
+    // fails to join and contributes no row.
+    //
+    // Omitting a geometry would be a silently missing answer. Keeping a departed one costs
+    // an entry. The two are not comparable, which is why the trade goes this way.
+    //
+    // What this test insists on is the second half: that the leftover entries cannot change
+    // an answer.
     use holos_security::Session;
-    use oxrdf::NamedNode;
+    use std::sync::Arc;
 
-    let mut engine = Engine::new();
-    engine
-        .bulk_load(points(40, 0).as_bytes(), RdfFormat::Turtle, None)
-        .expect("load");
+    let engine = engine();
     let index = SpatialIndex::build(engine.store()).expect("build");
-    assert_eq!(index.len(), 40);
+    let indexed_before = index.len();
+    assert!(indexed_before > 0, "the fixture should have geometries");
 
+    let query = format!(
+        "{PREFIXES} SELECT ?s WHERE {{ ?s geo:sfWithin \
+         \"POLYGON((-100 -100, 100 -100, 100 100, -100 100, -100 -100))\"^^geo:wktLiteral }}"
+    );
+
+    let mut engine = engine;
     let mut session = Session::unrestricted(engine.store()).expect("session");
     let update = spargebra::SparqlParser::new()
-        .parse_update(
-            "PREFIX geo: <http://www.opengis.net/ont/geosparql#> \
-             DELETE WHERE { ?s geo:asWKT ?g }",
-        )
+        .parse_update(&format!("{PREFIXES} DELETE WHERE {{ ?s geo:asWKT ?g }}"))
         .expect("parse");
     holos_engine::update::apply(&mut engine, &mut session, &update).expect("delete");
-    let _ = NamedNode::new_unchecked("urn:unused");
 
     index.refresh(engine.store()).expect("refresh");
     assert_eq!(
         index.len(),
-        0,
-        "the store lost every geometry, so a refresh should have reclaimed them"
+        indexed_before,
+        "the dictionary is append-only, so the index is expected to keep them"
     );
-    assert!(index.is_current_for(engine.store()));
+    assert!(
+        index.is_current_for(engine.store()),
+        "nothing was interned, so the index has not fallen behind"
+    );
+
+    // The part that matters: with every geometry quad gone, the routed query returns
+    // nothing, because each candidate the index still proposes fails to join.
+    let session = Session::unrestricted(engine.store()).expect("session");
+    let view = engine.view(&session);
+    for options in [
+        holos_engine::QueryOptions::new(),
+        holos_engine::QueryOptions::new().with_spatial(Arc::new(
+            SpatialIndex::build(engine.store()).expect("rebuild"),
+        )),
+    ] {
+        let (results, _) =
+            holos_engine::Engine::query_with(&view, &query, &options).expect("query");
+        let rows = match results {
+            spareval::QueryResults::Solutions(iter) => iter.count(),
+            _ => panic!("expected solutions"),
+        };
+        assert_eq!(rows, 0, "a geometry with no quads left must produce no row");
+    }
 }
 
 #[test]
@@ -575,4 +607,64 @@ fn many_small_refreshes_still_answer_correctly() {
     let whole = geo::Rect::new((-1e6, -1e6), (1e6, 1e6));
     assert!(agree(&index, &rebuilt, &whole));
     assert_eq!(index.candidates_in(&whole).len(), 20 + 20 * 5);
+}
+
+#[test]
+fn geometry_literals_are_dictionary_backed() {
+    // The assumption the whole watermark design rests on, made a test rather than left in a
+    // comment.
+    //
+    // The index catches up by walking literal ids from a watermark, which finds a geometry
+    // only if that geometry was interned as `Tag::Literal`. §5's encoding inlines some
+    // literals directly into the term id — integers, short plain strings, booleans — and a
+    // geometry that took one of those paths would be invisible to the walk, which is a
+    // silently missing answer rather than a slow one.
+    //
+    // Both geometry datatypes are custom IRIs, so today they always reach the dictionary.
+    // If that ever changes, this fails here rather than as a mysteriously empty result.
+    use holos_core::Tag;
+    use oxrdf::{Literal, NamedNode, Term};
+
+    let mut engine = Engine::new();
+    engine
+        .bulk_load(
+            br#"@prefix ex:  <http://example.com/> .
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+ex:a geo:asWKT "POINT(1 1)"^^geo:wktLiteral .
+ex:b geo:asWKT "{\"type\":\"Point\",\"coordinates\":[2,2]}"^^geo:geoJSONLiteral .
+"#
+            .as_ref(),
+            RdfFormat::Turtle,
+            None,
+        )
+        .expect("load");
+
+    for datatype in [
+        "http://www.opengis.net/ont/geosparql#wktLiteral",
+        "http://www.opengis.net/ont/geosparql#geoJSONLiteral",
+    ] {
+        let value = if datatype.ends_with("wktLiteral") {
+            "POINT(1 1)".to_owned()
+        } else {
+            "{\"type\":\"Point\",\"coordinates\":[2,2]}".to_owned()
+        };
+        let term = Term::Literal(Literal::new_typed_literal(
+            value,
+            NamedNode::new_unchecked(datatype),
+        ));
+        let id = engine
+            .store()
+            .lookup_term(term.as_ref())
+            .expect("lookup")
+            .unwrap_or_else(|| panic!("{datatype} was not interned"));
+        assert_eq!(
+            id.tag(),
+            Tag::Literal,
+            "{datatype} is not dictionary-backed, so the index's walk would never see it"
+        );
+    }
+
+    // And the walk does in fact find both of them.
+    let index = SpatialIndex::build(engine.store()).expect("build");
+    assert_eq!(index.len(), 2, "both geometry spellings should be indexed");
 }

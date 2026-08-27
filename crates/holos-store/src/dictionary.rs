@@ -55,6 +55,26 @@ impl Dictionary {
         self.len() == 0
     }
 
+    /// How many ids have been issued for one dictionary-backed tag.
+    ///
+    /// Each kind has its own dense index space, so this doubles as an enumeration bound:
+    /// `TermId::new(tag, i)` for `i` in `0..count_for(tag)` is exactly the set of ids issued
+    /// for that tag, in the order they were issued. A caller that has already looked at the
+    /// first `n` can therefore find everything since by walking from `n`, which is what the
+    /// spatial index does instead of rescanning the store.
+    ///
+    /// Returns zero for a tag the dictionary does not back.
+    #[must_use]
+    pub fn count_for(&self, tag: Tag) -> usize {
+        match tag {
+            Tag::Iri => self.iris.len(),
+            Tag::BlankNode => self.blank_nodes.len(),
+            Tag::Literal => self.literals.len(),
+            Tag::TripleTerm => self.triple_terms.len(),
+            _ => 0,
+        }
+    }
+
     /// Interns a term, allocating an id if it is new.
     pub fn encode(&mut self, term: TermRef<'_>) -> Result<TermId> {
         match term {
