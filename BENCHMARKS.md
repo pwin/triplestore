@@ -514,6 +514,57 @@ Two boundaries are worth stating because they are not obvious:
   the middle of a read. It costs nothing where it matters: the `VALUES` the spatial index
   generates holds geometries read out of the store.
 
+#### 3g. What a write costs the index
+
+The index earns 2,408× on reads. Until now it was rebuilt in full on **every write**, which
+made that a property of a read-only store: one write to a 200,000-geometry store cost about
+as much as four thousand probes.
+
+Where a rebuild's time goes, measured before changing anything:
+
+| Geometries | Scan | Decode + parse | Tree build | Total |
+|---:|---:|---:|---:|---:|
+| 50,000 | 2.14 ms | 18.50 ms | 10.31 ms | 30.95 ms |
+| 200,000 | 15.59 ms | 118.91 ms | 74.89 ms | 209.39 ms |
+
+**The parse is 57% and the scan is 7%.** That decided the design: a refresh can afford to
+keep scanning every quad, as long as it never re-decodes or re-parses a term it has already
+seen, and never re-packs the whole tree.
+
+| Geometries | Added | Rebuild | Refresh | Saved |
+|---:|---:|---:|---:|---:|
+| 50,000 | 100 | 52–70 ms | 2.9–5.1 ms | **11–18×** |
+| 200,000 | 100 | 178–208 ms | 16–31 ms | **6–12×** |
+
+Ranges over three runs, because the variance is real and quoting the best number would
+misrepresent it.
+
+The design turns on an asymmetry worth stating plainly. The index is a **superset filter**:
+the `VALUES` it produces is joined back against the store, so a geometry it still lists after
+its quads are deleted simply fails to join and contributes no row. **Omitting a new geometry
+is a silently missing answer; keeping a departed one costs only space.** So the refresh
+inserts and never deletes, and the store *shrinking* is the one signal that triggers a full
+rebuild — which is about reclaiming memory, not about being right.
+
+Two details that are not obvious:
+
+* **Negative results are cached too.** The set of examined terms holds everything looked at,
+  not just the geometries. Without the negatives, every refresh would re-decode every
+  ordinary literal in the store to rediscover that it is not a geometry — which is most of
+  the 57%.
+* **The tree repacks itself.** `rstar` packs a far better tree from a bulk load than from
+  repeated inserts, so past ten thousand incremental inserts the index rebuilds from what it
+  already holds. That costs the 36% that is tree construction and none of the 57% that is
+  parsing.
+
+A test asserts that a refreshed index answers *identically* to a rebuilt one, over four probe
+windows and three rounds of writing — not merely that it is faster.
+
+**What is left.** The refresh is still O(quads), because the scan is the only way to learn
+what changed without the writer saying so. Removing it means feeding the index the term ids a
+write touched, which would take the 200,000-geometry case from ~25 ms to the cost of the new
+geometries alone. That is the next step rather than part of this one.
+
 ### 4. A commit costs the size of its change, not the size of the scene
 
 The holon table is the one the design rests on. **0.91 ms per commit against 140 ms for a

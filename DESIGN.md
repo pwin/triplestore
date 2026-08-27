@@ -1303,6 +1303,39 @@ find nothing, because §14's property does not get a geospatial exemption.
 Reused rather than rewritten, for the same reason as the rest of L0 (§4): conformance-heavy
 geometry code that already exists and is already tested.
 
+### The index is updated, not rebuilt
+
+The R-tree earns 2,408× on reads, and was rebuilt in full on every write — which made that a
+property of a read-only store. One write to a 200,000-geometry store cost about four thousand
+probes' worth of work, and `is_current_for` correctly made every query in the meantime fall
+back to a full scan.
+
+Measuring where a rebuild's time went decided the fix. The quad scan is **7%**; decoding
+terms and parsing their WKT is **57%**; packing the tree is **36%**. So the refresh keeps the
+scan and avoids the other two: a term already examined is skipped without being decoded, and
+new entries are inserted into the existing tree rather than bulk-loaded into a new one.
+Between 6× and 18× depending on scale, over three runs.
+
+**Why it may insert and never delete.** The index is a superset filter, and §17's rewrite
+joins the `VALUES` it produces back against the store — so a geometry the index still lists
+after its quads are gone fails to join and contributes no row. Omitting a *new* geometry is a
+silently missing answer; keeping a departed one costs space. The asymmetry is the whole
+design, and the store shrinking is the one signal that triggers a rebuild, for memory rather
+than for correctness.
+
+Negative results are cached alongside the positive ones. Without them a refresh would
+re-decode every ordinary literal in the store to rediscover it is not a geometry, which is
+most of the 57%. And past ten thousand one-at-a-time inserts the tree repacks itself from
+what it already holds, because `rstar` builds a far better tree from a bulk load than from
+repeated insertion — that costs the 36% and none of the 57%.
+
+A test asserts a refreshed index answers *identically* to a rebuilt one across several probe
+windows and several rounds of writing, rather than merely faster.
+
+The refresh is still O(quads), because a scan is the only way to learn what changed without
+the writer saying so. Feeding it the term ids a write touched would remove that, and is the
+next step rather than part of this one.
+
 ### `geof:distance` only worked between two points
 
 Found by re-running the OGC GeoSPARQL example dataset through a live server, query by query,

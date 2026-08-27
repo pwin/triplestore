@@ -193,29 +193,35 @@ impl State {
         self.statistics.read().ok().and_then(|s| s.clone())
     }
 
-    /// Rebuilds the spatial index.
+    /// Brings the spatial index up to date with the store.
     ///
     /// Called wherever the statistics are refreshed, and for the same reason: a write has
     /// happened, so anything derived from the store is out of date. An index that is not
-    /// rebuilt is not *wrong* — the query path notices it no longer describes the store and
+    /// refreshed is not *wrong* — the query path notices it no longer describes the store and
     /// does the full scan instead — but it stops narrowing anything, so refreshing is what
     /// makes it worth having.
+    ///
+    /// Updates the existing index rather than replacing it. A rebuild re-decodes and
+    /// re-parses every geometry in the store, which is 57% of its cost and all of it wasted
+    /// on geometries that have not changed; a refresh pays that only for terms it has not
+    /// seen before. The first call, when there is no index yet, still builds one.
     fn refresh_spatial(&self) {
-        let built = {
-            let Ok(engine) = self.engine.read() else {
-                return;
-            };
-            holos_engine::spatial::SpatialIndex::build(engine.store())
+        let Ok(engine) = self.engine.read() else {
+            return;
         };
-        match built {
-            Ok(index) => {
+        let existing = self.spatial.read().ok().and_then(|slot| slot.clone());
+        let outcome = match existing {
+            Some(index) => index.refresh(engine.store()),
+            None => holos_engine::spatial::SpatialIndex::build(engine.store()).map(|built| {
                 if let Ok(mut slot) = self.spatial.write() {
-                    *slot = Some(Arc::new(index));
+                    *slot = Some(Arc::new(built));
                 }
-            }
-            // Losing the index costs speed, not correctness: without one, topology relations
-            // are evaluated by scanning, which is what they did before it existed.
-            Err(e) => eprintln!("the spatial index could not be rebuilt: {e}"),
+            }),
+        };
+        // Losing the index costs speed, not correctness: without one, topology relations are
+        // evaluated by scanning, which is what they did before it existed.
+        if let Err(e) = outcome {
+            eprintln!("the spatial index could not be brought up to date: {e}");
         }
     }
 

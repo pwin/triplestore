@@ -404,3 +404,175 @@ fn disjointness_emits_no_restriction() {
         "disjointness was narrowed by bounding boxes, which loses correct answers: {routed}"
     );
 }
+
+// ------------------------------------------------------------------- incremental
+
+/// A store holding `n` points on a diagonal, plus some non-geometry noise.
+fn points(n: usize, offset: usize) -> String {
+    let mut turtle = String::from(
+        "@prefix ex:  <http://example.com/> .\n\
+         @prefix geo: <http://www.opengis.net/ont/geosparql#> .\n",
+    );
+    for i in offset..offset + n {
+        turtle.push_str(&format!(
+            "ex:p{i} geo:asWKT \"POINT({i} {i})\"^^geo:wktLiteral .\n"
+        ));
+        turtle.push_str(&format!("ex:p{i} ex:label \"not a geometry {i}\" .\n"));
+    }
+    turtle
+}
+
+/// Both indexes, asked the same question, must answer identically.
+fn agree(a: &SpatialIndex, b: &SpatialIndex, rect: &geo::Rect) -> bool {
+    let mut left = a.candidates_in(rect);
+    let mut right = b.candidates_in(rect);
+    left.sort_unstable();
+    right.sort_unstable();
+    left == right
+}
+
+#[test]
+fn a_refresh_produces_what_a_rebuild_would() {
+    // The property the whole change rests on. A refresh skips the decode and the parse for
+    // everything it has seen, and inserts one at a time instead of bulk loading — so the
+    // tree it ends up with is *shaped* differently from a rebuilt one. What must not differ
+    // is any answer it gives.
+    let mut engine = Engine::new();
+    engine
+        .bulk_load(points(200, 0).as_bytes(), RdfFormat::Turtle, None)
+        .expect("load");
+
+    let index = SpatialIndex::build(engine.store()).expect("build");
+    assert_eq!(index.len(), 200);
+
+    // Three rounds of writing and refreshing, rather than one, because the interesting
+    // failure is state accumulating wrongly across refreshes.
+    for round in 1..=3 {
+        engine
+            .bulk_load(
+                points(100, round * 1000).as_bytes(),
+                RdfFormat::Turtle,
+                None,
+            )
+            .expect("load more");
+        index.refresh(engine.store()).expect("refresh");
+
+        let rebuilt = SpatialIndex::build(engine.store()).expect("rebuild");
+        assert_eq!(
+            index.len(),
+            rebuilt.len(),
+            "round {round}: refreshed index holds {} geometries, a rebuild holds {}",
+            index.len(),
+            rebuilt.len()
+        );
+        assert!(
+            index.is_current_for(engine.store()),
+            "round {round}: a refreshed index must not still look stale, or nothing will use it"
+        );
+        for (lo, hi) in [(-10.0, 10.0), (0.0, 250.0), (999.0, 1105.0), (-1e6, 1e6)] {
+            let rect = geo::Rect::new((lo, lo), (hi, hi));
+            assert!(
+                agree(&index, &rebuilt, &rect),
+                "round {round}: refreshed and rebuilt indexes disagree over {lo}..{hi}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_refresh_that_changes_nothing_is_a_no_op() {
+    let mut engine = Engine::new();
+    engine
+        .bulk_load(points(50, 0).as_bytes(), RdfFormat::Turtle, None)
+        .expect("load");
+    let index = SpatialIndex::build(engine.store()).expect("build");
+    let before = index.len();
+    index.refresh(engine.store()).expect("refresh");
+    index.refresh(engine.store()).expect("refresh again");
+    assert_eq!(index.len(), before, "a no-op refresh changed the index");
+}
+
+#[test]
+fn a_geometry_added_after_the_build_is_found() {
+    // The failure this exists to prevent: an index that silently omits a new geometry
+    // returns a `VALUES` without it, and the row it would have produced is simply gone.
+    let mut engine = Engine::new();
+    engine
+        .bulk_load(points(10, 0).as_bytes(), RdfFormat::Turtle, None)
+        .expect("load");
+    let index = SpatialIndex::build(engine.store()).expect("build");
+
+    let far = geo::Rect::new((4995.0, 4995.0), (5005.0, 5005.0));
+    assert!(
+        index.candidates_in(&far).is_empty(),
+        "nothing is out there yet"
+    );
+
+    engine
+        .bulk_load(points(1, 5000).as_bytes(), RdfFormat::Turtle, None)
+        .expect("load one more");
+    index.refresh(engine.store()).expect("refresh");
+    assert_eq!(
+        index.candidates_in(&far).len(),
+        1,
+        "the geometry added after the build was not picked up"
+    );
+}
+
+#[test]
+fn deleting_quads_rebuilds_rather_than_leaking() {
+    // Deletion is not tracked incrementally, because a departed geometry costs space and not
+    // correctness — the `VALUES` it appears in simply fails to join. What is tracked is the
+    // store getting *smaller*, which triggers a rebuild so the index does not grow for ever.
+    use holos_security::Session;
+    use oxrdf::NamedNode;
+
+    let mut engine = Engine::new();
+    engine
+        .bulk_load(points(40, 0).as_bytes(), RdfFormat::Turtle, None)
+        .expect("load");
+    let index = SpatialIndex::build(engine.store()).expect("build");
+    assert_eq!(index.len(), 40);
+
+    let mut session = Session::unrestricted(engine.store()).expect("session");
+    let update = spargebra::SparqlParser::new()
+        .parse_update(
+            "PREFIX geo: <http://www.opengis.net/ont/geosparql#> \
+             DELETE WHERE { ?s geo:asWKT ?g }",
+        )
+        .expect("parse");
+    holos_engine::update::apply(&mut engine, &mut session, &update).expect("delete");
+    let _ = NamedNode::new_unchecked("urn:unused");
+
+    index.refresh(engine.store()).expect("refresh");
+    assert_eq!(
+        index.len(),
+        0,
+        "the store lost every geometry, so a refresh should have reclaimed them"
+    );
+    assert!(index.is_current_for(engine.store()));
+}
+
+#[test]
+fn many_small_refreshes_still_answer_correctly() {
+    // Repeated one-at-a-time insertion degrades an R-tree's packing, so the index repacks
+    // itself past a threshold. The repack must not change an answer — it is the same
+    // entries, rebuilt into a better-shaped tree.
+    let mut engine = Engine::new();
+    engine
+        .bulk_load(points(20, 0).as_bytes(), RdfFormat::Turtle, None)
+        .expect("load");
+    let index = SpatialIndex::build(engine.store()).expect("build");
+
+    for round in 1..=20 {
+        engine
+            .bulk_load(points(5, round * 100).as_bytes(), RdfFormat::Turtle, None)
+            .expect("load");
+        index.refresh(engine.store()).expect("refresh");
+    }
+    let rebuilt = SpatialIndex::build(engine.store()).expect("rebuild");
+    assert_eq!(index.len(), rebuilt.len());
+    let whole = geo::Rect::new((-1e6, -1e6), (1e6, 1e6));
+    assert!(agree(&index, &rebuilt, &whole));
+    assert_eq!(index.candidates_in(&whole).len(), 20 + 20 * 5);
+}
