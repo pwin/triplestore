@@ -29,6 +29,7 @@ USAGE
     holos dump     --data <FILE>... [POLICY]
     holos validate --data <FILE>... [--shapes <FILE>]
     holos backup   --store <DIR> --to <DIR>
+    holos compact  --store <DIR> --to <DIR>
 
 DATA
     --data <FILE>            Load a file. Repeatable. Format is taken from the extension:
@@ -41,6 +42,17 @@ DATA
                              is in memory and is discarded on exit.
     --bulk                   Buffer writes and skip the write-ahead log while loading. Much
                              faster; a load interrupted part-way must be discarded.
+
+MAINTENANCE
+    --to <DIR>               Destination for `backup` and `compact`. Must not exist.
+                             `backup` writes a RocksDB checkpoint: near-instant, hard-linked,
+                             and it preserves the store exactly — including the dictionary
+                             entries left behind by deleted quads.
+                             `compact` writes a fresh store containing only the live data,
+                             which is the only thing that reclaims those. It reads the store
+                             directly rather than through a policy, so it copies everything;
+                             it needs room for both stores; and it does not copy writes that
+                             arrive while it runs.
 
 QUERY
     --query <SPARQL>         Query text.
@@ -133,6 +145,7 @@ fn main() -> Result<()> {
         "update" => update_command(&mut engine, &opts),
         "validate" => validate(&mut engine, &opts),
         "backup" => backup(&engine, &opts),
+        "compact" => compact(&engine, &opts),
         other => bail!("unknown command `{other}`\n\n{USAGE}"),
     }
 }
@@ -264,6 +277,123 @@ fn backup(engine: &Engine, opts: &Options) -> Result<()> {
     println!("restore by pointing --store at it, or by copying it back over the original");
     println!("note: it hard-links the live store's files where it can, so it is not an");
     println!("      off-machine backup until it is copied somewhere else");
+    Ok(())
+}
+
+/// Rewrites the store into a fresh one, reclaiming everything the dictionary is holding on
+/// to.
+///
+/// # What accumulates, and why nothing else clears it
+///
+/// The term dictionary is **append-only** — §5 depends on that, and so does everything
+/// derived from it. Deleting quads therefore reclaims their index entries and nothing else:
+/// the terms they used stay interned for ever. A store that has churned carries a dictionary
+/// sized by every term it has *ever* seen.
+///
+/// Neither backup nor restart helps. A backup is a RocksDB checkpoint — the SST files are
+/// hard-linked, so a restore hands back the same dictionary, dead entries included.
+///
+/// # Why this is a copy and not an edit
+///
+/// Reclaiming a dictionary slot in place means proving nothing refers to it, and that is
+/// harder than it looks. An RDF 1.2 triple term holds its components by id, so a term can be
+/// referenced while **no quad mentions it at all**:
+///
+/// ```text
+/// <claim> <says> <<( <a> <p> "v" )>> .
+///
+/// <a> and <p> are interned IRIs that appear in no quad.
+/// ```
+///
+/// A reference check that looked only at quads would free them and leave the triple term
+/// pointing at nothing. Copying has no such failure mode: it writes only terms it has just
+/// read, so anything reachable comes with its referents, and anything unreachable is left
+/// behind by construction rather than by analysis.
+///
+/// # This is not a dump
+///
+/// [`dump`] goes through the policy-filtered view and writes what the *principal* may see.
+/// Compaction reads the store directly and copies **everything**, because a maintenance
+/// operation that silently dropped the quads the operator happens not to be cleared for
+/// would be a data-loss bug wearing a security feature's clothes.
+///
+/// # Cost
+///
+/// Time and disk proportional to the live data, and the result is a second store — so the
+/// machine needs room for both. It is an offline operation: writes to the source while this
+/// runs are not copied.
+fn compact(engine: &Engine, opts: &Options) -> Result<()> {
+    let destination = opts
+        .to
+        .as_deref()
+        .context("--to <DIR> says where to write the compacted store")?;
+    let destination = Path::new(destination);
+    anyhow::ensure!(
+        !destination.exists(),
+        "{} already exists; compaction writes a new store rather than editing one in place,          so that a failure leaves the original untouched",
+        destination.display()
+    );
+
+    let source = engine.store();
+    let quads_before = source.len();
+    let terms_before = source.dictionary_len();
+    let graphs_before = source.named_graphs()?.len();
+
+    let mut fresh = opts.open_store_at(destination)?;
+    fresh.begin_bulk_load();
+
+    // Empty named graphs first: a graph with no quads exists in the store and would
+    // otherwise vanish, which the Graph Store Protocol can tell the difference between.
+    for id in source.named_graphs()? {
+        let Some(term) = source.decode_term(id)? else {
+            continue;
+        };
+        let name = match term {
+            oxrdf::Term::NamedNode(n) => oxrdf::GraphName::NamedNode(n),
+            oxrdf::Term::BlankNode(b) => oxrdf::GraphName::BlankNode(b),
+            _ => continue,
+        };
+        fresh.insert_named_graph(&name)?;
+    }
+
+    let mut copied = 0usize;
+    for quad in source.iter() {
+        fresh.insert(quad?.as_ref())?;
+        copied += 1;
+    }
+
+    fresh.end_bulk_load()?;
+    fresh.flush()?;
+
+    let quads_after = fresh.len();
+    let terms_after = fresh.dictionary_len();
+    let graphs_after = fresh.named_graphs()?.len();
+
+    // Checked rather than reported. A compaction that quietly lost quads would be the worst
+    // possible outcome of a maintenance command, so it fails loudly instead of printing a
+    // reassuring summary.
+    anyhow::ensure!(
+        copied == quads_before && quads_after == quads_before,
+        "compaction did not preserve the data: {quads_before} quads in, {copied} copied,          {quads_after} in the result. {} has been left in place for inspection.",
+        destination.display()
+    );
+    anyhow::ensure!(
+        graphs_after == graphs_before,
+        "compaction lost named graphs: {graphs_before} before, {graphs_after} after"
+    );
+
+    let reclaimed = terms_before.saturating_sub(terms_after);
+    println!(
+        "compacted {quads_before} quads into {}",
+        destination.display()
+    );
+    println!("  dictionary  {terms_before} -> {terms_after}  ({reclaimed} reclaimed)");
+    println!("  graphs      {graphs_before}");
+    println!();
+    println!("the source is untouched. swap by stopping the server, moving the old store");
+    println!("aside, and pointing --store at the new one; keep the old until a query or two");
+    println!("has confirmed the new one, since this is the operation you least want to");
+    println!("discover was wrong a week later");
     Ok(())
 }
 
@@ -650,6 +780,21 @@ impl Options {
             i += 1;
         }
         Ok(o)
+    }
+
+    /// Opens a second, empty store at `path`, on the same backend as `--store`.
+    fn open_store_at(&self, path: &Path) -> Result<holos_store::Store> {
+        #[cfg(feature = "rocksdb")]
+        {
+            let storage = holos_store::RocksStorage::open(path)
+                .with_context(|| format!("creating a store at {}", path.display()))?;
+            Ok(holos_store::Store::with_storage(storage))
+        }
+        #[cfg(not(feature = "rocksdb"))]
+        {
+            let _ = path;
+            bail!("this build has no persistent backend: rebuild with --features rocksdb")
+        }
     }
 
     /// Opens the engine over the requested backend.

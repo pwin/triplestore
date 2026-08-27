@@ -1345,6 +1345,51 @@ across several probe windows and rounds of writing; the other deletes every geom
 asserts the leftover entries produce no rows, which is what makes over-inclusion safe rather
 than merely convenient.
 
+### Reclaiming the dictionary: `holos compact`
+
+The dictionary is append-only, and §5 depends on that — so does everything derived from it,
+including the spatial index's watermark. Deleting quads therefore reclaims their index
+entries and nothing else: the terms they used stay interned for ever, and a store that has
+churned carries a dictionary sized by every term it has *ever* seen.
+
+Neither backup nor restart clears it. A backup is a RocksDB checkpoint — the SST files are
+hard-linked — so a restore hands back the same dictionary, dead entries included. That is the
+right behaviour for a backup and it is worth being explicit about, because "restore from
+backup" is the intuition people reach for.
+
+**Tombstoning was the plan and the evidence went against it.** Freeing a dictionary slot in
+place means proving nothing refers to it, and an RDF 1.2 triple term holds its components by
+id — so a term can be referenced while *no quad mentions it at all*:
+
+```text
+<claim> <says> <<( <a> <p> "v" )>> .
+```
+
+`<a>` and `<p>` are interned IRIs appearing in no quad. Measured, not assumed: both come back
+with zero direct references. A check that looked only at quads would free them and leave the
+triple term pointing at nothing. Tombstoning is also only a partial reclaim — the id is
+retired for ever and the slot remains — so the trade was *online but partial, with data
+corruption as the failure mode*.
+
+Copying has no such failure mode. It writes only terms it has just read, so anything
+reachable arrives with its referents and anything unreachable is left behind by construction
+rather than by analysis. It is offline, and it is complete.
+
+`holos compact --store <DIR> --to <DIR>` writes a fresh store beside the old one, never over
+it, so a failure leaves the original untouched. It reads the store **directly rather than
+through a policy**: `holos dump` writes what a principal may see, and a maintenance operation
+that silently dropped the quads the operator happens not to be cleared for would be a
+data-loss bug wearing a security feature's clothes.
+
+Three things it checks rather than reports, because a compaction that quietly lost data is
+the worst outcome a maintenance command can have: the quad count in, the quad count copied,
+and the quad count out must agree, and so must the named graph counts. Empty named graphs are
+copied explicitly — the Graph Store Protocol can tell an empty graph from an absent one.
+
+This is not RocksDB's own `compact_range`, which reclaims SST space from deleted keys and
+cannot renumber a dictionary. The two are complementary; only this one shrinks the term
+space.
+
 ### Reclaiming what the index keeps: `POST /maintenance/purge`
 
 Tracking the dictionary rather than the store buys a refresh in a fraction of a millisecond,
