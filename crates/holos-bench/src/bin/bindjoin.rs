@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let evaluator = started.elapsed();
     println!(
-        "evaluator, reordered           {rows:>3} rows  {:>9.1} ms",
+        "query path (bind join)         {rows:>3} rows  {:>9.3} ms",
         evaluator.as_secs_f64() * 1000.0
     );
 
@@ -91,7 +91,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     'outer: for quad in store.quads_for_pattern(None, Some(badge), None, GraphFilter::Default) {
         let subject = quad?.subject;
         // Probe: (subject, name, *) and (subject, memberOf, *).
-        for name_quad in store.quads_for_pattern(Some(subject), Some(name), None, GraphFilter::Default)
+        for name_quad in
+            store.quads_for_pattern(Some(subject), Some(name), None, GraphFilter::Default)
         {
             let name_quad = name_quad?;
             probes += 1;
@@ -118,13 +119,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!(
-        "\n{:.0}x — what an index nested-loop operator would be worth on this shape.",
+        "\n{:.0}x — what a hand-written join still beats the general one by here.",
         evaluator.as_secs_f64() / bind.as_secs_f64().max(1e-9)
     );
     println!(
-        "The evaluator scans both right-hand patterns in full; the bind join touches {probes} \n\
-         keys. The gap is not estimation — the order is already optimal in both — it is the \n\
-         absence of a join operator that can exploit a bound variable."
+        "The first row goes through `holos_engine::bindjoin`, which probes rather than \n\
+         scans and touches roughly the same {probes} keys. What separates the two is the \n\
+         cost of being general — choosing the next pattern from statistics at each step, \n\
+         hashing bindings, decoding terms — rather than the absence of an operator, which \n\
+         is what this benchmark showed at 611x before one existed."
     );
 
     Ok(())

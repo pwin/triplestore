@@ -351,6 +351,88 @@ will keep rising.
 This is not an estimation problem. The order is optimal in both columns. It is the absence
 of an index nested-loop operator, and it cannot be fixed from outside the evaluator.
 
+### 3d. The operator now exists
+
+`holos_engine::bindjoin` is that operator, sitting ahead of `spareval` in the query path for
+the shapes it can answer. The same benchmark, on the same 753,199-quad store:
+
+| | Before | After |
+|---|---:|---:|
+| Query path, 20 rows from a three-pattern star | 43.9 ms | **0.535 ms** |
+| Hand-written bind join | 0.072 ms | 0.084 ms |
+| Gap to hand-written | **611×** | **~10×** |
+
+**About 82× on the real query path.** What is left is the difference between a general
+implementation and a hand-written one for a single known shape: choosing the next pattern
+from statistics at each step, hashed bindings, decoding through the dictionary. That is a
+tuning problem rather than a missing operator, and a much less urgent one.
+
+Three things kept it honest:
+
+* **The fragment is small.** `SELECT` over one basic graph pattern in the default graph, with
+  `DISTINCT`, `LIMIT`, `OFFSET` and a projection. `FILTER`, `OPTIONAL`, `UNION`, `GRAPH`,
+  aggregation, `ORDER BY`, property paths, blank nodes and triple terms are all refused and
+  fall back. A fast path that is wrong is worse than no fast path.
+* **Ordering is decided at each step, not once.** After the first pattern binds `?s`, the
+  others stop being predicate scans and become subject-and-predicate lookups — a different
+  estimate entirely. Ordering up front would miss the effect the operator exists for.
+* **Policy is structural.** Scans go through the same `QueryableDataset` call `spareval`
+  makes, so `decide_quad` runs on every quad. The fast path has no way to read around §14.
+
+Seventeen differential tests run the same SPARQL through both paths and compare exactly —
+rows, bindings and multiplicity — including that duplicates survive without `DISTINCT`, which
+a bind join that deduplicated by accident would otherwise pass.
+
+#### Three bugs, and the coverage that was not there
+
+The differential tests all passed. Three bugs survived them, all of one kind: **the fast path
+took over queries carrying something it did not model.** Comparing answers cannot find that,
+because two of the three do not change an answer.
+
+* **A substitution was dropped.** `QueryOptions::substitutions` binds a variable without
+  interpolating it into query text. The gate excluding it read `!options.touches_dataset()`,
+  and `touches_dataset` — accurately, given its name — reports on the dataset, not on the
+  query. A substituted query was answered as though nothing had been bound. The comment above
+  that gate already said substitutions were excluded; only the code disagreed.
+* **A cross product materialised 13.7 GB.** `SELECT * WHERE { ?a ?b ?c . ?d ?e ?f }` over
+  20,000 triples is 400 million rows. It is inside the fragment, legitimately — but this
+  operator *materialises* where the evaluator streams, and it consulted no cancellation
+  token, because the token is checked by the evaluator it had just skipped. The query's 60 ms
+  timeout never fired. It was found as a test binary sitting at 13.7 GB resident and climbing.
+* **`FROM` was ignored, and that one returned wrong rows.** `FROM` and `FROM NAMED` live in
+  `Query::Select::dataset`, *beside* the pattern rather than inside it, so a check that reads
+  only the pattern sees an answerable query and answers a different one. `SELECT ?s FROM <g1>
+  WHERE { ?s ?p ?o }` returned the default graph's rows instead of `g1`'s.
+
+The middle one is the most instructive, because nothing about it was *incorrect*: given time
+and memory it would have produced the right answer. Being right eventually is a different
+property from being usable, and only the first was under test.
+
+The first two now run under `bindjoin::Limits` — a row budget and the deadline's token —
+where hitting either returns `None`, meaning *ask the evaluator*, discarding the partial rows
+rather than returning them short. The budget counts `seen` as well as `out`, because under
+`DISTINCT` a large `OFFSET` grows one and not the other. The third is refused outright.
+
+#### The suites that were supposed to catch this could not reach it
+
+The honest part. There are three ways into evaluation, and the fast path was wired into one
+of them. The W3C conformance runner reaches evaluation through
+`Engine::query_prepared_with_services`, and the Python binding and audited CLI path through
+`Engine::query`; both went straight to the evaluator. **Roughly a thousand W3C queries
+appeared to be covering this operator and were not executing a line of it**, and the
+most-used surface — the published `holosdb` package — never got the operator at all.
+
+All three now share one `try_bind_join`, with a test comparing their answers against the
+evaluator's so they cannot drift apart again. With the suites actually reaching it,
+`sparql10`, `sparql11` and `sparql12` are unchanged to the test — the first real evidence the
+operator agrees with the evaluator on SPARQL it did not have written for it.
+
+A second gap sat underneath: `FROM` had **no coverage in this repo at all**. The SPARQL 1.1
+suite contains exactly two queries using it and both are `CONSTRUCT`. The nineteen tests that
+exercise dataset specification are in the SPARQL 1.0 suite, which was on disk and had never
+been run. It is now the `sparql10` ratchet, at 262/263. A newer suite is not a superset of an
+older one — 1.1's manifests test what 1.1 *added*.
+
 ### 4. A commit costs the size of its change, not the size of the scene
 
 The holon table is the one the design rests on. **0.91 ms per commit against 140 ms for a

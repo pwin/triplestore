@@ -138,6 +138,33 @@ fn rdf11_store_round_trip() {
     ratchet("rdf11", &report);
 }
 
+/// SPARQL 1.0 — the DAWG evaluation tests, and the only coverage `FROM` has.
+///
+/// Added after a query fast path shipped that ignored `FROM` entirely and answered over the
+/// store's default graph instead. Nothing caught it: the SPARQL 1.1 suite contains exactly
+/// two queries using `FROM` and both are `CONSTRUCT`, so the whole of dataset specification
+/// was untested here. This suite's `dataset/` directory is nineteen tests of nothing else.
+///
+/// The lesson is worth stating rather than leaving in the commit log: a newer suite is not a
+/// superset of an older one. SPARQL 1.1's manifests test what 1.1 *added*.
+#[test]
+fn sparql10_query_evaluation() {
+    let Some(root) = testsuite_root() else {
+        return;
+    };
+    let Some(report) = run_suite(
+        "sparql10",
+        &root
+            .join("sparql")
+            .join("sparql10")
+            .join("manifest-evaluation.ttl"),
+        run_sparql_test,
+    ) else {
+        return;
+    };
+    ratchet("sparql10", &report);
+}
+
 /// SPARQL 1.1 — query evaluation through the dataset view.
 #[test]
 fn sparql11_query_evaluation() {
@@ -146,7 +173,10 @@ fn sparql11_query_evaluation() {
     };
     let Some(report) = run_suite(
         "sparql11",
-        &root.join("sparql").join("sparql11").join("manifest-all.ttl"),
+        &root
+            .join("sparql")
+            .join("sparql11")
+            .join("manifest-all.ttl"),
         run_sparql_test,
     ) else {
         return;
@@ -207,7 +237,11 @@ fn run_shacl_suite(name: &str, relative: &str) {
         eprintln!("skipping {name}: run scripts/fetch-testsuites.sh first");
         return;
     };
-    let manifest = root.join(relative).join("tests").join("core").join("manifest.ttl");
+    let manifest = root
+        .join(relative)
+        .join("tests")
+        .join("core")
+        .join("manifest.ttl");
     if !manifest.is_file() {
         eprintln!("skipping {name}: {} is absent", manifest.display());
         return;
@@ -241,7 +275,11 @@ fn run_shacl_suite_with(name: &str, relative: &str, engine: holos_conformance::s
     let Some(root) = shacl::suite_root() else {
         return;
     };
-    let manifest = root.join(relative).join("tests").join("core").join("manifest.ttl");
+    let manifest = root
+        .join(relative)
+        .join("tests")
+        .join("core")
+        .join("manifest.ttl");
     if !manifest.is_file() {
         return;
     }

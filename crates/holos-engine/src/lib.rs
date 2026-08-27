@@ -19,6 +19,7 @@
 // a length lint would make this code harder to check against the specs, not easier.
 #![allow(clippy::many_single_char_names)]
 
+pub mod bindjoin;
 pub mod functions;
 pub mod geo_ext;
 pub mod options;
@@ -187,6 +188,16 @@ impl Engine {
         query: &spargebra::Query,
         services: crate::service::LocalServiceHandler,
     ) -> Result<QueryResults<'a>, EngineError> {
+        // The same fast path `query_with` takes. It was attached only there at first, which
+        // meant the W3C conformance suites — which reach evaluation through *this* function —
+        // gave it no coverage at all while appearing to be its main test. A `SERVICE` query
+        // is outside the fragment regardless, so this is safe with a handler present, but it
+        // is only attempted without one so that the two paths cannot diverge unnoticed.
+        if services.is_empty() {
+            if let Some(results) = Self::try_bind_join(view, query, None, None)? {
+                return Ok(results);
+            }
+        }
         let evaluator = if services.is_empty() {
             Self::evaluator()
         } else {
@@ -205,7 +216,10 @@ impl Engine {
         quad: QuadRef<'_>,
     ) -> Result<bool, EngineError> {
         let encoded = self.store.encode_quad(quad)?;
-        if !session.policy(&self.store)?.permits_quad(encoded, Modes::WRITE) {
+        if !session
+            .policy(&self.store)?
+            .permits_quad(encoded, Modes::WRITE)
+        {
             return Err(EngineError::AccessDenied);
         }
         Ok(self.store.insert_encoded(encoded)?)
@@ -288,6 +302,12 @@ impl Engine {
         // answering it at all. No spatial routing here — this entry point takes no options,
         // so there is no index to route to, and the unnarrowed form is the correct one.
         let parsed = crate::topology::rewrite(&parsed, None);
+        // The same fast path the other two entry points take. This is the one the Python
+        // binding and the audited CLI path reach, so leaving it out meant the most-used
+        // surface was the only one not getting the operator.
+        if let Some(results) = Self::try_bind_join(view, &parsed, None, None)? {
+            return Ok(results);
+        }
         Ok(Self::evaluator().prepare(&parsed).execute(view)?)
     }
 
@@ -320,10 +340,13 @@ impl Engine {
         // GeoSPARQL topology properties become geometry lookups and a filter. Unconditional
         // because it is correctness rather than optimisation: without it, `?a geo:sfContains
         // ?b` is an ordinary lookup that matches nothing and says so silently.
-        let routing = options.spatial.as_ref().map(|index| crate::topology::Routing {
-            index,
-            store: view.store(),
-        });
+        let routing = options
+            .spatial
+            .as_ref()
+            .map(|index| crate::topology::Routing {
+                index,
+                store: view.store(),
+            });
         let parsed = crate::topology::rewrite(&parsed, routing);
         // Applied to the parsed algebra, before the evaluator's own optimiser runs on it.
         let parsed = match &options.reorder_with {
@@ -331,15 +354,99 @@ impl Engine {
             Some(stats) => holos_stats::reorder_query(&parsed, stats, view.store()),
         };
 
-        let mut evaluator = Self::evaluator();
-        // The Deadline must outlive the evaluation, so it is bound here rather than
-        // inside the `if`: dropping it early would stop the watchdog before it could fire.
+        // The Deadline must outlive the evaluation, so it is bound here rather than inside
+        // either branch below: dropping it early would stop the watchdog before it could
+        // fire. It is started before the fast path because the fast path is subject to it —
+        // an operator that skips the evaluator also skips the evaluator's deadline checks
+        // unless it makes its own.
         let deadline = options.timeout.map(Deadline::start);
+        let token = deadline.as_ref().map(Deadline::token);
+
+        // The index nested-loop fast path, for the shapes that suffer most without one.
+        //
+        // Only taken when nothing in the options changes what the query means: a
+        // `default-graph-uri`, a substitution or a request for an explanation all alter
+        // either the data or the output in ways this path does not model, and answering them
+        // from here would be answering a different question. `substitutions` in particular
+        // must be checked here and not left to `touches_dataset`, whose name promises less
+        // than this needs — a substitution changes the *query*, not the dataset.
+        //
+        // `plan` refuses anything outside its fragment, so the common case of falling
+        // through costs one pattern match.
+        if !options.touches_dataset() && !options.explain && options.substitutions.is_empty() {
+            if let Some(results) = Self::try_bind_join(
+                view,
+                &parsed,
+                options.reorder_with.as_deref(),
+                token.as_ref(),
+            )? {
+                return Ok((results, None));
+            }
+        }
+
+        Self::evaluate_with(view, &parsed, options, deadline)
+    }
+
+    /// Attempts the index nested-loop join, returning `None` when it does not apply.
+    ///
+    /// `None` covers both "outside the fragment" and "inside it, but a limit was hit" — the
+    /// caller's response to each is the same, and collapsing them here is what keeps every
+    /// call site from having to know the difference. See [`crate::bindjoin`].
+    ///
+    /// Every entry point that evaluates a query goes through this, deliberately. Attaching a
+    /// fast path to one entry point and not another is how it ends up with no test coverage
+    /// while appearing to have a great deal.
+    fn try_bind_join<'a>(
+        view: &'a DatasetView<'a>,
+        parsed: &spargebra::Query,
+        stats: Option<&holos_stats::Statistics>,
+        token: Option<&spareval::CancellationToken>,
+    ) -> Result<Option<QueryResults<'a>>, EngineError> {
+        let Some(plan) = crate::bindjoin::plan(parsed) else {
+            return Ok(None);
+        };
+        let limits = crate::bindjoin::Limits {
+            rows: Some(crate::bindjoin::DEFAULT_ROW_BUDGET),
+            token,
+        };
+        let Some(rows) = plan.evaluate(view, stats, limits)? else {
+            return Ok(None);
+        };
+        let variables: std::sync::Arc<[spargebra::term::Variable]> =
+            plan.variables().to_vec().into();
+        let solutions: Vec<_> = rows
+            .into_iter()
+            .map(|row| {
+                // `decode_term` returns Option<Term> for a term id that is not in the
+                // dictionary, which cannot happen for an id the scan produced; flattening
+                // treats it as unbound rather than panicking on it.
+                row.into_iter()
+                    .map(|id| match id {
+                        None => Ok(None),
+                        Some(id) => view.store().decode_term(id),
+                    })
+                    .collect::<Result<Vec<Option<oxrdf::Term>>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(QueryResults::Solutions(
+            spareval::QuerySolutionIter::from_tuples(variables, solutions.into_iter().map(Ok)),
+        )))
+    }
+
+    /// Evaluation through `spareval`, which is both the general path and the fallback when
+    /// the fast path declines or gives up.
+    fn evaluate_with<'a>(
+        view: &'a DatasetView<'a>,
+        parsed: &spargebra::Query,
+        options: &QueryOptions,
+        deadline: Option<Deadline>,
+    ) -> Result<(QueryResults<'a>, Option<spareval::QueryExplanation>), EngineError> {
+        let mut evaluator = Self::evaluator();
         if let Some(deadline) = &deadline {
             evaluator = evaluator.with_cancellation_token(deadline.token());
         }
 
-        let mut prepared = evaluator.prepare(&parsed);
+        let mut prepared = evaluator.prepare(parsed);
 
         if options.union_default_graph {
             prepared.dataset_mut().set_default_graph_as_union();
@@ -406,10 +513,7 @@ impl Engine {
 ///
 /// The [`Deadline`] is moved into the iterator so the watchdog stays alive exactly as long
 /// as the results do — no longer, so a query that finishes early leaves nothing parked.
-fn guard_with_deadline<'a>(
-    results: QueryResults<'a>,
-    deadline: Deadline,
-) -> QueryResults<'a> {
+fn guard_with_deadline<'a>(results: QueryResults<'a>, deadline: Deadline) -> QueryResults<'a> {
     match results {
         QueryResults::Solutions(solutions) => {
             let variables = std::sync::Arc::from(solutions.variables().to_vec());
@@ -424,14 +528,12 @@ fn guard_with_deadline<'a>(
             ))
         }
         QueryResults::Graph(triples) => {
-            QueryResults::Graph(spareval::QueryTripleIter::new(triples.map(
-                move |triple| {
-                    if deadline.expired() {
-                        return Err(spareval::QueryEvaluationError::Cancelled);
-                    }
-                    triple
-                },
-            )))
+            QueryResults::Graph(spareval::QueryTripleIter::new(triples.map(move |triple| {
+                if deadline.expired() {
+                    return Err(spareval::QueryEvaluationError::Cancelled);
+                }
+                triple
+            })))
         }
         // A boolean is already computed; there is nothing left to interrupt.
         other => other,
@@ -638,7 +740,10 @@ mod tests {
             &view,
             &format!("{px} SELECT (COUNT(*) AS ?c) WHERE {{ ?s ex:salary ?x }}"),
         );
-        assert_eq!(counted, vec!["c=\"0\"^^<http://www.w3.org/2001/XMLSchema#integer>"]);
+        assert_eq!(
+            counted,
+            vec!["c=\"0\"^^<http://www.w3.org/2001/XMLSchema#integer>"]
+        );
         // Property paths reach the scan through the same door.
         assert!(!ask(
             &view,
@@ -655,12 +760,11 @@ mod tests {
     #[test]
     fn a_denied_graph_is_not_even_enumerable() {
         let e = engine(QUADS, RdfFormat::TriG);
-        let policy = Policy::default()
-            .with_rule(Rule::allow(
-                Modes::READ,
-                Scope::Graph(nn("public")),
-                PrincipalMatch::Everyone,
-            ));
+        let policy = Policy::default().with_rule(Rule::allow(
+            Modes::READ,
+            Scope::Graph(nn("public")),
+            PrincipalMatch::Everyone,
+        ));
         let session = Session::open(e.store(), Principal::anonymous(), policy).unwrap();
         let view = e.view(&session);
         let rows = solutions(&view, "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }");
@@ -675,8 +779,7 @@ mod tests {
     fn clearance_hides_a_labelled_graph_from_sparql() {
         let e = engine(QUADS, RdfFormat::TriG);
         let policy = Policy::permit_all().with_graph_label(nn("hr"), Label::level(3));
-        let uncleared =
-            Session::open(e.store(), Principal::anonymous(), policy.clone()).unwrap();
+        let uncleared = Session::open(e.store(), Principal::anonymous(), policy.clone()).unwrap();
         let view = e.view(&uncleared);
         let rows = solutions(
             &view,
@@ -873,7 +976,11 @@ mod tests {
         ));
         let session = Session::open(e.store(), Principal::anonymous(), policy).unwrap();
         let view = e.view(&session);
-        assert!(solutions(&view, "SELECT ?s ?o WHERE { ?s ?p ?o FILTER(isTRIPLE(?o)) }").is_empty());
+        assert!(solutions(
+            &view,
+            "SELECT ?s ?o WHERE { ?s ?p ?o FILTER(isTRIPLE(?o)) }"
+        )
+        .is_empty());
         // The asserted triple itself is untouched.
         assert!(ask(
             &view,

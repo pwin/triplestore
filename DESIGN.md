@@ -265,6 +265,76 @@ semantics. Note that SPARQL 1.2 Query is still a Working Draft (20 Aug 2026) whi
 is a Candidate Recommendation (7 Apr 2026) — so pin to RDF 1.2 semantics and treat the SPARQL
 surface as movable until CR.
 
+### The one operator that exists so far
+
+Everything above is the plan. What is *built* is a single physical operator, `holos_engine::
+bindjoin`, because measurement said it was the one thing missing rather than the next thing on
+a list.
+
+`spareval` joins by building a hash table from the left input and scanning the right input in
+full. Knowing that `?s` is bound to two hundred values does not help it, because there is no
+operator that can use the binding. On a three-pattern star over 753,199 quads that costs 43.9
+ms against 0.072 ms hand-written — a factor of 611, rising with the data. It was also what
+stopped the spatial index of §17 from paying off: narrowing fifty thousand geometries to four
+changes nothing if the join then scans all fifty thousand anyway. One missing operator, felt
+from two directions.
+
+An index nested-loop join closes it: **0.535 ms on the query path, about 82×**. The remaining
+10× to hand-written is generality — per-step re-estimation, hashed bindings, dictionary
+decoding — not a missing operator.
+
+**The fragment is deliberately tiny.** `SELECT` over one basic graph pattern in the default
+graph, with `DISTINCT`, `LIMIT`, `OFFSET` and a projection. Everything else is refused and
+falls back, so the fragment can grow later without the growth being a risk to what already
+works.
+
+**Ordering is chosen at each step, not once.** Once the first pattern binds `?s`, the others
+stop being predicate scans and become subject-and-predicate lookups — a different and far
+smaller estimate. Ordering once, before anything is bound, would miss exactly the effect the
+operator exists to exploit.
+
+**Policy is structural, per §14.1.** Scans go through the same `QueryableDataset` call
+`spareval` makes, so `decide_quad` runs on every quad. A fast path that read the store
+directly would be a way around the guarantee; this one has no such path available to it.
+
+**It may give up half way, and that is a feature.** This operator materialises where the
+evaluator streams. For the shapes it is for, the answer is small — that is the premise of the
+fragment. For a shape that slipped through and is not small, it is the difference between a
+slow query and a dead machine: `SELECT * WHERE { ?a ?b ?c . ?d ?e ?f }` over 20,000 triples is
+400 million rows, and it was found materialising 13.7 GB with its own 60 ms timeout unfired,
+because the cancellation token is consulted by the evaluator that had just been skipped. So
+evaluation now runs under a row budget and the deadline's token, and hitting either returns
+`None` — *ask the evaluator* — discarding the partial rows rather than returning them short.
+
+That bug is worth recording precisely, because nothing about it was *incorrect*. Given enough
+time and memory the answer would have been right. Being right eventually is a different
+property from being usable, and only the first was under test.
+
+**What the differential tests could not see.** Three bugs got past them, and they share a
+shape: the fast path took over a query carrying something it did not model. Comparing answers
+finds none of that directly, because two of the three do not change an answer. Besides the
+cross product, `QueryOptions::substitutions` was silently dropped — the gate read
+`touches_dataset`, which reports on the dataset, while a substitution changes the *query* —
+and `FROM` was ignored, which *did* return wrong rows: it lives in `Query::Select::dataset`,
+beside the pattern rather than inside it, so a check that reads only the pattern answers a
+different question over the store's default graph.
+
+**And the suites that should have caught them could not reach the code.** There are three
+ways into evaluation. The fast path was attached to `Engine::query_with`, reached by the HTTP
+server; the §15 conformance runner evaluates through `Engine::query_prepared_with_services`,
+and the Python binding and audited CLI path through `Engine::query` — both of which went
+straight to the evaluator. Roughly a thousand W3C queries appeared to cover this operator
+while executing none of it, and the most-used surface never received it.
+
+All three now share one `try_bind_join`, and a test compares their answers against the
+evaluator's so they cannot drift apart again. With the suites actually reaching it,
+`sparql10`, `sparql11` and `sparql12` are unchanged — the first real evidence the operator
+agrees with the evaluator on SPARQL nobody wrote for it.
+
+The general lesson is worth more than the operator: **a fast path attached to one entry point
+inherits the reputation of the test suites it never runs under.** Coverage is a property of
+the path taken, not of the tests that exist.
+
 ---
 
 ## 8. L4 — SHACL as a subsystem, not a library
@@ -822,6 +892,20 @@ shape's whole definition and then each blank-node focus node's data into the "ex
 graph. Only blank nodes reachable through report-structural predicates belong there. The
 third was real: `"aldi"^^xsd:integer` is a well-formed RDF term and not an integer, and
 SHACL calls that a violation — a datatype IRI comparison alone is not enough.
+
+### The SPARQL 1.0 suite was on disk and never run
+
+Added late, and the reason is worth keeping. `FROM` and `FROM NAMED` had no coverage in this
+tree at all: the SPARQL 1.1 suite contains exactly two queries using `FROM`, and both are
+`CONSTRUCT`. The nineteen tests that exercise dataset specification live in the SPARQL 1.0
+suite, which `scripts/fetch-testsuites.sh` has always cloned and no ratchet ever read.
+
+It went unnoticed because the newer suite looks like it supersedes the older one. It does not
+— SPARQL 1.1's manifests test what 1.1 *added*. Anything 1.0 settled is tested in 1.0's
+manifests and nowhere else.
+
+`sparql10` is now a ratchet of its own at **262/263**, its single known failure a parser gap
+upstream in `spargebra`.
 
 ### The skips are not a hiding place
 

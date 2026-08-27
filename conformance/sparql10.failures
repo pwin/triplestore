@@ -1,0 +1,3 @@
+# sparql10 — tests known to fail. Regenerate with HOLOS_UPDATE_CONFORMANCE=1.
+# 262/263 passed, 1 failed, 20 skipped
+http://www.w3.org/2001/sw/DataAccess/tests/data-r2/expr-builtin/manifest#case-insensitive-booleans	upstream: query did not parse: error at 1:23: expected ENCODE_FOR_URI

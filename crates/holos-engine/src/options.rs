@@ -55,8 +55,12 @@ pub struct QueryOptions {
     /// What neither layer stops is a query that blocks *inside a single step* without
     /// touching the store — a cross product over small relations already held in memory can
     /// spin for a long time between dataset reads. Bounding that needs cooperative
-    /// cancellation inside the join operators, which is upstream work. A row-count or
-    /// result-size cap is the practical defence, and this is not one.
+    /// cancellation inside the join operators, which is upstream work, and this is not a
+    /// row-count or result-size cap.
+    ///
+    /// One operator is an exception, because it is ours: [`crate::bindjoin`] reads this
+    /// token itself and runs under a row budget besides. It has to — it skips the evaluator,
+    /// and with it both layers above.
     pub timeout: Option<Duration>,
 
     /// Collect the query plan, with per-operator statistics.
@@ -109,7 +113,11 @@ impl QueryOptions {
 
     /// Binds a value to a variable without it passing through the parser.
     #[must_use]
-    pub fn with_substitution(mut self, variable: impl Into<Variable>, term: impl Into<Term>) -> Self {
+    pub fn with_substitution(
+        mut self,
+        variable: impl Into<Variable>,
+        term: impl Into<Term>,
+    ) -> Self {
         self.substitutions.push((variable.into(), term.into()));
         self
     }
