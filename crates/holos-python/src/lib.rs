@@ -77,7 +77,11 @@ fn term_to_py(py: Python<'_>, term: &Term) -> PyResult<Py<PyAny>> {
         Term::Literal(l) => {
             let dt = l.datatype();
             if dt == xsd::BOOLEAN {
-                (l.value() == "true").into_pyobject(py)?.to_owned().into_any().unbind()
+                (l.value() == "true")
+                    .into_pyobject(py)?
+                    .to_owned()
+                    .into_any()
+                    .unbind()
             } else if dt == xsd::INTEGER || dt == xsd::LONG || dt == xsd::INT {
                 match l.value().parse::<i64>() {
                     Ok(v) => v.into_pyobject(py)?.into_any().unbind(),
@@ -97,7 +101,8 @@ fn term_to_py(py: Python<'_>, term: &Term) -> PyResult<Py<PyAny>> {
 }
 
 fn parse_named_node(iri: &str) -> PyResult<NamedNode> {
-    NamedNode::new(iri).map_err(|e| PyValueError::new_err(format!("`{iri}` is not a valid IRI: {e}")))
+    NamedNode::new(iri)
+        .map_err(|e| PyValueError::new_err(format!("`{iri}` is not a valid IRI: {e}")))
 }
 
 // ---------------------------------------------------------------------------------
@@ -560,8 +565,7 @@ impl PyStore {
                     );
                     let mut rows = Vec::new();
                     for solution in solutions {
-                        let solution =
-                            solution.map_err(|e| HolosError::new_err(e.to_string()))?;
+                        let solution = solution.map_err(|e| HolosError::new_err(e.to_string()))?;
                         rows.push(
                             names
                                 .iter()
@@ -621,13 +625,12 @@ impl PyStore {
             let engine = outer.as_mut().ok_or_else(closed)?;
             let mut session = CoreSession::open(engine.store(), core_principal, core_policy)
                 .map_err(|e| PolicyError::new_err(e.to_string()))?;
-            holos_engine::update::update(engine, &mut session, &update, base.as_deref())
-                .map_err(|e| match e {
-                    holos_engine::EngineError::AccessDenied => {
-                        PolicyError::new_err(e.to_string())
-                    }
+            holos_engine::update::update(engine, &mut session, &update, base.as_deref()).map_err(
+                |e| match e {
+                    holos_engine::EngineError::AccessDenied => PolicyError::new_err(e.to_string()),
                     other => map_engine_error(&other),
-                })
+                },
+            )
         })?;
 
         let dict = PyDict::new(py);
@@ -644,8 +647,7 @@ impl PyStore {
     /// live store and is the only one that can revalidate a delta.
     #[pyo3(signature = (shapes, *, engine="adapted"))]
     fn validate(&self, py: Python<'_>, shapes: &str, engine: &str) -> PyResult<Py<PyAny>> {
-        let (conforms, count) =
-            py.detach(|| validate_against(&self.engine, shapes, engine))?;
+        let (conforms, count) = py.detach(|| validate_against(&self.engine, shapes, engine))?;
         let dict = PyDict::new(py);
         dict.set_item("conforms", conforms)?;
         dict.set_item("violations", count)?;
@@ -670,7 +672,10 @@ impl PyStore {
         if let Some(mut engine) = guard.take() {
             // Flush before dropping: a clean close means the next open replays no
             // write-ahead log.
-            engine.store_mut().flush().map_err(|e| map_store_error(&e))?;
+            engine
+                .store_mut()
+                .flush()
+                .map_err(|e| map_store_error(&e))?;
         }
         Ok(())
     }
@@ -718,7 +723,9 @@ enum Collected {
 fn open_persistent(path: &str) -> PyResult<Engine> {
     let storage = holos_store::RocksStorage::open(Path::new(path))
         .map_err(|e| PyIOError::new_err(format!("opening the store at {path}: {e}")))?;
-    Ok(Engine::with_store(holos_store::Store::with_storage(storage)))
+    Ok(Engine::with_store(holos_store::Store::with_storage(
+        storage,
+    )))
 }
 
 #[cfg(not(feature = "rocksdb"))]
@@ -740,9 +747,9 @@ fn py_to_term(value: &Bound<'_, PyAny>) -> PyResult<Term> {
     if let Ok(f) = value.extract::<f64>() {
         return Ok(Literal::from(f).into());
     }
-    let s: String = value.extract().map_err(|_| {
-        PyValueError::new_err("object must be a str, int, float or bool")
-    })?;
+    let s: String = value
+        .extract()
+        .map_err(|_| PyValueError::new_err("object must be a str, int, float or bool"))?;
     // A bare string that parses as an absolute IRI is meant as one; anything else is a
     // plain literal. Wrap in <> to force an IRI, or pass a literal to force a literal.
     if let Some(inner) = s.strip_prefix('<').and_then(|r| r.strip_suffix('>')) {
@@ -823,7 +830,9 @@ fn validate_against(
         "adapted" | "vendored" => {
             let mut run = holos_shacl::engine::EngineRun::prepare(guard.store(), options)
                 .map_err(|e| HolosError::new_err(e.to_string()))?;
-            let report = run.validate().map_err(|e| HolosError::new_err(e.to_string()))?;
+            let report = run
+                .validate()
+                .map_err(|e| HolosError::new_err(e.to_string()))?;
             Ok((run.conforms(&report), report.results.len()))
         }
         "native" => {

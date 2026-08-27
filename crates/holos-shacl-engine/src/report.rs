@@ -388,9 +388,10 @@ fn blank_tag(node: &NamedOrBlankNode) -> String {
 /// Relabels a blank node into one result's scope, leaving anything else alone.
 fn scoped(term: Term, tag: &str) -> Term {
     match term {
-        Term::BlankNode(b) => {
-            Term::BlankNode(oxrdf::BlankNode::new_unchecked(format!("{tag}_{}", b.as_str())))
-        }
+        Term::BlankNode(b) => Term::BlankNode(oxrdf::BlankNode::new_unchecked(format!(
+            "{tag}_{}",
+            b.as_str()
+        ))),
         other => other,
     }
 }

@@ -167,7 +167,10 @@ pub fn tick(
     for triple in &delta.added {
         let quad = into_scene(triple, &scene);
         let encoded = engine.store_mut().encode_quad(quad.as_ref())?;
-        if !session.policy(engine.store())?.permits_quad(encoded, Modes::WRITE) {
+        if !session
+            .policy(engine.store())?
+            .permits_quad(encoded, Modes::WRITE)
+        {
             undo(engine, &applied)?;
             return Err(HolonError::WriteDenied(holon.scene.clone()));
         }
@@ -317,10 +320,7 @@ pub fn projection<'a>(
     id: &NamedNode,
 ) -> Option<Result<spareval::QueryResults<'a>, HolonError>> {
     let projection = holon.projections.iter().find(|p| &p.id == id)?;
-    Some(
-        Engine::query(view, &projection.query, None)
-            .map_err(HolonError::from),
-    )
+    Some(Engine::query(view, &projection.query, None).map_err(HolonError::from))
 }
 
 fn into_scene(triple: &Triple, scene: &GraphName) -> Quad {

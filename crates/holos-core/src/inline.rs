@@ -110,8 +110,7 @@ fn encode_integer(value: &str) -> Option<TermId> {
     }
     // The range check above guarantees this lands in [0, 2^60), so the conversion is
     // total — expressing it as `try_from` rather than `as` keeps that guarantee checked.
-    let biased = u64::try_from(i128::from(v) + i128::from(INT_BIAS))
-        .expect("range-checked above");
+    let biased = u64::try_from(i128::from(v) + i128::from(INT_BIAS)).expect("range-checked above");
     Some(TermId::new(Tag::Integer, biased))
 }
 
@@ -159,7 +158,11 @@ fn order_preserving_f32(f: f32) -> u32 {
 }
 
 fn f32_from_order_preserving(ord: u32) -> f32 {
-    let bits = if ord & 0x8000_0000 == 0 { !ord } else { ord ^ 0x8000_0000 };
+    let bits = if ord & 0x8000_0000 == 0 {
+        !ord
+    } else {
+        ord ^ 0x8000_0000
+    };
     f32::from_bits(bits)
 }
 
@@ -191,9 +194,7 @@ fn encode_small_string(value: &str) -> Option<TermId> {
     }
     Some(TermId::new(
         Tag::Small,
-        (packed << SMALL_BYTES_SHIFT)
-            | ((bytes.len() as u64) << SMALL_LEN_SHIFT)
-            | SMALL_KIND_STR,
+        (packed << SMALL_BYTES_SHIFT) | ((bytes.len() as u64) << SMALL_LEN_SHIFT) | SMALL_KIND_STR,
     ))
     // `bytes.len()` is at most MAX_INLINE_STR, checked at the top of this function.
 }
@@ -201,7 +202,11 @@ fn encode_small_string(value: &str) -> Option<TermId> {
 fn decode_small(payload: u64) -> Option<Literal> {
     match payload & SMALL_KIND_MASK {
         SMALL_KIND_BOOL => Some(Literal::new_typed_literal(
-            if payload & SMALL_BOOL_BIT == 0 { "false" } else { "true" },
+            if payload & SMALL_BOOL_BIT == 0 {
+                "false"
+            } else {
+                "true"
+            },
             xsd::BOOLEAN,
         )),
         SMALL_KIND_STR => {
@@ -249,8 +254,7 @@ fn encode_date_time(value: &str) -> Option<TermId> {
     let second: i64 = second_str.parse().ok()?;
 
     let days = days_from_civil(year, i64::from(dt.month()), i64::from(dt.day()));
-    let secs =
-        days * 86_400 + i64::from(dt.hour()) * 3_600 + i64::from(dt.minute()) * 60 + second;
+    let secs = days * 86_400 + i64::from(dt.hour()) * 3_600 + i64::from(dt.minute()) * 60 + second;
     // Years 1..=9999 keep `secs` far inside the biased 60-bit window.
     Some(TermId::new(
         Tag::DateTime,

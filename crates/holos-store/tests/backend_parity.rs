@@ -193,8 +193,9 @@ fn the_two_backends_agree_on_everything() -> Result<()> {
         "term ids must be a function of the data, not of the backend"
     );
 
-    for ((label, from_memory), (_, from_rocks)) in
-        all_patterns(&memory)?.into_iter().zip(all_patterns(&rocks)?)
+    for ((label, from_memory), (_, from_rocks)) in all_patterns(&memory)?
+        .into_iter()
+        .zip(all_patterns(&rocks)?)
     {
         assert_eq!(from_memory, from_rocks, "pattern {label} disagrees");
     }
@@ -239,7 +240,10 @@ fn deletes_agree_too() -> Result<()> {
         rocks.remove_named_graph(nn("g1").as_ref().into())?
     );
     assert_eq!(memory.len(), rocks.len());
-    for ((label, a), (_, b)) in all_patterns(&memory)?.into_iter().zip(all_patterns(&rocks)?) {
+    for ((label, a), (_, b)) in all_patterns(&memory)?
+        .into_iter()
+        .zip(all_patterns(&rocks)?)
+    {
         assert_eq!(a, b, "after deletion, pattern {label} disagrees");
     }
     Ok(())
@@ -279,7 +283,10 @@ fn data_survives_a_reopen() -> Result<()> {
         .map(|q| Ok(q?.to_string()))
         .collect::<Result<Vec<_>>>()?;
     rows.sort();
-    assert_eq!(rows, expected_rows, "every quad decoded the same after reopen");
+    assert_eq!(
+        rows, expected_rows,
+        "every quad decoded the same after reopen"
+    );
     assert_eq!(
         reopened.predicate_histogram(),
         expected_stats,
@@ -318,7 +325,10 @@ fn a_reopened_store_keeps_allocating_fresh_ids() -> Result<()> {
         }
         .as_ref(),
     )?;
-    assert_ne!(first.subject, second.subject, "IRI ids must not be reissued");
+    assert_ne!(
+        first.subject, second.subject,
+        "IRI ids must not be reissued"
+    );
     assert_ne!(
         first.object, second.object,
         "literal ids must not be reissued"
@@ -366,7 +376,10 @@ fn long_literals_take_the_hashed_key_path_and_stay_distinct() -> Result<()> {
             Some(Term::Literal(a.clone())),
             "long literal round trip"
         );
-        assert_eq!(store.decode_term(ib.object)?, Some(Term::Literal(b.clone())));
+        assert_eq!(
+            store.decode_term(ib.object)?,
+            Some(Term::Literal(b.clone()))
+        );
         // Re-interning must find the existing id, not allocate a second one.
         assert_eq!(store.lookup_term(a.as_ref().into())?, Some(ia.object));
         assert_eq!(store.lookup_term(b.as_ref().into())?, Some(ib.object));
@@ -412,7 +425,11 @@ fn a_bulk_load_stores_exactly_what_an_ordinary_load_does() -> Result<()> {
 
     assert_eq!(bulk.len(), quads.len(), "every quad survived the bulk load");
     assert_eq!(plain.len(), bulk.len(), "quad count");
-    assert_eq!(plain.dictionary_len(), bulk.dictionary_len(), "dictionary size");
+    assert_eq!(
+        plain.dictionary_len(),
+        bulk.dictionary_len(),
+        "dictionary size"
+    );
     assert_eq!(
         plain.predicate_histogram(),
         bulk.predicate_histogram(),
@@ -426,11 +443,18 @@ fn a_bulk_load_stores_exactly_what_an_ordinary_load_does() -> Result<()> {
     assert_eq!(plain_graphs, bulk_graphs, "named graphs");
 
     let rows = |s: &Store| -> Result<Vec<String>> {
-        let mut v: Vec<String> = s.iter().map(|q| Ok(q?.to_string())).collect::<Result<_>>()?;
+        let mut v: Vec<String> = s
+            .iter()
+            .map(|q| Ok(q?.to_string()))
+            .collect::<Result<_>>()?;
         v.sort();
         Ok(v)
     };
-    assert_eq!(rows(&plain)?, rows(&bulk)?, "every quad decodes identically");
+    assert_eq!(
+        rows(&plain)?,
+        rows(&bulk)?,
+        "every quad decodes identically"
+    );
     Ok(())
 }
 

@@ -15,9 +15,9 @@ use crate::TabularError;
 use holos_engine::Engine;
 use holos_security::Session;
 use oxrdf::{Literal, Triple, Variable};
+use spareval::QueryResults;
 use spargebra::algebra::GraphPattern;
 use spargebra::term::GroundTerm;
-use spareval::QueryResults;
 
 /// The variable carrying the current row number.
 ///
@@ -158,9 +158,12 @@ impl Mapping {
 
         let bound = self.with_values(variables, bindings);
         if std::env::var("HOLOS_TABULAR_DEBUG").is_ok() {
-            eprintln!("--- rewritten mapping ---
+            eprintln!(
+                "--- rewritten mapping ---
 {}
----", bound.to_sse());
+---",
+                bound.to_sse()
+            );
         }
         let view = engine.view(session);
         let results = Engine::query_prepared(&view, &bound)?;
@@ -327,10 +330,7 @@ fn inject(
     }
 }
 
-fn collect_pattern_variables(
-    pattern: &GraphPattern,
-    out: &mut std::collections::BTreeSet<String>,
-) {
+fn collect_pattern_variables(pattern: &GraphPattern, out: &mut std::collections::BTreeSet<String>) {
     use spargebra::term::{NamedNodePattern, TermPattern};
     match pattern {
         GraphPattern::Bgp { patterns } => {
@@ -449,7 +449,10 @@ mod tests {
         .expect("mapping");
         let vars = m.variables();
         for expected in ["s", "name", "id", "keep"] {
-            assert!(vars.contains(&expected.to_owned()), "missing {expected} in {vars:?}");
+            assert!(
+                vars.contains(&expected.to_owned()),
+                "missing {expected} in {vars:?}"
+            );
         }
     }
 }

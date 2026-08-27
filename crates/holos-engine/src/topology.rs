@@ -534,11 +534,7 @@ fn side(
 /// alternatives the path expression stood for — the zero-length hop, and each of the two
 /// properties — so the answer is unchanged, including the duplicate a resource carrying both
 /// spellings produces.
-fn geometry_path(
-    resource: &TermPattern,
-    target: &Variable,
-    counter: &mut usize,
-) -> GraphPattern {
+fn geometry_path(resource: &TermPattern, target: &Variable, counter: &mut usize) -> GraphPattern {
     let direct = GraphPattern::Bgp {
         patterns: vec![TriplePattern {
             subject: resource.clone(),
@@ -608,7 +604,11 @@ mod tests {
         for name in RELATIONS {
             assert_eq!(relation_of(&format!("{GEO}{name}")), Some(name));
         }
-        assert_eq!(RELATIONS.len(), 24, "8 Simple Features + 8 Egenhofer + 8 RCC8");
+        assert_eq!(
+            RELATIONS.len(),
+            24,
+            "8 Simple Features + 8 Egenhofer + 8 RCC8"
+        );
     }
 
     #[test]
@@ -696,10 +696,7 @@ mod tests {
             "{PREFIXES} SELECT ?f WHERE {{ ?f geo:sfWithin \"POLYGON((0 0,1 0,1 1,0 0))\"^^geo:wktLiteral }}"
         ));
         let text = rewrite(&q, None).to_string();
-        assert!(
-            text.contains("geosparql/sfWithin"),
-            "not rewritten: {text}"
-        );
+        assert!(text.contains("geosparql/sfWithin"), "not rewritten: {text}");
         assert!(
             text.contains("POLYGON((0 0,1 0,1 1,0 0))"),
             "the literal was lost: {text}"
@@ -707,7 +704,10 @@ mod tests {
         // The literal goes straight into the function call rather than through a variable.
         // (The resource side still allocates temporaries — one for the WKT target and one
         // per `hasGeometry` branch — which is what `geometry_path` is for.)
-        assert!(text.contains(&format!("{TEMP}0")), "no WKT target variable: {text}");
+        assert!(
+            text.contains(&format!("{TEMP}0")),
+            "no WKT target variable: {text}"
+        );
         assert!(
             text.contains("sfWithin>(?_topo_wkt_0, \"POLYGON"),
             "the literal was routed through a variable instead of used directly: {text}"

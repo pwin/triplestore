@@ -515,7 +515,10 @@ fn attribute(
     let Ok(dataset) = reference_dataset(test) else {
         return Outcome::Failed(failure);
     };
-    let Ok(oracle) = spareval::QueryEvaluator::new().prepare(query).execute(&dataset) else {
+    let Ok(oracle) = spareval::QueryEvaluator::new()
+        .prepare(query)
+        .execute(&dataset)
+    else {
         return Outcome::Failed(failure);
     };
     // Re-run HOLOS so both answers come from a fresh evaluation.
@@ -583,24 +586,36 @@ fn compare_two(
 ) -> std::result::Result<(), String> {
     match (a, b) {
         (QueryResults::Boolean(x), QueryResults::Boolean(y)) if x == y => Ok(()),
-        (QueryResults::Boolean(x), QueryResults::Boolean(y)) => {
-            Err(format!("boolean {x} vs {y}"))
-        }
+        (QueryResults::Boolean(x), QueryResults::Boolean(y)) => Err(format!("boolean {x} vs {y}")),
         (QueryResults::Solutions(x), QueryResults::Solutions(y)) => {
-            let xs: Vec<_> = x.collect::<std::result::Result<_, _>>().map_err(|e| e.to_string())?;
-            let ys: Vec<_> = y.collect::<std::result::Result<_, _>>().map_err(|e| e.to_string())?;
+            let xs: Vec<_> = x
+                .collect::<std::result::Result<_, _>>()
+                .map_err(|e| e.to_string())?;
+            let ys: Vec<_> = y
+                .collect::<std::result::Result<_, _>>()
+                .map_err(|e| e.to_string())?;
             compare_solutions(&ys, &xs, ordered)
         }
         (QueryResults::Graph(x), QueryResults::Graph(y)) => {
             let mut gx = Dataset::new();
             for t in x {
                 let t = t.map_err(|e| e.to_string())?;
-                gx.insert(&Quad { subject: t.subject, predicate: t.predicate, object: t.object, graph_name: GraphName::DefaultGraph });
+                gx.insert(&Quad {
+                    subject: t.subject,
+                    predicate: t.predicate,
+                    object: t.object,
+                    graph_name: GraphName::DefaultGraph,
+                });
             }
             let mut gy = Dataset::new();
             for t in y {
                 let t = t.map_err(|e| e.to_string())?;
-                gy.insert(&Quad { subject: t.subject, predicate: t.predicate, object: t.object, graph_name: GraphName::DefaultGraph });
+                gy.insert(&Quad {
+                    subject: t.subject,
+                    predicate: t.predicate,
+                    object: t.object,
+                    graph_name: GraphName::DefaultGraph,
+                });
             }
             compare_datasets(&gy, &gx)
         }
@@ -652,11 +667,9 @@ fn compare_results(
                     graph_name: GraphName::DefaultGraph,
                 });
             }
-            let expected = manifest::parse_dataset(
-                expected_path,
-                &manifest::path_to_file_url(expected_path),
-            )
-            .map_err(|e| format!("upstream: expected graph did not parse: {e}"))?;
+            let expected =
+                manifest::parse_dataset(expected_path, &manifest::path_to_file_url(expected_path))
+                    .map_err(|e| format!("upstream: expected graph did not parse: {e}"))?;
             let _ = view; // graph results carry no view-specific state
             compare_datasets(&expected, &got)
         }
@@ -723,14 +736,19 @@ pub fn ratchet_named(name: &str, failed: &[(String, String)]) {
         "{name}: {} test(s) on the known-failure list now pass:\n  {}\n\nRe-baseline with \
          HOLOS_UPDATE_CONFORMANCE=1 — a stale list is a list nobody trusts.",
         fixed.len(),
-        fixed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n  ")
+        fixed
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
     );
 }
 
 /// Marker for the one result encoding the harness cannot read: results serialised as RDF
 /// (the old DAWG `rs:ResultSet` vocabulary). Reported as a skip, because it says nothing
 /// about the engine.
-const UNREADABLE_RESULT_FORMAT: &str = "expected results are encoded as RDF, which the harness does not read";
+const UNREADABLE_RESULT_FORMAT: &str =
+    "expected results are encoded as RDF, which the harness does not read";
 
 fn results_format(path: &Path) -> Option<QueryResultsFormat> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
@@ -779,9 +797,9 @@ fn read_expected_solutions(path: &Path) -> std::result::Result<Vec<QuerySolution
         .for_reader(reader)
         .map_err(|e| e.to_string())?
     {
-        ReaderQueryResultsParserOutput::Solutions(iter) => iter
-            .map(|s| s.map_err(|e| e.to_string()))
-            .collect(),
+        ReaderQueryResultsParserOutput::Solutions(iter) => {
+            iter.map(|s| s.map_err(|e| e.to_string())).collect()
+        }
         ReaderQueryResultsParserOutput::Boolean(_) => {
             Err("expected solutions, file holds a boolean".to_owned())
         }
@@ -819,7 +837,10 @@ fn compare_solutions(
         }
         return Ok(());
     }
-    compare_datasets(&solutions_as_dataset(expected), &solutions_as_dataset(actual))
+    compare_datasets(
+        &solutions_as_dataset(expected),
+        &solutions_as_dataset(actual),
+    )
 }
 
 fn has_blank_nodes(solutions: &[QuerySolution]) -> bool {

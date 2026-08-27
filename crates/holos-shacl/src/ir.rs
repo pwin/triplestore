@@ -282,17 +282,13 @@ impl Shapes {
     /// rather than the size of the graph (`DESIGN.md` §8).
     #[must_use]
     pub fn shapes_touching(&self, predicate: TermId) -> &[ShapeIdx] {
-        self.by_predicate
-            .get(&predicate)
-            .map_or(&[], Vec::as_slice)
+        self.by_predicate.get(&predicate).map_or(&[], Vec::as_slice)
     }
 
     /// Shapes targeting a class.
     #[must_use]
     pub fn shapes_targeting_class(&self, class: TermId) -> &[ShapeIdx] {
-        self.by_target_class
-            .get(&class)
-            .map_or(&[], Vec::as_slice)
+        self.by_target_class.get(&class).map_or(&[], Vec::as_slice)
     }
 
     /// The targeted shapes a shape is evaluated under.
@@ -408,7 +404,10 @@ impl<'a> Compiler<'a> {
                 by_predicate.entry(predicate).or_default().push(idx);
             }
         }
-        for shapes in by_predicate.values_mut().chain(by_target_class.values_mut()) {
+        for shapes in by_predicate
+            .values_mut()
+            .chain(by_target_class.values_mut())
+        {
             shapes.sort_unstable();
             shapes.dedup();
         }
@@ -628,7 +627,10 @@ impl<'a> Compiler<'a> {
             out.push(Constraint::MaxCount(v));
         }
         for (parameter, make) in [
-            (sh.min_inclusive, Constraint::MinInclusive as fn(TermId) -> Constraint),
+            (
+                sh.min_inclusive,
+                Constraint::MinInclusive as fn(TermId) -> Constraint,
+            ),
             (sh.max_inclusive, Constraint::MaxInclusive),
             (sh.min_exclusive, Constraint::MinExclusive),
             (sh.max_exclusive, Constraint::MaxExclusive),
@@ -649,7 +651,9 @@ impl<'a> Compiler<'a> {
             out.push(Constraint::MaxLength(v));
         }
         for p in g.objects(node, sh.pattern)? {
-            let Some(source) = self.string(p) else { continue };
+            let Some(source) = self.string(p) else {
+                continue;
+            };
             let flags = g.object(node, sh.flags)?.and_then(|f| self.string(f));
             let mut builder = RegexBuilder::new(&source);
             if let Some(flags) = &flags {
@@ -722,8 +726,7 @@ impl<'a> Compiler<'a> {
             let max = g
                 .object(node, sh.qualified_max_count)?
                 .and_then(|v| self.integer(v));
-            let disjoint =
-                matches!(g.object(node, sh.qualified_value_shapes_disjoint)?, Some(v) if self.is_true(v));
+            let disjoint = matches!(g.object(node, sh.qualified_value_shapes_disjoint)?, Some(v) if self.is_true(v));
             let siblings = if disjoint {
                 self.sibling_qualified_shapes(node)?
             } else {
@@ -788,7 +791,13 @@ impl<'a> Compiler<'a> {
 
     fn node_kind_spec(&self, kind: TermId) -> Option<NodeKindSpec> {
         let sh = self.sh;
-        let spec = |iri, blank, literal| Some(NodeKindSpec { iri, blank, literal });
+        let spec = |iri, blank, literal| {
+            Some(NodeKindSpec {
+                iri,
+                blank,
+                literal,
+            })
+        };
         match kind {
             k if k == sh.iri => spec(true, false, false),
             k if k == sh.blank_node => spec(false, true, false),

@@ -169,7 +169,10 @@ mod tests {
             "the stale policy is the permissive one — this is the hazard"
         );
         assert!(
-            !session.policy(&store).unwrap().permits_quad(quad, Modes::READ),
+            !session
+                .policy(&store)
+                .unwrap()
+                .permits_quad(quad, Modes::READ),
             "going through policy() must recompile and start denying"
         );
     }

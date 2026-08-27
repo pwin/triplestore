@@ -132,8 +132,8 @@ fn probe(engine: &Engine, session: &Session, entry: &Probe) -> Result<usize, Str
             Literal::new_simple_literal("from the endpoint"),
             GraphName::DefaultGraph,
         )]);
-        let handler = holos_engine::service::LocalServiceHandler::new()
-            .with_endpoint(ex("remote"), remote);
+        let handler =
+            holos_engine::service::LocalServiceHandler::new().with_endpoint(ex("remote"), remote);
         let parsed = spargebra::SparqlParser::new()
             .parse_query(&entry.sparql)
             .map_err(|e| e.to_string())?;
@@ -187,9 +187,24 @@ fn functional_forms() -> Vec<Probe> {
     vec![
         p("BOUND", "17.4.1.1", expr("BOUND(?x)"), ""),
         p("IF", "17.4.1.2", expr(r#"IF(true, "y", "n")"#), ""),
-        p("COALESCE", "17.4.1.3", expr(r#"COALESCE(?missing, "fallback")"#), ""),
-        p("EXISTS", "17.4.1.4", over_data("?s ex:name ?n FILTER EXISTS { ?s ex:age ?a }"), ""),
-        p("NOT EXISTS", "17.4.1.5", over_data("?s ex:name ?n FILTER NOT EXISTS { ?s ex:age ?a }"), ""),
+        p(
+            "COALESCE",
+            "17.4.1.3",
+            expr(r#"COALESCE(?missing, "fallback")"#),
+            "",
+        ),
+        p(
+            "EXISTS",
+            "17.4.1.4",
+            over_data("?s ex:name ?n FILTER EXISTS { ?s ex:age ?a }"),
+            "",
+        ),
+        p(
+            "NOT EXISTS",
+            "17.4.1.5",
+            over_data("?s ex:name ?n FILTER NOT EXISTS { ?s ex:age ?a }"),
+            "",
+        ),
         p("logical &&", "17.4.1.6", expr("(true && false)"), ""),
         p("logical ||", "17.4.1.7", expr("(true || false)"), ""),
         p("RDFterm-equal (=)", "17.4.1.8", expr(r#"("a" = "a")"#), ""),
@@ -201,17 +216,37 @@ fn functional_forms() -> Vec<Probe> {
 
 fn term_functions() -> Vec<Probe> {
     vec![
-        p("isIRI / isURI", "17.4.2.1", expr("isIRI(ex:a)"), "`isURI` is a synonym"),
+        p(
+            "isIRI / isURI",
+            "17.4.2.1",
+            expr("isIRI(ex:a)"),
+            "`isURI` is a synonym",
+        ),
         p("isBlank", "17.4.2.2", expr("isBlank(BNODE())"), ""),
         p("isLiteral", "17.4.2.3", expr(r#"isLiteral("a")"#), ""),
         p("isNumeric", "17.4.2.4", expr("isNumeric(1)"), ""),
         p("STR", "17.4.2.5", expr("STR(1)"), ""),
         p("LANG", "17.4.2.6", expr(r#"LANG("a"@en)"#), ""),
         p("DATATYPE", "17.4.2.7", expr("STR(DATATYPE(1))"), ""),
-        p("IRI / URI", "17.4.2.8", expr(r#"STR(IRI("http://e/x"))"#), "`URI` is a synonym"),
+        p(
+            "IRI / URI",
+            "17.4.2.8",
+            expr(r#"STR(IRI("http://e/x"))"#),
+            "`URI` is a synonym",
+        ),
         p("BNODE", "17.4.2.9", expr("isBlank(BNODE())"), ""),
-        p("STRDT", "17.4.2.10", expr(r#"STR(STRDT("1", xsd:integer))"#), ""),
-        p("STRLANG", "17.4.2.11", expr(r#"LANG(STRLANG("x", "en"))"#), ""),
+        p(
+            "STRDT",
+            "17.4.2.10",
+            expr(r#"STR(STRDT("1", xsd:integer))"#),
+            "",
+        ),
+        p(
+            "STRLANG",
+            "17.4.2.11",
+            expr(r#"LANG(STRLANG("x", "en"))"#),
+            "",
+        ),
         p("UUID", "17.4.2.12", expr("STR(UUID())"), ""),
         p("STRUUID", "17.4.2.13", expr("STRLEN(STRUUID())"), ""),
     ]
@@ -223,16 +258,41 @@ fn string_functions() -> Vec<Probe> {
         p("SUBSTR", "17.4.3.3", expr(r#"SUBSTR("abcdef", 2, 3)"#), ""),
         p("UCASE", "17.4.3.4", expr(r#"UCASE("ab")"#), ""),
         p("LCASE", "17.4.3.5", expr(r#"LCASE("AB")"#), ""),
-        p("STRSTARTS", "17.4.3.6", expr(r#"STRSTARTS("abc", "a")"#), ""),
+        p(
+            "STRSTARTS",
+            "17.4.3.6",
+            expr(r#"STRSTARTS("abc", "a")"#),
+            "",
+        ),
         p("STRENDS", "17.4.3.7", expr(r#"STRENDS("abc", "c")"#), ""),
         p("CONTAINS", "17.4.3.8", expr(r#"CONTAINS("abc", "b")"#), ""),
-        p("STRBEFORE", "17.4.3.9", expr(r#"STRBEFORE("abc", "b")"#), ""),
+        p(
+            "STRBEFORE",
+            "17.4.3.9",
+            expr(r#"STRBEFORE("abc", "b")"#),
+            "",
+        ),
         p("STRAFTER", "17.4.3.10", expr(r#"STRAFTER("abc", "b")"#), ""),
-        p("ENCODE_FOR_URI", "17.4.3.11", expr(r#"ENCODE_FOR_URI("a b")"#), ""),
+        p(
+            "ENCODE_FOR_URI",
+            "17.4.3.11",
+            expr(r#"ENCODE_FOR_URI("a b")"#),
+            "",
+        ),
         p("CONCAT", "17.4.3.12", expr(r#"CONCAT("a", "b")"#), ""),
-        p("langMatches", "17.4.3.13", expr(r#"langMatches("en-GB", "en")"#), ""),
+        p(
+            "langMatches",
+            "17.4.3.13",
+            expr(r#"langMatches("en-GB", "en")"#),
+            "",
+        ),
         p("REGEX", "17.4.3.14", expr(r#"REGEX("abc", "^a")"#), ""),
-        p("REPLACE", "17.4.3.15", expr(r#"REPLACE("abc", "b", "X")"#), ""),
+        p(
+            "REPLACE",
+            "17.4.3.15",
+            expr(r#"REPLACE("abc", "b", "X")"#),
+            "",
+        ),
     ]
 }
 
@@ -271,7 +331,12 @@ fn hash_functions() -> Vec<Probe> {
 }
 
 fn aggregates() -> Vec<Probe> {
-    let agg = |a: &str| format!("{} SELECT ({a} AS ?v) WHERE {{ ?s ex:name ?n }}", prefixes());
+    let agg = |a: &str| {
+        format!(
+            "{} SELECT ({a} AS ?v) WHERE {{ ?s ex:name ?n }}",
+            prefixes()
+        )
+    };
     vec![
         p("COUNT", "18.5.1.1", agg("COUNT(?n)"), ""),
         p("COUNT(DISTINCT)", "18.5.1.1", agg("COUNT(DISTINCT ?n)"), ""),
@@ -279,7 +344,12 @@ fn aggregates() -> Vec<Probe> {
         p("MIN", "18.5.1.3", agg("MIN(?n)"), ""),
         p("MAX", "18.5.1.4", agg("MAX(?n)"), ""),
         p("AVG", "18.5.1.5", agg("AVG(STRLEN(?n))"), ""),
-        p("GROUP_CONCAT", "18.5.1.6", agg("GROUP_CONCAT(?n; SEPARATOR=\",\")"), ""),
+        p(
+            "GROUP_CONCAT",
+            "18.5.1.6",
+            agg("GROUP_CONCAT(?n; SEPARATOR=\",\")"),
+            "",
+        ),
         p("SAMPLE", "18.5.1.7", agg("SAMPLE(?n)"), ""),
     ]
 }
@@ -292,29 +362,59 @@ fn casts() -> Vec<Probe> {
         p("xsd:double", "17.5", expr(r#"xsd:double("4.2")"#), ""),
         p("xsd:string", "17.5", expr("xsd:string(42)"), ""),
         p("xsd:boolean", "17.5", expr(r#"xsd:boolean("true")"#), ""),
-        p("xsd:dateTime", "17.5", expr(r#"STR(xsd:dateTime("2026-01-01T00:00:00Z"))"#), ""),
+        p(
+            "xsd:dateTime",
+            "17.5",
+            expr(r#"STR(xsd:dateTime("2026-01-01T00:00:00Z"))"#),
+            "",
+        ),
     ]
 }
 
 fn sparql12() -> Vec<Probe> {
     let t = "TRIPLE(ex:s, ex:p, ex:o)";
     vec![
-        p("TRIPLE", "1.2", expr(&format!("isTRIPLE({t})")), "constructs a triple term"),
+        p(
+            "TRIPLE",
+            "1.2",
+            expr(&format!("isTRIPLE({t})")),
+            "constructs a triple term",
+        ),
         p("isTRIPLE", "1.2", expr(&format!("isTRIPLE({t})")), ""),
         p("SUBJECT", "1.2", expr(&format!("STR(SUBJECT({t}))")), ""),
-        p("PREDICATE", "1.2", expr(&format!("STR(PREDICATE({t}))")), ""),
+        p(
+            "PREDICATE",
+            "1.2",
+            expr(&format!("STR(PREDICATE({t}))")),
+            "",
+        ),
         p("OBJECT", "1.2", expr(&format!("STR(OBJECT({t}))")), ""),
-        p("LANGDIR", "1.2", expr(r#"LANGDIR("x"@en--ltr)"#), "base direction of a literal"),
+        p(
+            "LANGDIR",
+            "1.2",
+            expr(r#"LANGDIR("x"@en--ltr)"#),
+            "base direction of a literal",
+        ),
         p("hasLANG", "1.2", expr(r#"hasLANG("x"@en)"#), ""),
         p("hasLANGDIR", "1.2", expr(r#"hasLANGDIR("x"@en--ltr)"#), ""),
-        p("STRLANGDIR", "1.2", expr(r#"LANGDIR(STRLANGDIR("x", "en", "ltr"))"#), ""),
+        p(
+            "STRLANGDIR",
+            "1.2",
+            expr(r#"LANGDIR(STRLANGDIR("x", "en", "ltr"))"#),
+            "",
+        ),
         p(
             "triple term pattern",
             "1.2",
             over_data("?r rdf:reifies <<( ex:alice ex:name \"Alice\" )>>"),
             "matches a triple term in object position; zero rows here is correct",
         ),
-        p("VERSION", "1.2", format!("VERSION \"1.2\" {} SELECT * WHERE {{}}", prefixes()), ""),
+        p(
+            "VERSION",
+            "1.2",
+            format!("VERSION \"1.2\" {} SELECT * WHERE {{}}", prefixes()),
+            "",
+        ),
     ]
 }
 
@@ -322,62 +422,242 @@ fn geosparql() -> Vec<Probe> {
     let wkt = r#""POINT(1 1)"^^geo:wktLiteral"#;
     let poly = r#""POLYGON((0 0,0 3,3 3,3 0,0 0))"^^geo:wktLiteral"#;
     vec![
-        p("geof:distance", "GeoSPARQL", expr(&format!("geof:distance({wkt}, {wkt}, uom:metre)")), ""),
-        p("geof:sfWithin", "GeoSPARQL", expr(&format!("geof:sfWithin({wkt}, {poly})")), "Simple Features"),
-        p("geof:ehContains", "GeoSPARQL", expr(&format!("geof:ehContains({poly}, {wkt})")), "Egenhofer"),
-        p("geof:rcc8ntpp", "GeoSPARQL", expr(&format!("geof:rcc8ntpp({wkt}, {poly})")), "RCC8"),
-        p("geof:buffer", "GeoSPARQL", expr(&format!("geof:area(geof:buffer({wkt}, 1, uom:metre), uom:square_metre)")), "**added by HOLOS**"),
-        p("geof:boundary", "GeoSPARQL", expr(&format!("STRLEN(STR(geof:boundary({poly})))")), "**added by HOLOS**"),
-        p("geof:envelope", "GeoSPARQL", expr(&format!("STRLEN(STR(geof:envelope({poly})))")), ""),
-        p("geof:convexHull", "GeoSPARQL", expr(&format!("STRLEN(STR(geof:convexHull({poly})))")), ""),
-        p("geof:area", "GeoSPARQL", expr(&format!("geof:area({poly}, uom:square_metre)")), ""),
-        p("geof:union", "GeoSPARQL", expr(&format!("STRLEN(STR(geof:union({wkt}, {poly})))")), ""),
-        p("geof:asGeoJSON", "GeoSPARQL", expr(&format!("STRLEN(STR(geof:asGeoJSON({wkt})))")), ""),
+        p(
+            "geof:distance",
+            "GeoSPARQL",
+            expr(&format!("geof:distance({wkt}, {wkt}, uom:metre)")),
+            "",
+        ),
+        p(
+            "geof:sfWithin",
+            "GeoSPARQL",
+            expr(&format!("geof:sfWithin({wkt}, {poly})")),
+            "Simple Features",
+        ),
+        p(
+            "geof:ehContains",
+            "GeoSPARQL",
+            expr(&format!("geof:ehContains({poly}, {wkt})")),
+            "Egenhofer",
+        ),
+        p(
+            "geof:rcc8ntpp",
+            "GeoSPARQL",
+            expr(&format!("geof:rcc8ntpp({wkt}, {poly})")),
+            "RCC8",
+        ),
+        p(
+            "geof:buffer",
+            "GeoSPARQL",
+            expr(&format!(
+                "geof:area(geof:buffer({wkt}, 1, uom:metre), uom:square_metre)"
+            )),
+            "**added by HOLOS**",
+        ),
+        p(
+            "geof:boundary",
+            "GeoSPARQL",
+            expr(&format!("STRLEN(STR(geof:boundary({poly})))")),
+            "**added by HOLOS**",
+        ),
+        p(
+            "geof:envelope",
+            "GeoSPARQL",
+            expr(&format!("STRLEN(STR(geof:envelope({poly})))")),
+            "",
+        ),
+        p(
+            "geof:convexHull",
+            "GeoSPARQL",
+            expr(&format!("STRLEN(STR(geof:convexHull({poly})))")),
+            "",
+        ),
+        p(
+            "geof:area",
+            "GeoSPARQL",
+            expr(&format!("geof:area({poly}, uom:square_metre)")),
+            "",
+        ),
+        p(
+            "geof:union",
+            "GeoSPARQL",
+            expr(&format!("STRLEN(STR(geof:union({wkt}, {poly})))")),
+            "",
+        ),
+        p(
+            "geof:asGeoJSON",
+            "GeoSPARQL",
+            expr(&format!("STRLEN(STR(geof:asGeoJSON({wkt})))")),
+            "",
+        ),
     ]
 }
 
 fn extension_libraries() -> Vec<Probe> {
     let fnf = |local: &str, args: &str| {
-        expr(&format!("<http://www.w3.org/2005/xpath-functions#{local}>({args})"))
+        expr(&format!(
+            "<http://www.w3.org/2005/xpath-functions#{local}>({args})"
+        ))
     };
     let afn = |local: &str, args: &str| {
-        expr(&format!("<http://jena.apache.org/ARQ/function#{local}>({args})"))
+        expr(&format!(
+            "<http://jena.apache.org/ARQ/function#{local}>({args})"
+        ))
     };
-    let spif = |local: &str, args: &str| {
-        expr(&format!("<http://spinrdf.org/spif#{local}>({args})"))
-    };
+    let spif =
+        |local: &str, args: &str| expr(&format!("<http://spinrdf.org/spif#{local}>({args})"));
     vec![
         p("fn:upper-case", "F&O", fnf("upper-case", "\"ab\""), ""),
         p("fn:lower-case", "F&O", fnf("lower-case", "\"AB\""), ""),
-        p("fn:string-length", "F&O", fnf("string-length", "\"abc\""), "counts characters, not bytes"),
-        p("fn:substring", "F&O", fnf("substring", "\"abcdef\", 2, 3"), "**1-based**, with a length"),
-        p("fn:substring-before", "F&O", fnf("substring-before", "\"abc\", \"b\""), ""),
-        p("fn:substring-after", "F&O", fnf("substring-after", "\"abc\", \"b\""), ""),
+        p(
+            "fn:string-length",
+            "F&O",
+            fnf("string-length", "\"abc\""),
+            "counts characters, not bytes",
+        ),
+        p(
+            "fn:substring",
+            "F&O",
+            fnf("substring", "\"abcdef\", 2, 3"),
+            "**1-based**, with a length",
+        ),
+        p(
+            "fn:substring-before",
+            "F&O",
+            fnf("substring-before", "\"abc\", \"b\""),
+            "",
+        ),
+        p(
+            "fn:substring-after",
+            "F&O",
+            fnf("substring-after", "\"abc\", \"b\""),
+            "",
+        ),
         p("fn:contains", "F&O", fnf("contains", "\"abc\", \"b\""), ""),
-        p("fn:starts-with", "F&O", fnf("starts-with", "\"abc\", \"a\""), ""),
-        p("fn:ends-with", "F&O", fnf("ends-with", "\"abc\", \"c\""), ""),
+        p(
+            "fn:starts-with",
+            "F&O",
+            fnf("starts-with", "\"abc\", \"a\""),
+            "",
+        ),
+        p(
+            "fn:ends-with",
+            "F&O",
+            fnf("ends-with", "\"abc\", \"c\""),
+            "",
+        ),
         p("fn:concat", "F&O", fnf("concat", "\"a\", \"b\", \"c\""), ""),
-        p("fn:normalize-space", "F&O", fnf("normalize-space", "\"  a   b  \""), ""),
-        p("fn:translate", "F&O", fnf("translate", "\"bar\", \"abc\", \"ABC\""), "unmapped characters are removed"),
-        p("fn:compare", "F&O", fnf("compare", "\"a\", \"b\""), "-1, 0 or 1"),
-        p("fn:ceiling", "F&O", fnf("ceiling", "1.2"), "also abs, floor, round"),
+        p(
+            "fn:normalize-space",
+            "F&O",
+            fnf("normalize-space", "\"  a   b  \""),
+            "",
+        ),
+        p(
+            "fn:translate",
+            "F&O",
+            fnf("translate", "\"bar\", \"abc\", \"ABC\""),
+            "unmapped characters are removed",
+        ),
+        p(
+            "fn:compare",
+            "F&O",
+            fnf("compare", "\"a\", \"b\""),
+            "-1, 0 or 1",
+        ),
+        p(
+            "fn:ceiling",
+            "F&O",
+            fnf("ceiling", "1.2"),
+            "also abs, floor, round",
+        ),
         p("fn:not", "F&O", fnf("not", "true"), ""),
-        p("fn:boolean", "F&O", fnf("boolean", "\"\""), "XPath effective boolean value"),
-        p("fn:year-from-dateTime", "F&O", fnf("year-from-dateTime", "NOW()"), "also month, day, hours, minutes, seconds"),
-        p("afn:localname", "ARQ", afn("localname", "<http://e/x#name>"), "no SPARQL equivalent"),
-        p("afn:namespace", "ARQ", afn("namespace", "<http://e/x#name>"), ""),
-        p("afn:substr", "ARQ", afn("substr", "\"abcdef\", 0, 3"), "**0-based**, with an end index, unlike `fn:substring`"),
-        p("afn:strjoin", "ARQ", afn("strjoin", "\"-\", \"a\", \"b\""), ""),
-        p("afn:sprintf", "ARQ", afn("sprintf", "\"%s-%d\", \"a\", 1"), "`%s` and `%d` only"),
+        p(
+            "fn:boolean",
+            "F&O",
+            fnf("boolean", "\"\""),
+            "XPath effective boolean value",
+        ),
+        p(
+            "fn:year-from-dateTime",
+            "F&O",
+            fnf("year-from-dateTime", "NOW()"),
+            "also month, day, hours, minutes, seconds",
+        ),
+        p(
+            "afn:localname",
+            "ARQ",
+            afn("localname", "<http://e/x#name>"),
+            "no SPARQL equivalent",
+        ),
+        p(
+            "afn:namespace",
+            "ARQ",
+            afn("namespace", "<http://e/x#name>"),
+            "",
+        ),
+        p(
+            "afn:substr",
+            "ARQ",
+            afn("substr", "\"abcdef\", 0, 3"),
+            "**0-based**, with an end index, unlike `fn:substring`",
+        ),
+        p(
+            "afn:strjoin",
+            "ARQ",
+            afn("strjoin", "\"-\", \"a\", \"b\""),
+            "",
+        ),
+        p(
+            "afn:sprintf",
+            "ARQ",
+            afn("sprintf", "\"%s-%d\", \"a\", 1"),
+            "`%s` and `%d` only",
+        ),
         p("afn:sqrt", "ARQ", afn("sqrt", "16"), "also pi, e, min, max"),
         p("spif:trim", "SPIN", spif("trim", "\"  a  \""), ""),
-        p("spif:indexOf", "SPIN", spif("indexOf", "\"abc\", \"b\""), "character index, -1 when absent"),
-        p("spif:lastIndexOf", "SPIN", spif("lastIndexOf", "\"abcb\", \"b\""), ""),
-        p("spif:buildString", "SPIN", spif("buildString", "\"{?1}/{?2}\", \"a\", \"b\""), "numbered slots from 1"),
-        p("spif:titleCase", "SPIN", spif("titleCase", "\"hello world\""), ""),
-        p("spif:unCamelCase", "SPIN", spif("unCamelCase", "\"someName\""), ""),
-        p("spif:upperCase", "SPIN", spif("upperCase", "\"ab\""), "also lowerCase"),
-        p("spif:encodeURL", "SPIN", spif("encodeURL", "\"a b\""), "also decodeURL"),
+        p(
+            "spif:indexOf",
+            "SPIN",
+            spif("indexOf", "\"abc\", \"b\""),
+            "character index, -1 when absent",
+        ),
+        p(
+            "spif:lastIndexOf",
+            "SPIN",
+            spif("lastIndexOf", "\"abcb\", \"b\""),
+            "",
+        ),
+        p(
+            "spif:buildString",
+            "SPIN",
+            spif("buildString", "\"{?1}/{?2}\", \"a\", \"b\""),
+            "numbered slots from 1",
+        ),
+        p(
+            "spif:titleCase",
+            "SPIN",
+            spif("titleCase", "\"hello world\""),
+            "",
+        ),
+        p(
+            "spif:unCamelCase",
+            "SPIN",
+            spif("unCamelCase", "\"someName\""),
+            "",
+        ),
+        p(
+            "spif:upperCase",
+            "SPIN",
+            spif("upperCase", "\"ab\""),
+            "also lowerCase",
+        ),
+        p(
+            "spif:encodeURL",
+            "SPIN",
+            spif("encodeURL", "\"a b\""),
+            "also decodeURL",
+        ),
         p("spif:name", "SPIN", spif("name", "<http://e/x#n>"), ""),
     ]
 }
@@ -419,15 +699,55 @@ fn keywords() -> Vec<Probe> {
 
 fn property_paths() -> Vec<Probe> {
     vec![
-        p("iri (one hop)", "9.1", over_data("ex:alice ex:knows ?o"), ""),
+        p(
+            "iri (one hop)",
+            "9.1",
+            over_data("ex:alice ex:knows ?o"),
+            "",
+        ),
         p("^ (inverse)", "9.1", over_data("?s ^ex:knows ex:bob"), ""),
-        p("/ (sequence)", "9.1", over_data("ex:alice ex:knows/ex:name ?n"), ""),
-        p("| (alternative)", "9.1", over_data("ex:alice ex:knows|ex:name ?o"), ""),
-        p("* (zero or more)", "9.1", over_data("ex:alice ex:knows* ?o"), ""),
-        p("+ (one or more)", "9.1", over_data("ex:alice ex:knows+ ?o"), ""),
-        p("? (zero or one)", "9.1", over_data("ex:alice ex:knows? ?o"), ""),
-        p("! (negated set)", "9.1", over_data("ex:alice !(ex:knows) ?o"), ""),
-        p("() (grouping)", "9.1", over_data("ex:alice (ex:knows/ex:knows) ?o"), ""),
+        p(
+            "/ (sequence)",
+            "9.1",
+            over_data("ex:alice ex:knows/ex:name ?n"),
+            "",
+        ),
+        p(
+            "| (alternative)",
+            "9.1",
+            over_data("ex:alice ex:knows|ex:name ?o"),
+            "",
+        ),
+        p(
+            "* (zero or more)",
+            "9.1",
+            over_data("ex:alice ex:knows* ?o"),
+            "",
+        ),
+        p(
+            "+ (one or more)",
+            "9.1",
+            over_data("ex:alice ex:knows+ ?o"),
+            "",
+        ),
+        p(
+            "? (zero or one)",
+            "9.1",
+            over_data("ex:alice ex:knows? ?o"),
+            "",
+        ),
+        p(
+            "! (negated set)",
+            "9.1",
+            over_data("ex:alice !(ex:knows) ?o"),
+            "",
+        ),
+        p(
+            "() (grouping)",
+            "9.1",
+            over_data("ex:alice (ex:knows/ex:knows) ?o"),
+            "",
+        ),
     ]
 }
 
@@ -505,21 +825,87 @@ fn main() {
     );
 
     println!("\n---\n\n## Keywords");
-    section("Query forms and prologue", "Keyword", keywords(), &engine, &session);
-    section("Property paths", "Operator", property_paths(), &engine, &session);
+    section(
+        "Query forms and prologue",
+        "Keyword",
+        keywords(),
+        &engine,
+        &session,
+    );
+    section(
+        "Property paths",
+        "Operator",
+        property_paths(),
+        &engine,
+        &session,
+    );
 
     println!("\n---\n\n## Functions");
-    section("Functional forms", "Form", functional_forms(), &engine, &session);
-    section("On RDF terms", "Function", term_functions(), &engine, &session);
-    section("On strings", "Function", string_functions(), &engine, &session);
-    section("On numerics", "Function", numeric_functions(), &engine, &session);
-    section("On dates and times", "Function", datetime_functions(), &engine, &session);
-    section("Hash functions", "Function", hash_functions(), &engine, &session);
+    section(
+        "Functional forms",
+        "Form",
+        functional_forms(),
+        &engine,
+        &session,
+    );
+    section(
+        "On RDF terms",
+        "Function",
+        term_functions(),
+        &engine,
+        &session,
+    );
+    section(
+        "On strings",
+        "Function",
+        string_functions(),
+        &engine,
+        &session,
+    );
+    section(
+        "On numerics",
+        "Function",
+        numeric_functions(),
+        &engine,
+        &session,
+    );
+    section(
+        "On dates and times",
+        "Function",
+        datetime_functions(),
+        &engine,
+        &session,
+    );
+    section(
+        "Hash functions",
+        "Function",
+        hash_functions(),
+        &engine,
+        &session,
+    );
     section("Aggregates", "Aggregate", aggregates(), &engine, &session);
     section("Constructor casts", "Cast", casts(), &engine, &session);
-    section("SPARQL 1.2 additions", "Function", sparql12(), &engine, &session);
-    section("GeoSPARQL (sample of 45)", "Function", geosparql(), &engine, &session);
-    section("Extension libraries", "Function", extension_libraries(), &engine, &session);
+    section(
+        "SPARQL 1.2 additions",
+        "Function",
+        sparql12(),
+        &engine,
+        &session,
+    );
+    section(
+        "GeoSPARQL (sample of 45)",
+        "Function",
+        geosparql(),
+        &engine,
+        &session,
+    );
+    section(
+        "Extension libraries",
+        "Function",
+        extension_libraries(),
+        &engine,
+        &session,
+    );
 
     println!("\n#### Deliberately not implemented\n");
     println!("| Function | Why |");
@@ -555,5 +941,4 @@ fn main() {
     names.sort_by_key(|n| n.replace('*', ""));
     println!("{}\n", names.join(" - "));
     println!("Names in **bold** are the two added by HOLOS.");
-
 }

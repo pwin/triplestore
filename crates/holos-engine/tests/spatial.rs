@@ -74,7 +74,12 @@ fn the_index_holds_every_geometry_and_nothing_else() {
     // 100 points + 3 polygons + 1 line. The plain literal is not a geometry and must not be
     // indexed — an index that swallows non-geometries would propose candidates that cannot
     // be parsed downstream.
-    assert_eq!(index.len(), 104, "expected 104 geometries, got {}", index.len());
+    assert_eq!(
+        index.len(),
+        104,
+        "expected 104 geometries, got {}",
+        index.len()
+    );
     assert_eq!(index.len(), all_geometries(store).len());
 }
 
@@ -145,7 +150,10 @@ fn a_small_probe_narrows_substantially() {
         candidates.len(),
         index.len()
     );
-    assert!(!candidates.is_empty(), "it should still find the point inside it");
+    assert!(
+        !candidates.is_empty(),
+        "it should still find the point inside it"
+    );
 }
 
 #[test]
@@ -196,7 +204,11 @@ fn both_ways(engine: &Engine, query: &str) -> (Vec<String>, Vec<String>) {
     (plain, routed)
 }
 
-fn run(view: &holos_engine::view::DatasetView<'_>, query: &str, options: &QueryOptions) -> Vec<String> {
+fn run(
+    view: &holos_engine::view::DatasetView<'_>,
+    query: &str,
+    options: &QueryOptions,
+) -> Vec<String> {
     let (results, _) = Engine::query_with(view, query, options).expect("query");
     let mut rows: Vec<String> = match results {
         QueryResults::Solutions(iter) => iter
@@ -236,7 +248,13 @@ fn routing_agrees_across_relations_and_windows() {
     // Several relations and several windows, because a routing bug is easy to have in one
     // relation and not another — `can_filter` is a table, and tables get edited.
     let engine = engine();
-    for relation in ["sfWithin", "sfIntersects", "sfContains", "sfDisjoint", "sfTouches"] {
+    for relation in [
+        "sfWithin",
+        "sfIntersects",
+        "sfContains",
+        "sfDisjoint",
+        "sfTouches",
+    ] {
         for window in [
             "POLYGON((0 0, 3 0, 3 3, 0 3, 0 0))",
             "POLYGON((-10 -10, 20 -10, 20 20, -10 20, -10 -10))",

@@ -71,10 +71,7 @@ impl<'a> Validator<'a> {
     ///
     /// The entry point incremental revalidation uses: the same evaluation, over the part
     /// of the graph a change could have affected.
-    pub fn validate_selected(
-        &self,
-        work: &[(ShapeIdx, TermId)],
-    ) -> Result<Report, ShaclError> {
+    pub fn validate_selected(&self, work: &[(ShapeIdx, TermId)]) -> Result<Report, ShaclError> {
         let mut results = Vec::new();
         for (idx, focus) in work {
             self.validate_shape(*idx, *focus, 0, &mut results)?;
@@ -277,9 +274,7 @@ impl<'a> Validator<'a> {
             Constraint::LanguageIn(langs) => {
                 for &v in values {
                     let tag = self.language_of(v)?;
-                    let ok = tag.is_some_and(|t| {
-                        langs.iter().any(|l| language_matches(&t, l))
-                    });
+                    let ok = tag.is_some_and(|t| langs.iter().any(|l| language_matches(&t, l)));
                     if !ok {
                         violate_value(v, results);
                     }
@@ -451,12 +446,11 @@ impl<'a> Validator<'a> {
             }
             Constraint::Closed(ignored) => {
                 let allowed = self.allowed_predicates(shape, ignored);
-                for quad in self.data.store().quads_for_pattern(
-                    Some(focus),
-                    None,
-                    None,
-                    self.data.graph(),
-                ) {
+                for quad in
+                    self.data
+                        .store()
+                        .quads_for_pattern(Some(focus), None, None, self.data.graph())
+                {
                     let quad = quad?;
                     if !allowed.contains(&quad.predicate) {
                         results.push(ValidationResult {
@@ -601,10 +595,7 @@ impl<'a> Validator<'a> {
         else {
             return Ok(None);
         };
-        if let (Ok(na), Ok(nb)) = (
-            la.value().parse::<f64>(),
-            lb.value().parse::<f64>(),
-        ) {
+        if let (Ok(na), Ok(nb)) = (la.value().parse::<f64>(), lb.value().parse::<f64>()) {
             // Both look numeric: compare as numbers, which is what SHACL's range
             // constraints mean even across xsd:integer and xsd:decimal.
             if is_numeric(la.datatype().as_str()) && is_numeric(lb.datatype().as_str()) {

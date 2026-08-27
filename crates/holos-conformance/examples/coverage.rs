@@ -31,7 +31,10 @@ impl Tally {
 
 fn suite(label: &str, manifest_path: &Path) {
     if !manifest_path.is_file() {
-        eprintln!("{label}: {} is absent — run scripts/fetch-testsuites.sh", manifest_path.display());
+        eprintln!(
+            "{label}: {} is absent — run scripts/fetch-testsuites.sh",
+            manifest_path.display()
+        );
         return;
     }
     let tests = match manifest::load(manifest_path) {
@@ -120,10 +123,20 @@ fn suite(label: &str, manifest_path: &Path) {
     println!("{}", "-".repeat(64));
     println!(
         "{:<32} {:>7} {:>7} {:>7} {:>7}",
-        "all", overall.total(), overall.passed, overall.failed, overall.skipped
+        "all",
+        overall.total(),
+        overall.passed,
+        overall.failed,
+        overall.skipped
     );
 
-    let pct = |n: usize, d: usize| if d == 0 { 0.0 } else { n as f64 * 100.0 / d as f64 };
+    let pct = |n: usize, d: usize| {
+        if d == 0 {
+            0.0
+        } else {
+            n as f64 * 100.0 / d as f64
+        }
+    };
     println!(
         "\n  correctness  {}/{} of what is run passes  ({:.1}%)",
         overall.passed,

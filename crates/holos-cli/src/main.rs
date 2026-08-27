@@ -5,11 +5,11 @@
 
 use anyhow::{bail, Context, Result};
 use holos_engine::Engine;
-use holos_shacl::{CompiledShapes, Options as ShaclOptions};
 use holos_security::{
     CollectingSink, Label, Modes, Policy, Principal, PrincipalMatch, Rule, Scope, Semantics,
     Session,
 };
+use holos_shacl::{CompiledShapes, Options as ShaclOptions};
 use holos_store::GraphFilter;
 use oxrdf::{GraphName, NamedNode, Quad};
 use oxrdfio::{RdfFormat, RdfSerializer};
@@ -256,7 +256,10 @@ fn backup(engine: &Engine, opts: &Options) -> Result<()> {
         .checkpoint(destination)
         .with_context(|| format!("checkpointing to {}", destination.display()))?;
 
-    println!("wrote a checkpoint of {quads} quads to {}", destination.display());
+    println!(
+        "wrote a checkpoint of {quads} quads to {}",
+        destination.display()
+    );
     println!();
     println!("restore by pointing --store at it, or by copying it back over the original");
     println!("note: it hard-links the live store's files where it can, so it is not an");
@@ -308,11 +311,8 @@ fn dump(engine: &Engine, opts: &Options) -> Result<()> {
     let mut written = 0_u64;
     for solution in solutions {
         let solution = solution?;
-        let (Some(s), Some(p), Some(o)) = (
-            solution.get("s"),
-            solution.get("p"),
-            solution.get("o"),
-        ) else {
+        let (Some(s), Some(p), Some(o)) = (solution.get("s"), solution.get("p"), solution.get("o"))
+        else {
             continue;
         };
         let subject = match s {
@@ -418,13 +418,21 @@ fn validate(engine: &mut Engine, opts: &Options) -> Result<()> {
         let started = std::time::Instant::now();
         let mut run = holos_shacl::engine::EngineRun::prepare(
             engine.store(),
-            ShaclOptions { data_graph: GraphFilter::Default, shapes_graph },
+            ShaclOptions {
+                data_graph: GraphFilter::Default,
+                shapes_graph,
+            },
         )?;
         let prepared = started.elapsed();
         let started = std::time::Instant::now();
         let report = run.validate()?;
         let validated = started.elapsed();
-        println!("bridged+compiled  {} triples, {} shapes in {:.3}s", run.triples(), run.shapes(), prepared.as_secs_f64());
+        println!(
+            "bridged+compiled  {} triples, {} shapes in {:.3}s",
+            run.triples(),
+            run.shapes(),
+            prepared.as_secs_f64()
+        );
         println!("validated         {:.3}s", validated.as_secs_f64());
         println!("conforms          {}", run.conforms(&report));
         println!("results           {}", report.results.len());
@@ -452,7 +460,11 @@ fn validate(engine: &mut Engine, opts: &Options) -> Result<()> {
     let report = shapes.validate(engine.store())?;
     let validated = started.elapsed();
 
-    println!("shapes compiled   {} shapes in {:.3}s", shapes.shapes().len(), compiled.as_secs_f64());
+    println!(
+        "shapes compiled   {} shapes in {:.3}s",
+        shapes.shapes().len(),
+        compiled.as_secs_f64()
+    );
     println!("validated         {:.3}s", validated.as_secs_f64());
     println!("conforms          {}", report.conforms);
     println!("results           {}", report.results.len());
@@ -461,11 +473,15 @@ fn validate(engine: &mut Engine, opts: &Options) -> Result<()> {
         let quads = shapes.report_to_quads(engine.store(), &report)?;
         let mut out = stdout().lock();
         for quad in quads {
-            writeln!(out, "{} .", oxrdf::Triple {
-                subject: quad.subject,
-                predicate: quad.predicate,
-                object: quad.object,
-            })?;
+            writeln!(
+                out,
+                "{} .",
+                oxrdf::Triple {
+                    subject: quad.subject,
+                    predicate: quad.predicate,
+                    object: quad.object,
+                }
+            )?;
         }
     }
     Ok(())
@@ -618,16 +634,18 @@ impl Options {
                 "--role" => o.roles.push(value(&mut i)?),
                 "--except-role" => o.except_role = Some(value(&mut i)?),
                 "--store" => o.store = Some(value(&mut i)?),
-        "--to" => o.to = Some(value(&mut i)?),
+                "--to" => o.to = Some(value(&mut i)?),
                 "--bulk" => o.bulk = true,
                 "--shapes" => o.shapes = Some(value(&mut i)?),
                 "--report" => o.report = true,
                 "--engine" => o.engine = Some(value(&mut i)?),
                 "--fail-closed" => o.fail_closed = true,
                 "--audit" => o.audit = true,
-                other => bail!("unknown flag `{other}`
+                other => bail!(
+                    "unknown flag `{other}`
 
-{USAGE}"),
+{USAGE}"
+                ),
             }
             i += 1;
         }
@@ -642,10 +660,14 @@ impl Options {
             Some(path) => {
                 let storage = holos_store::RocksStorage::open(path)
                     .with_context(|| format!("opening the store at {path}"))?;
-                Ok(Engine::with_store(holos_store::Store::with_storage(storage)))
+                Ok(Engine::with_store(holos_store::Store::with_storage(
+                    storage,
+                )))
             }
             #[cfg(not(feature = "rocksdb"))]
-            Some(_) => bail!("this build has no persistent backend: rebuild with --features rocksdb"),
+            Some(_) => {
+                bail!("this build has no persistent backend: rebuild with --features rocksdb")
+            }
         }
     }
 

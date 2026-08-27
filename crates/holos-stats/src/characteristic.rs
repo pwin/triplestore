@@ -101,16 +101,18 @@ impl Statistics {
         let mut current: FxHashMap<TermId, u64> = FxHashMap::default();
 
         let close = |subject: Option<TermId>,
-                         current: &mut FxHashMap<TermId, u64>,
-                         shapes: &mut FxHashMap<Vec<TermId>, (u64, FxHashMap<TermId, u64>)>,
-                         total_subjects: &mut u64| {
+                     current: &mut FxHashMap<TermId, u64>,
+                     shapes: &mut FxHashMap<Vec<TermId>, (u64, FxHashMap<TermId, u64>)>,
+                     total_subjects: &mut u64| {
             if subject.is_none() || current.is_empty() {
                 current.clear();
                 return;
             }
             let mut key: Vec<TermId> = current.keys().copied().collect();
             key.sort_unstable();
-            let entry = shapes.entry(key).or_insert_with(|| (0, FxHashMap::default()));
+            let entry = shapes
+                .entry(key)
+                .or_insert_with(|| (0, FxHashMap::default()));
             entry.0 += 1;
             for (predicate, n) in current.iter() {
                 *entry.1.entry(*predicate).or_insert(0) += *n;
@@ -162,7 +164,11 @@ impl Statistics {
         for (predicates, (subjects, occurrences)) in shapes {
             let index = stats.sets.len();
             for predicate in &predicates {
-                stats.by_predicate.entry(*predicate).or_default().push(index);
+                stats
+                    .by_predicate
+                    .entry(*predicate)
+                    .or_default()
+                    .push(index);
             }
             stats.sets.push(CharacteristicSet {
                 predicates,
@@ -351,13 +357,25 @@ mod tests {
         for i in 0..100 {
             let s = ex(&format!("person{i}"));
             add(s.clone(), rdf::TYPE.into_owned(), ex("Person").into());
-            add(s.clone(), ex("name"), Literal::new_simple_literal(format!("P{i}")).into());
-            add(s, ex("email"), Literal::new_simple_literal(format!("p{i}@x")).into());
+            add(
+                s.clone(),
+                ex("name"),
+                Literal::new_simple_literal(format!("P{i}")).into(),
+            );
+            add(
+                s,
+                ex("email"),
+                Literal::new_simple_literal(format!("p{i}@x")).into(),
+            );
         }
         for i in 0..10 {
             let s = ex(&format!("org{i}"));
             add(s.clone(), rdf::TYPE.into_owned(), ex("Org").into());
-            add(s, ex("legalName"), Literal::new_simple_literal(format!("O{i}")).into());
+            add(
+                s,
+                ex("legalName"),
+                Literal::new_simple_literal(format!("O{i}")).into(),
+            );
         }
         store
     }
@@ -387,8 +405,12 @@ mod tests {
         let legal = id(&store, &ex("legalName"));
 
         // The reused optimiser would call both of these 10,000.
-        assert!((stats.estimate_pattern(&Pattern::single(None, Some(name), None)) - 100.0).abs() < 1.0);
-        assert!((stats.estimate_pattern(&Pattern::single(None, Some(legal), None)) - 10.0).abs() < 1.0);
+        assert!(
+            (stats.estimate_pattern(&Pattern::single(None, Some(name), None)) - 100.0).abs() < 1.0
+        );
+        assert!(
+            (stats.estimate_pattern(&Pattern::single(None, Some(legal), None)) - 10.0).abs() < 1.0
+        );
     }
 
     #[test]
@@ -399,10 +421,8 @@ mod tests {
         let email = id(&store, &ex("email"));
 
         // Every person has exactly one name and one email, so the star is 100 rows.
-        let estimate = stats.estimate_star(&[
-            Pattern::star(0, name, None),
-            Pattern::star(0, email, None),
-        ]);
+        let estimate =
+            stats.estimate_star(&[Pattern::star(0, name, None), Pattern::star(0, email, None)]);
         assert!(
             (estimate - 100.0).abs() < 1.0,
             "expected about 100 rows, estimated {estimate}"
@@ -418,10 +438,8 @@ mod tests {
         let email = id(&store, &ex("email"));
         let legal = id(&store, &ex("legalName"));
 
-        let estimate = stats.estimate_star(&[
-            Pattern::star(0, email, None),
-            Pattern::star(0, legal, None),
-        ]);
+        let estimate =
+            stats.estimate_star(&[Pattern::star(0, email, None), Pattern::star(0, legal, None)]);
         assert_eq!(
             estimate, 0.0,
             "no subject has both an email and a legalName"

@@ -99,8 +99,14 @@ fn the_two_scenes_move_independently() {
     )
     .expect("tick");
 
-    assert_eq!(scene_values(&engine, &session, &trunk), ["shared", "trunk-only"]);
-    assert_eq!(scene_values(&engine, &session, &child), ["branch-only", "shared"]);
+    assert_eq!(
+        scene_values(&engine, &session, &trunk),
+        ["shared", "trunk-only"]
+    );
+    assert_eq!(
+        scene_values(&engine, &session, &child),
+        ["branch-only", "shared"]
+    );
 }
 
 #[test]
@@ -108,11 +114,11 @@ fn a_branch_records_where_it_came_from() {
     let (mut engine, mut session, trunk) = setup();
     for value in ["one", "two", "three"] {
         tick(
-        &mut engine,
-        &trunk,
-        &mut session,
-        &Delta::adding([triple(value, "name", value)]),
-    )
+            &mut engine,
+            &trunk,
+            &mut session,
+            &Delta::adding([triple(value, "name", value)]),
+        )
         .expect("tick");
     }
     let version = registry::version(&engine, &trunk).expect("version");
@@ -134,11 +140,11 @@ fn versions_continue_rather_than_restart() {
     let (mut engine, mut session, trunk) = setup();
     for value in ["one", "two"] {
         tick(
-        &mut engine,
-        &trunk,
-        &mut session,
-        &Delta::adding([triple(value, "name", value)]),
-    )
+            &mut engine,
+            &trunk,
+            &mut session,
+            &Delta::adding([triple(value, "name", value)]),
+        )
         .expect("tick");
     }
 
@@ -205,7 +211,9 @@ fn a_branch_of_an_empty_holon_is_an_empty_branch() {
     let child = branch(&mut engine, &trunk, ex("holon/feature"), &mut session).expect("branch");
     assert!(scene_values(&engine, &session, &child).is_empty());
     assert_eq!(
-        branch_point(&engine, &child).expect("reading").map(|p| p.version),
+        branch_point(&engine, &child)
+            .expect("reading")
+            .map(|p| p.version),
         Some(0)
     );
 }

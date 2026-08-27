@@ -244,8 +244,14 @@ mod tests {
     #[test]
     fn interning_is_stable_and_deduplicating() {
         let mut d = Dictionary::new();
-        let a = round_trip(&mut d, NamedNode::new_unchecked("http://example.com/a").into());
-        let b = round_trip(&mut d, NamedNode::new_unchecked("http://example.com/b").into());
+        let a = round_trip(
+            &mut d,
+            NamedNode::new_unchecked("http://example.com/a").into(),
+        );
+        let b = round_trip(
+            &mut d,
+            NamedNode::new_unchecked("http://example.com/b").into(),
+        );
         let a_again = d
             .encode(NamedNodeRef::new_unchecked("http://example.com/a").into())
             .unwrap();
@@ -265,7 +271,10 @@ mod tests {
     #[test]
     fn inline_literals_never_reach_the_dictionary() {
         let mut d = Dictionary::new();
-        round_trip(&mut d, Literal::new_typed_literal("42", xsd::INTEGER).into());
+        round_trip(
+            &mut d,
+            Literal::new_typed_literal("42", xsd::INTEGER).into(),
+        );
         round_trip(&mut d, Literal::new_simple_literal("abc").into());
         assert!(d.is_empty(), "inline values must not consume slots");
 

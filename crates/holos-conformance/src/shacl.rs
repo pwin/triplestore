@@ -232,11 +232,7 @@ fn run_inner(test: &ShaclTest, engine: Engine) -> Result<super::Outcome> {
 }
 
 /// Runs a test through the adapted engine, bridged from the store.
-fn run_adapted(
-    store: &Store,
-    options: Options,
-    expected: &Dataset,
-) -> Result<super::Outcome> {
+fn run_adapted(store: &Store, options: Options, expected: &Dataset) -> Result<super::Outcome> {
     let mut run = match holos_shacl::engine::EngineRun::prepare(store, options) {
         Ok(r) => r,
         Err(e) => return Ok(super::Outcome::fail(format!("preparing the engine: {e}"))),

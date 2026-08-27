@@ -56,10 +56,16 @@ fn a_checkpoint_of_an_open_store_holds_everything_written() {
 
     // Taken while the store is open — no flush, no close, no stopping.
     store.checkpoint(&snapshot).expect("checkpoint");
-    assert!(snapshot.is_dir(), "nothing was written to {}", snapshot.display());
+    assert!(
+        snapshot.is_dir(),
+        "nothing was written to {}",
+        snapshot.display()
+    );
 
     // The live store is unaffected and still usable.
-    store.insert(quad(1000).as_ref()).expect("the store is still writable");
+    store
+        .insert(quad(1000).as_ref())
+        .expect("the store is still writable");
     assert_eq!(store.len(), 101);
 
     let copy = store_at(&snapshot);
@@ -89,7 +95,11 @@ fn a_checkpoint_is_not_disturbed_by_later_writes() {
     store.flush().expect("flush");
 
     assert_eq!(store.len(), 500);
-    assert_eq!(store_at(&snapshot).len(), 50, "later writes leaked into the snapshot");
+    assert_eq!(
+        store_at(&snapshot).len(),
+        50,
+        "later writes leaked into the snapshot"
+    );
 }
 
 #[test]
@@ -139,5 +149,8 @@ fn an_in_memory_store_says_it_cannot() {
     let error = store
         .checkpoint(&destination("mem"))
         .expect_err("an in-memory store has no files to snapshot");
-    assert!(matches!(error, StorageError::Unsupported(_)), "got {error:?}");
+    assert!(
+        matches!(error, StorageError::Unsupported(_)),
+        "got {error:?}"
+    );
 }

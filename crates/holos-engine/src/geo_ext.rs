@@ -262,10 +262,9 @@ fn parse_wkt_literal(value: &str) -> Option<Geometry> {
 
 fn to_literal(geom: &Geometry, kind: Kind) -> Literal {
     match kind {
-        Kind::Wkt => Literal::new_typed_literal(
-            format!("<{CRS84_URI}> {}", geom.wkt_string()),
-            WKT_LITERAL,
-        ),
+        Kind::Wkt => {
+            Literal::new_typed_literal(format!("<{CRS84_URI}> {}", geom.wkt_string()), WKT_LITERAL)
+        }
         Kind::GeoJson => {
             Literal::new_typed_literal(GeoJsonGeometry::from(geom).to_string(), GEO_JSON_LITERAL)
         }
@@ -392,9 +391,9 @@ fn map_coords(geom: &Geometry, f: &impl Fn(Coord) -> Coord) -> Geometry {
     };
     match geom {
         Geometry::Point(p) => Geometry::Point(Point::from(f(p.0))),
-        Geometry::MultiPoint(mp) => {
-            Geometry::MultiPoint(MultiPoint(mp.0.iter().map(|p| Point::from(f(p.0))).collect()))
-        }
+        Geometry::MultiPoint(mp) => Geometry::MultiPoint(MultiPoint(
+            mp.0.iter().map(|p| Point::from(f(p.0))).collect(),
+        )),
         Geometry::Line(l) => Geometry::Line(geo::Line::new(f(l.start), f(l.end))),
         Geometry::LineString(ls) => Geometry::LineString(line(ls)),
         Geometry::MultiLineString(mls) => {
@@ -529,7 +528,8 @@ mod tests {
 
     #[test]
     fn buffering_a_point_in_degrees_gives_a_polygon_of_that_radius() {
-        let out = geof_buffer(&[wkt("POINT(0 0)"), number(1.0), units("degree")]).expect("buffered");
+        let out =
+            geof_buffer(&[wkt("POINT(0 0)"), number(1.0), units("degree")]).expect("buffered");
         let geom = geometry_of(&out);
         let Geometry::MultiPolygon(mp) = &geom else {
             panic!("expected a multipolygon");
@@ -630,8 +630,7 @@ mod tests {
     fn joined_lines_drop_the_shared_endpoint() {
         // Two segments meeting at (1 1). That point is interior to the union, so the
         // mod-2 rule must exclude it and leave only the two outer ends.
-        let out =
-            geof_boundary(&[wkt("MULTILINESTRING((0 0,1 1),(1 1,2 2))")]).expect("boundary");
+        let out = geof_boundary(&[wkt("MULTILINESTRING((0 0,1 1),(1 1,2 2))")]).expect("boundary");
         let Geometry::MultiPoint(mp) = geometry_of(&out) else {
             panic!("expected a multipoint");
         };

@@ -82,8 +82,12 @@ pub fn open(path: &Path) -> Result<(RdfFormat, Box<dyn BufRead + Send>), EngineE
 ///
 /// Fails if the file cannot be opened.
 pub fn reader(path: &Path) -> Result<Box<dyn BufRead + Send>, EngineError> {
-    let file = File::open(path)
-        .map_err(|e| EngineError::Io(std::io::Error::other(format!("opening {}: {e}", path.display()))))?;
+    let file = File::open(path).map_err(|e| {
+        EngineError::Io(std::io::Error::other(format!(
+            "opening {}: {e}",
+            path.display()
+        )))
+    })?;
     Ok(wrap(BufReader::new(file), is_compressed(path)))
 }
 
@@ -109,8 +113,7 @@ mod tests {
     use std::io::Write;
 
     fn gzip(bytes: &[u8]) -> Vec<u8> {
-        let mut encoder =
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(bytes).expect("write");
         encoder.finish().expect("finish")
     }
@@ -129,7 +132,10 @@ mod tests {
             format_for_path(Path::new("o.ttl.GZ")),
             Some(RdfFormat::Turtle)
         );
-        assert_eq!(format_for_path(Path::new("plain.nt")), Some(RdfFormat::NTriples));
+        assert_eq!(
+            format_for_path(Path::new("plain.nt")),
+            Some(RdfFormat::NTriples)
+        );
     }
 
     #[test]

@@ -33,10 +33,10 @@ use crate::{Engine, EngineError};
 use holos_security::Session;
 use oxrdf::{GraphName, GraphNameRef, NamedNode, Quad, Term};
 use oxrdfio::RdfParser;
+use spareval::DeleteInsertQuad;
 use spargebra::algebra::GraphTarget;
 use spargebra::term::{GroundQuad, GroundQuadPattern, GroundTerm, GroundTriple, QuadPattern};
 use spargebra::{GraphUpdateOperation, SparqlParser, Update};
-use spareval::DeleteInsertQuad;
 
 /// What an update changed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +90,9 @@ impl Journal {
             // There is nothing useful to return it to at that point, and swallowing the
             // error silently would be worse than saying so.
             if let Err(e) = undo {
-                eprintln!("holos: rolling back an update failed: {e}. The store may be inconsistent.");
+                eprintln!(
+                    "holos: rolling back an update failed: {e}. The store may be inconsistent."
+                );
             }
         }
     }

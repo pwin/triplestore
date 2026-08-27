@@ -116,7 +116,9 @@ impl RowSource for Frame {
                     .iter()
                     .enumerate()
                     .filter_map(|(c, value)| {
-                        self.columns.get(c).map(|name| (name.clone(), value.clone()))
+                        self.columns
+                            .get(c)
+                            .map(|name| (name.clone(), value.clone()))
                     })
                     .collect(),
             })
@@ -185,10 +187,13 @@ mod tests {
         assert_eq!(f.height(), 2);
         let mut f = f;
         let batch = f.next_batch(10, 0).expect("batch");
-        assert_eq!(batch[0].cells, vec![
-            ("a".to_owned(), "1".to_owned()),
-            ("b".to_owned(), "x".to_owned())
-        ]);
+        assert_eq!(
+            batch[0].cells,
+            vec![
+                ("a".to_owned(), "1".to_owned()),
+                ("b".to_owned(), "x".to_owned())
+            ]
+        );
     }
 
     #[test]

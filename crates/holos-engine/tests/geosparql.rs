@@ -183,7 +183,9 @@ const WKT: &str = r#"^^<http://www.opengis.net/ont/geosparql#wktLiteral>"#;
 
 /// The single value of a one-row, one-column query.
 fn value(expression: &str) -> String {
-    let rows = rows(&format!("{PREFIXES} SELECT ({expression} AS ?r) WHERE {{}}"));
+    let rows = rows(&format!(
+        "{PREFIXES} SELECT ({expression} AS ?r) WHERE {{}}"
+    ));
     assert_eq!(rows.len(), 1, "expected exactly one row from {expression}");
     rows[0]
         .split_once('=')

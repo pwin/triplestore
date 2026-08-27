@@ -171,7 +171,9 @@ fn collect_variables(
 ) {
     use spargebra::term::{NamedNodePattern, TermPattern};
 
-    let push = |v: &oxrdf::Variable, out: &mut Vec<oxrdf::Variable>, seen: &mut std::collections::BTreeSet<String>| {
+    let push = |v: &oxrdf::Variable,
+                out: &mut Vec<oxrdf::Variable>,
+                seen: &mut std::collections::BTreeSet<String>| {
         if seen.insert(v.as_str().to_owned()) {
             out.push(v.clone());
         }
@@ -338,9 +340,7 @@ mod tests {
         // one that genuinely had nothing to say, and the two need different fixes.
         let handler = LocalServiceHandler::new();
         let query = SparqlParser::new()
-            .parse_query(
-                "SELECT ?s WHERE { SERVICE <http://example.org/absent> { ?s ?p ?o } }",
-            )
+            .parse_query("SELECT ?s WHERE { SERVICE <http://example.org/absent> { ?s ?p ?o } }")
             .expect("parse");
         let evaluator = crate::Engine::evaluator().with_default_service_handler(handler);
         let local = Dataset::new();
@@ -353,7 +353,10 @@ mod tests {
                 }
                 _ => Ok(0),
             });
-        assert!(outcome.is_err(), "an unknown endpoint must not answer quietly");
+        assert!(
+            outcome.is_err(),
+            "an unknown endpoint must not answer quietly"
+        );
     }
 
     #[test]
@@ -365,7 +368,11 @@ mod tests {
             "SELECT ?s WHERE { OPTIONAL { SERVICE SILENT <http://example.org/absent> \
              { ?s ?p ?o } } }",
         );
-        assert_eq!(rows.len(), 1, "SILENT should yield one empty solution: {rows:?}");
+        assert_eq!(
+            rows.len(),
+            1,
+            "SILENT should yield one empty solution: {rows:?}"
+        );
     }
 
     #[test]

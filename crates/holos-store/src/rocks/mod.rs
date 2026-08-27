@@ -423,7 +423,7 @@ impl RocksStorage {
             }
         };
 
-        // Serialised straight from the borrowed term: cloning it to an owned 
+        // Serialised straight from the borrowed term: cloning it to an owned
         // first cost three string allocations per quad on the hottest path there is.
         let serialised = put_term(term, components);
         let (dict_key, hashed) = Self::dictionary_key(&serialised);

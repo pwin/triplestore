@@ -283,8 +283,14 @@ mod tests {
             let s = ex(&format!("p{i}"));
             for (p, o) in [
                 (rdf::TYPE.into_owned(), Term::NamedNode(ex("Person"))),
-                (ex("name"), Literal::new_simple_literal(format!("P{i}")).into()),
-                (ex("email"), Literal::new_simple_literal(format!("p{i}@x")).into()),
+                (
+                    ex("name"),
+                    Literal::new_simple_literal(format!("P{i}")).into(),
+                ),
+                (
+                    ex("email"),
+                    Literal::new_simple_literal(format!("p{i}@x")).into(),
+                ),
             ] {
                 store
                     .insert(
@@ -342,9 +348,13 @@ mod tests {
         patterns
             .iter()
             .map(|p| match &p.predicate {
-                NamedNodePattern::NamedNode(n) => {
-                    n.as_str().trim_start_matches(EX).rsplit('#').next().unwrap_or("?").to_owned()
-                }
+                NamedNodePattern::NamedNode(n) => n
+                    .as_str()
+                    .trim_start_matches(EX)
+                    .rsplit('#')
+                    .next()
+                    .unwrap_or("?")
+                    .to_owned(),
                 NamedNodePattern::Variable(v) => format!("?{}", v.as_str()),
             })
             .collect()
@@ -408,7 +418,9 @@ mod tests {
         let store = store();
         let stats = Statistics::build(&store, GraphFilter::Default).expect("stats");
         let query = SparqlParser::new()
-            .parse_query(&format!("PREFIX ex: <{EX}> SELECT * WHERE {{ ?s ex:name ?n }}"))
+            .parse_query(&format!(
+                "PREFIX ex: <{EX}> SELECT * WHERE {{ ?s ex:name ?n }}"
+            ))
             .expect("parse");
         assert_eq!(
             predicates(&bgp_of(&reorder_query(&query, &stats, &store))),
@@ -451,6 +463,9 @@ mod tests {
         let text = rewritten.to_string();
         let badge = text.find("badge").expect("badge present");
         let email = text.find("email").expect("email present");
-        assert!(badge < email, "the rarer pattern should lead inside the OPTIONAL: {text}");
+        assert!(
+            badge < email,
+            "the rarer pattern should lead inside the OPTIONAL: {text}"
+        );
     }
 }

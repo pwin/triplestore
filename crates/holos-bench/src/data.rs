@@ -89,7 +89,8 @@ fn scatter(i: usize, salt: u64, range: usize) -> usize {
     if range == 0 {
         return 0;
     }
-    let mut x = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ salt.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    let mut x =
+        (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ salt.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x ^= x >> 30;
     x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x ^= x >> 27;
@@ -256,7 +257,10 @@ mod tests {
         assert_eq!(parent_of(0), None, "unit0 is the root");
         for i in 1..units {
             let parent = parent_of(i).expect("non-root has a parent");
-            assert!(parent < i, "parents come before children, so the tree is acyclic");
+            assert!(
+                parent < i,
+                "parents come before children, so the tree is acyclic"
+            );
         }
     }
 
@@ -268,7 +272,10 @@ mod tests {
             while let Some(parent) = parent_of(at) {
                 at = parent;
                 hops += 1;
-                assert!(hops <= DEPTH, "unit{i} did not reach the root in {DEPTH} hops");
+                assert!(
+                    hops <= DEPTH,
+                    "unit{i} did not reach the root in {DEPTH} hops"
+                );
             }
             assert_eq!(at, 0);
         }

@@ -156,11 +156,17 @@ fn fn_substring(a: &[Term]) -> Option<Term> {
 }
 fn fn_substring_before(a: &[Term]) -> Option<Term> {
     let (s, sep) = (text(a.first()?)?, text(a.get(1)?)?);
-    string_out(s.split_once(&sep).map_or(String::new(), |(b, _)| b.to_owned()))
+    string_out(
+        s.split_once(&sep)
+            .map_or(String::new(), |(b, _)| b.to_owned()),
+    )
 }
 fn fn_substring_after(a: &[Term]) -> Option<Term> {
     let (s, sep) = (text(a.first()?)?, text(a.get(1)?)?);
-    string_out(s.split_once(&sep).map_or(String::new(), |(_, x)| x.to_owned()))
+    string_out(
+        s.split_once(&sep)
+            .map_or(String::new(), |(_, x)| x.to_owned()),
+    )
 }
 fn fn_contains(a: &[Term]) -> Option<Term> {
     bool_out(text(a.first()?)?.contains(&text(a.get(1)?)?))
@@ -172,7 +178,12 @@ fn fn_ends_with(a: &[Term]) -> Option<Term> {
     bool_out(text(a.first()?)?.ends_with(&text(a.get(1)?)?))
 }
 fn fn_normalize_space(a: &[Term]) -> Option<Term> {
-    string_out(text(a.first()?)?.split_whitespace().collect::<Vec<_>>().join(" "))
+    string_out(
+        text(a.first()?)?
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 fn fn_translate(a: &[Term]) -> Option<Term> {
     // Character-for-character mapping; a character with no replacement is removed.
@@ -548,20 +559,44 @@ pub fn all() -> Vec<Entry> {
 #[must_use]
 pub fn unsupported() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("fn:string-join", "takes a sequence; SPARQL has no sequence type"),
+        (
+            "fn:string-join",
+            "takes a sequence; SPARQL has no sequence type",
+        ),
         ("fn:tokenize", "returns a sequence"),
-        ("fn:distinct-values, fn:count, fn:sum", "sequence functions; use SPARQL aggregates"),
-        ("fn:matches, fn:replace", "use SPARQL's REGEX and REPLACE, which are the same functions"),
-        ("fn:doc, fn:collection", "retrieve external documents; that is the SSRF surface refused for LOAD and SERVICE"),
+        (
+            "fn:distinct-values, fn:count, fn:sum",
+            "sequence functions; use SPARQL aggregates",
+        ),
+        (
+            "fn:matches, fn:replace",
+            "use SPARQL's REGEX and REPLACE, which are the same functions",
+        ),
+        (
+            "fn:doc, fn:collection",
+            "retrieve external documents; that is the SSRF surface refused for LOAD and SERVICE",
+        ),
         ("fn:current-dateTime", "use SPARQL's NOW()"),
         ("afn:now", "use SPARQL's NOW()"),
-        ("afn:bnode", "identity of a blank node is not addressable through this interface"),
+        (
+            "afn:bnode",
+            "identity of a blank node is not addressable through this interface",
+        ),
         ("afn:sha1sum", "use SPARQL's SHA1"),
         ("spif:cast", "use the xsd: constructor casts"),
-        ("spif:parseDate, spif:dateFormat", "needs a format-pattern language; none is specified normatively"),
-        ("spif:invoke, spif:eval", "evaluate a SPIN expression; there is no SPIN engine here"),
+        (
+            "spif:parseDate, spif:dateFormat",
+            "needs a format-pattern language; none is specified normatively",
+        ),
+        (
+            "spif:invoke, spif:eval",
+            "evaluate a SPIN expression; there is no SPIN engine here",
+        ),
         ("spif:random", "use SPARQL's RAND()"),
-        ("spif:regex, spif:replaceAll, spif:split", "use SPARQL's REGEX and REPLACE"),
+        (
+            "spif:regex, spif:replaceAll, spif:split",
+            "use SPARQL's REGEX and REPLACE",
+        ),
     ]
 }
 
@@ -610,13 +645,22 @@ mod tests {
     #[test]
     fn fn_substring_is_one_based() {
         // The difference from afn:substr, and the reason they are not one shared helper.
-        assert_eq!(as_text(call("substring", FN, &[s("abcdef"), i(2), i(3)])), "bcd");
-        assert_eq!(as_text(call("substring", FN, &[s("abcdef"), i(1)])), "abcdef");
+        assert_eq!(
+            as_text(call("substring", FN, &[s("abcdef"), i(2), i(3)])),
+            "bcd"
+        );
+        assert_eq!(
+            as_text(call("substring", FN, &[s("abcdef"), i(1)])),
+            "abcdef"
+        );
     }
 
     #[test]
     fn afn_substr_is_zero_based_with_an_end_index() {
-        assert_eq!(as_text(call("substr", AFN, &[s("abcdef"), i(0), i(3)])), "abc");
+        assert_eq!(
+            as_text(call("substr", AFN, &[s("abcdef"), i(0), i(3)])),
+            "abc"
+        );
         assert_eq!(as_text(call("substr", AFN, &[s("abcdef"), i(2)])), "cdef");
     }
 
@@ -625,46 +669,77 @@ mod tests {
         // "héllo" is 6 bytes and 5 characters. Byte slicing would give the wrong answer
         // here, or panic on a character boundary.
         assert_eq!(as_text(call("string-length", FN, &[s("héllo")])), "5");
-        assert_eq!(as_text(call("substring", FN, &[s("héllo"), i(2), i(2)])), "él");
+        assert_eq!(
+            as_text(call("substring", FN, &[s("héllo"), i(2), i(2)])),
+            "él"
+        );
         assert_eq!(as_text(call("indexOf", SPIF, &[s("héllo"), s("llo")])), "2");
     }
 
     #[test]
     fn afn_localname_and_namespace_split_an_iri() {
         assert_eq!(
-            as_text(call("localname", AFN, &[Term::NamedNode(NamedNode::new_unchecked("http://e/x#name"))])),
+            as_text(call(
+                "localname",
+                AFN,
+                &[Term::NamedNode(NamedNode::new_unchecked("http://e/x#name"))]
+            )),
             "name"
         );
         assert_eq!(
-            as_text(call("namespace", AFN, &[Term::NamedNode(NamedNode::new_unchecked("http://e/x#name"))])),
+            as_text(call(
+                "namespace",
+                AFN,
+                &[Term::NamedNode(NamedNode::new_unchecked("http://e/x#name"))]
+            )),
             "http://e/x#"
         );
         // A slash-terminated IRI splits at the slash.
         assert_eq!(
-            as_text(call("localname", AFN, &[Term::NamedNode(NamedNode::new_unchecked("http://e/abc"))])),
+            as_text(call(
+                "localname",
+                AFN,
+                &[Term::NamedNode(NamedNode::new_unchecked("http://e/abc"))]
+            )),
             "abc"
         );
     }
 
     #[test]
     fn fn_translate_removes_unmapped_characters() {
-        assert_eq!(as_text(call("translate", FN, &[s("bar"), s("abc"), s("ABC")])), "BAr");
+        assert_eq!(
+            as_text(call("translate", FN, &[s("bar"), s("abc"), s("ABC")])),
+            "BAr"
+        );
         // "c" has no replacement, so it disappears rather than being kept.
-        assert_eq!(as_text(call("translate", FN, &[s("abc"), s("abc"), s("AB")])), "AB");
+        assert_eq!(
+            as_text(call("translate", FN, &[s("abc"), s("abc"), s("AB")])),
+            "AB"
+        );
     }
 
     #[test]
     fn spif_build_string_fills_numbered_slots() {
         assert_eq!(
-            as_text(call("buildString", SPIF, &[s("{?1} and {?2}"), s("x"), s("y")])),
+            as_text(call(
+                "buildString",
+                SPIF,
+                &[s("{?1} and {?2}"), s("x"), s("y")]
+            )),
             "x and y"
         );
     }
 
     #[test]
     fn spif_case_helpers() {
-        assert_eq!(as_text(call("titleCase", SPIF, &[s("hello wide world")])), "Hello Wide World");
-        assert_eq!(as_text(call("unCamelCase", SPIF, &[s("someLongName")])), "some Long Name");
+        assert_eq!(
+            as_text(call("titleCase", SPIF, &[s("hello wide world")])),
+            "Hello Wide World"
+        );
+        assert_eq!(
+            as_text(call("unCamelCase", SPIF, &[s("someLongName")])),
+            "some Long Name"
+        );
         assert_eq!(as_text(call("trim", SPIF, &[s("  padded  ")])), "padded");
     }
 
@@ -672,23 +747,35 @@ mod tests {
     fn url_encoding_round_trips() {
         let encoded = as_text(call("encodeURL", SPIF, &[s("a b/c?d=é")]));
         assert!(!encoded.contains(' '), "space must be escaped: {encoded}");
-        assert_eq!(as_text(call("decodeURL", SPIF, &[s(&encoded)])), "a b/c?d=é");
+        assert_eq!(
+            as_text(call("decodeURL", SPIF, &[s(&encoded)])),
+            "a b/c?d=é"
+        );
     }
 
     #[test]
     fn date_parts_come_out_of_an_iso_timestamp() {
         let t = s("2026-08-25T13:45:07Z");
-        assert_eq!(as_text(call("year-from-dateTime", FN, &[t.clone()])), "2026");
+        assert_eq!(
+            as_text(call("year-from-dateTime", FN, &[t.clone()])),
+            "2026"
+        );
         assert_eq!(as_text(call("month-from-dateTime", FN, &[t.clone()])), "8");
         assert_eq!(as_text(call("day-from-dateTime", FN, &[t.clone()])), "25");
         assert_eq!(as_text(call("hours-from-dateTime", FN, &[t.clone()])), "13");
-        assert_eq!(as_text(call("minutes-from-dateTime", FN, &[t.clone()])), "45");
+        assert_eq!(
+            as_text(call("minutes-from-dateTime", FN, &[t.clone()])),
+            "45"
+        );
         assert_eq!(as_text(call("seconds-from-dateTime", FN, &[t])), "7");
     }
 
     #[test]
     fn afn_sprintf_handles_only_what_it_claims() {
-        assert_eq!(as_text(call("sprintf", AFN, &[s("%s-%d"), s("a"), i(1)])), "a-1");
+        assert_eq!(
+            as_text(call("sprintf", AFN, &[s("%s-%d"), s("a"), i(1)])),
+            "a-1"
+        );
         // An unsupported specifier is left alone rather than silently eaten.
         assert_eq!(as_text(call("sprintf", AFN, &[s("%q"), s("a")])), "%q");
         assert_eq!(as_text(call("sprintf", AFN, &[s("100%%")])), "100%");

@@ -94,10 +94,7 @@ impl TestEntry {
     /// Short local name, for readable failure output.
     #[must_use]
     pub fn short_id(&self) -> &str {
-        self.id
-            .rsplit(['#', '/'])
-            .next()
-            .unwrap_or(&self.id)
+        self.id.rsplit(['#', '/']).next().unwrap_or(&self.id)
     }
 }
 
@@ -109,11 +106,7 @@ pub fn load(manifest: &Path) -> Result<Vec<TestEntry>> {
     Ok(out)
 }
 
-fn load_into(
-    manifest: &Path,
-    out: &mut Vec<TestEntry>,
-    seen: &mut HashSet<PathBuf>,
-) -> Result<()> {
+fn load_into(manifest: &Path, out: &mut Vec<TestEntry>, seen: &mut HashSet<PathBuf>) -> Result<()> {
     let manifest = manifest
         .canonicalize()
         .with_context(|| format!("resolving {}", manifest.display()))?;
@@ -213,15 +206,16 @@ fn load_into(
                 collect_service_data(&graph, action, &mut test.service_data);
                 // A protocol test's action is an ht:Connection. Reading it here keeps the
                 // runner from having to re-parse the manifest.
-                if object(&graph, action, &NamedNode::new_unchecked(
-                    "http://www.w3.org/2011/http#requests",
-                ))
+                if object(
+                    &graph,
+                    action,
+                    &NamedNode::new_unchecked("http://www.w3.org/2011/http#requests"),
+                )
                 .is_some()
                 {
                     test.script = crate::protocol::read_script(&graph, action).ok();
                 }
-                test.needs_entailment =
-                    object(&graph, action, &sd("entailmentRegime")).is_some();
+                test.needs_entailment = object(&graph, action, &sd("entailmentRegime")).is_some();
             }
             _ => {}
         }
@@ -441,12 +435,7 @@ fn percent_decode(s: &str) -> String {
 /// Infers an RDF format from a file extension.
 #[must_use]
 pub fn format_for(path: &Path) -> Option<RdfFormat> {
-    match path
-        .extension()?
-        .to_str()?
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "ttl" => Some(RdfFormat::Turtle),
         "nt" => Some(RdfFormat::NTriples),
         "trig" => Some(RdfFormat::TriG),
@@ -462,8 +451,7 @@ pub fn format_for(path: &Path) -> Option<RdfFormat> {
 
 /// Reads an RDF file into a dataset, parsed against `base`.
 pub fn parse_dataset(path: &Path, base: &str) -> Result<oxrdf::Dataset> {
-    let format = format_for(path)
-        .ok_or_else(|| anyhow!("no RDF format for {}", path.display()))?;
+    let format = format_for(path).ok_or_else(|| anyhow!("no RDF format for {}", path.display()))?;
     let parser = RdfParser::from_format(format)
         .with_base_iri(base)
         .map_err(|e| anyhow!("bad base IRI {base}: {e}"))?;

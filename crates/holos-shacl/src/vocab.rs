@@ -39,9 +39,21 @@ const SH: &str = "http://www.w3.org/ns/shacl#";
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const RDFS: &str = "http://www.w3.org/2000/01/rdf-schema#";
 
-macro_rules! sh { ($n:literal) => { concat!("http://www.w3.org/ns/shacl#", $n) } }
-macro_rules! rdf { ($n:literal) => { concat!("http://www.w3.org/1999/02/22-rdf-syntax-ns#", $n) } }
-macro_rules! rdfs { ($n:literal) => { concat!("http://www.w3.org/2000/01/rdf-schema#", $n) } }
+macro_rules! sh {
+    ($n:literal) => {
+        concat!("http://www.w3.org/ns/shacl#", $n)
+    };
+}
+macro_rules! rdf {
+    ($n:literal) => {
+        concat!("http://www.w3.org/1999/02/22-rdf-syntax-ns#", $n)
+    };
+}
+macro_rules! rdfs {
+    ($n:literal) => {
+        concat!("http://www.w3.org/2000/01/rdf-schema#", $n)
+    };
+}
 
 sh_vocab! {
     // --- RDF and RDFS

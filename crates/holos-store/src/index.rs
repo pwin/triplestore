@@ -245,21 +245,21 @@ impl QuadIndex {
             graph_name: None,
         };
         match (s, p, o) {
-            (Some(s), Some(p), Some(o)) => Box::new(
-                self.scan3(&self.dspo, &[s, p, o], move |[s, p, o]| quad(s, p, o)),
-            ),
-            (Some(s), Some(p), None) => Box::new(
-                self.scan3(&self.dspo, &[s, p], move |[s, p, o]| quad(s, p, o)),
-            ),
-            (Some(s), None, Some(o)) => Box::new(
-                self.scan3(&self.dosp, &[o, s], move |[o, s, p]| quad(s, p, o)),
-            ),
+            (Some(s), Some(p), Some(o)) => {
+                Box::new(self.scan3(&self.dspo, &[s, p, o], move |[s, p, o]| quad(s, p, o)))
+            }
+            (Some(s), Some(p), None) => {
+                Box::new(self.scan3(&self.dspo, &[s, p], move |[s, p, o]| quad(s, p, o)))
+            }
+            (Some(s), None, Some(o)) => {
+                Box::new(self.scan3(&self.dosp, &[o, s], move |[o, s, p]| quad(s, p, o)))
+            }
             (Some(s), None, None) => {
                 Box::new(self.scan3(&self.dspo, &[s], move |[s, p, o]| quad(s, p, o)))
             }
-            (None, Some(p), Some(o)) => Box::new(
-                self.scan3(&self.dpos, &[p, o], move |[p, o, s]| quad(s, p, o)),
-            ),
+            (None, Some(p), Some(o)) => {
+                Box::new(self.scan3(&self.dpos, &[p, o], move |[p, o, s]| quad(s, p, o)))
+            }
             (None, Some(p), None) => {
                 Box::new(self.scan3(&self.dpos, &[p], move |[p, o, s]| quad(s, p, o)))
             }
@@ -288,30 +288,30 @@ impl QuadIndex {
             graph_name: Some(g),
         };
         match (s, p, o) {
-            (Some(s), Some(p), Some(o)) => Box::new(
-                self.scan4(&self.gspo, &[g, s, p, o], move |[_, s, p, o]| quad(s, p, o)),
-            ),
-            (Some(s), Some(p), None) => Box::new(
-                self.scan4(&self.gspo, &[g, s, p], move |[_, s, p, o]| quad(s, p, o)),
-            ),
-            (Some(s), None, Some(o)) => Box::new(
-                self.scan4(&self.gosp, &[g, o, s], move |[_, o, s, p]| quad(s, p, o)),
-            ),
-            (Some(s), None, None) => Box::new(
-                self.scan4(&self.gspo, &[g, s], move |[_, s, p, o]| quad(s, p, o)),
-            ),
-            (None, Some(p), Some(o)) => Box::new(
-                self.scan4(&self.gpos, &[g, p, o], move |[_, p, o, s]| quad(s, p, o)),
-            ),
-            (None, Some(p), None) => Box::new(
-                self.scan4(&self.gpos, &[g, p], move |[_, p, o, s]| quad(s, p, o)),
-            ),
-            (None, None, Some(o)) => Box::new(
-                self.scan4(&self.gosp, &[g, o], move |[_, o, s, p]| quad(s, p, o)),
-            ),
-            (None, None, None) => Box::new(
-                self.scan4(&self.gspo, &[g], move |[_, s, p, o]| quad(s, p, o)),
-            ),
+            (Some(s), Some(p), Some(o)) => {
+                Box::new(self.scan4(&self.gspo, &[g, s, p, o], move |[_, s, p, o]| quad(s, p, o)))
+            }
+            (Some(s), Some(p), None) => {
+                Box::new(self.scan4(&self.gspo, &[g, s, p], move |[_, s, p, o]| quad(s, p, o)))
+            }
+            (Some(s), None, Some(o)) => {
+                Box::new(self.scan4(&self.gosp, &[g, o, s], move |[_, o, s, p]| quad(s, p, o)))
+            }
+            (Some(s), None, None) => {
+                Box::new(self.scan4(&self.gspo, &[g, s], move |[_, s, p, o]| quad(s, p, o)))
+            }
+            (None, Some(p), Some(o)) => {
+                Box::new(self.scan4(&self.gpos, &[g, p, o], move |[_, p, o, s]| quad(s, p, o)))
+            }
+            (None, Some(p), None) => {
+                Box::new(self.scan4(&self.gpos, &[g, p], move |[_, p, o, s]| quad(s, p, o)))
+            }
+            (None, None, Some(o)) => {
+                Box::new(self.scan4(&self.gosp, &[g, o], move |[_, o, s, p]| quad(s, p, o)))
+            }
+            (None, None, None) => {
+                Box::new(self.scan4(&self.gspo, &[g], move |[_, s, p, o]| quad(s, p, o)))
+            }
         }
     }
 
@@ -330,30 +330,30 @@ impl QuadIndex {
             graph_name: Some(g),
         };
         match (s, p, o) {
-            (Some(s), Some(p), Some(o)) => Box::new(
-                self.scan4(&self.spog, &[s, p, o], move |[s, p, o, g]| quad(s, p, o, g)),
-            ),
-            (Some(s), Some(p), None) => Box::new(
-                self.scan4(&self.spog, &[s, p], move |[s, p, o, g]| quad(s, p, o, g)),
-            ),
-            (Some(s), None, Some(o)) => Box::new(
-                self.scan4(&self.ospg, &[o, s], move |[o, s, p, g]| quad(s, p, o, g)),
-            ),
-            (Some(s), None, None) => Box::new(
-                self.scan4(&self.spog, &[s], move |[s, p, o, g]| quad(s, p, o, g)),
-            ),
-            (None, Some(p), Some(o)) => Box::new(
-                self.scan4(&self.posg, &[p, o], move |[p, o, s, g]| quad(s, p, o, g)),
-            ),
-            (None, Some(p), None) => Box::new(
-                self.scan4(&self.posg, &[p], move |[p, o, s, g]| quad(s, p, o, g)),
-            ),
-            (None, None, Some(o)) => Box::new(
-                self.scan4(&self.ospg, &[o], move |[o, s, p, g]| quad(s, p, o, g)),
-            ),
-            (None, None, None) => Box::new(
-                self.scan4(&self.spog, &[], move |[s, p, o, g]| quad(s, p, o, g)),
-            ),
+            (Some(s), Some(p), Some(o)) => {
+                Box::new(self.scan4(&self.spog, &[s, p, o], move |[s, p, o, g]| quad(s, p, o, g)))
+            }
+            (Some(s), Some(p), None) => {
+                Box::new(self.scan4(&self.spog, &[s, p], move |[s, p, o, g]| quad(s, p, o, g)))
+            }
+            (Some(s), None, Some(o)) => {
+                Box::new(self.scan4(&self.ospg, &[o, s], move |[o, s, p, g]| quad(s, p, o, g)))
+            }
+            (Some(s), None, None) => {
+                Box::new(self.scan4(&self.spog, &[s], move |[s, p, o, g]| quad(s, p, o, g)))
+            }
+            (None, Some(p), Some(o)) => {
+                Box::new(self.scan4(&self.posg, &[p, o], move |[p, o, s, g]| quad(s, p, o, g)))
+            }
+            (None, Some(p), None) => {
+                Box::new(self.scan4(&self.posg, &[p], move |[p, o, s, g]| quad(s, p, o, g)))
+            }
+            (None, None, Some(o)) => {
+                Box::new(self.scan4(&self.ospg, &[o], move |[o, s, p, g]| quad(s, p, o, g)))
+            }
+            (None, None, None) => {
+                Box::new(self.scan4(&self.spog, &[], move |[s, p, o, g]| quad(s, p, o, g)))
+            }
         }
     }
 
@@ -425,10 +425,7 @@ mod tests {
             quad(3, 12, 102, Some(900)),
             quad(1, 11, 103, Some(901)),
         ] {
-            assert!(
-                ix.insert(q).unwrap(),
-                "fixture must not contain duplicates"
-            );
+            assert!(ix.insert(q).unwrap(), "fixture must not contain duplicates");
         }
         ix
     }
@@ -539,7 +536,10 @@ mod tests {
     fn insert_is_idempotent_and_remove_is_complete() {
         let mut ix = fixture();
         let before = ix.len();
-        assert!(!ix.insert(quad(1, 10, 100, None)).unwrap(), "duplicate insert");
+        assert!(
+            !ix.insert(quad(1, 10, 100, None)).unwrap(),
+            "duplicate insert"
+        );
         assert_eq!(ix.len(), before);
 
         assert!(ix.remove(quad(1, 10, 100, None)).unwrap());

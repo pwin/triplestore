@@ -194,9 +194,13 @@ fn points(n: usize) -> String {
     // the same on every run.
     let mut state = 0x2545_F491_4F6C_DD1D_u64;
     for i in 0..n {
-        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         let x = (state >> 11) as f64 / (1u64 << 53) as f64 * 1000.0;
-        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         let y = (state >> 11) as f64 / (1u64 << 53) as f64 * 1000.0;
         turtle.push_str(&format!(
             "ex:p{i} geo:asWKT \"POINT({x:.4} {y:.4})\"^^geo:wktLiteral .\n"

@@ -180,10 +180,8 @@ impl SpatialIndex {
     /// Every indexed geometry whose bounding box overlaps `rect`.
     #[must_use]
     pub fn candidates_in(&self, rect: &Rect) -> Vec<TermId> {
-        let envelope = AABB::from_corners(
-            [rect.min().x, rect.min().y],
-            [rect.max().x, rect.max().y],
-        );
+        let envelope =
+            AABB::from_corners([rect.min().x, rect.min().y], [rect.max().x, rect.max().y]);
         self.tree
             .locate_in_envelope_intersecting(&envelope)
             .map(|indexed| indexed.term)

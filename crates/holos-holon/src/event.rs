@@ -132,11 +132,8 @@ pub fn to_quads(record: &TickRecord<'_>) -> Vec<Quad> {
     say(
         tick.clone().into(),
         holos("admitted"),
-        Literal::new_typed_literal(
-            if record.admitted { "true" } else { "false" },
-            xsd::BOOLEAN,
-        )
-        .into(),
+        Literal::new_typed_literal(if record.admitted { "true" } else { "false" }, xsd::BOOLEAN)
+            .into(),
         &mut out,
     );
     if record.violations > 0 {

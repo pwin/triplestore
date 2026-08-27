@@ -49,7 +49,7 @@ pub struct CsvOptions {
     /// A header like `First Name` or `total (£)` is not a variable, and a mapping cannot
     /// reference it. Normalising replaces every character that is not alphanumeric or `_`
     /// with `_`. A leading digit needs no special handling: SPARQL's `VARNAME` permits one,
-/// so `?2024` is already a valid variable.
+    /// so `?2024` is already a valid variable.
     pub normalize: bool,
     /// Allow rows with a different field count from the header.
     pub flexible: bool,
@@ -88,7 +88,13 @@ pub fn normalize_column(name: &str) -> String {
     }
     let mut out: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if out.is_empty() {
         out.push('_');

@@ -138,9 +138,7 @@ pub fn load(
     graph: Option<&NamedNode>,
     options: &LoadOptions,
 ) -> Result<LoadReport, TabularError> {
-    let target = graph.map_or(GraphName::DefaultGraph, |g| {
-        GraphName::NamedNode(g.clone())
-    });
+    let target = graph.map_or(GraphName::DefaultGraph, |g| GraphName::NamedNode(g.clone()));
     let mut report = LoadReport::default();
     let mut row_number: u64 = 0;
 
@@ -210,9 +208,12 @@ mod tests {
 
     fn run(csv: &str, mapping: &str) -> (Engine, LoadReport) {
         let mut engine = Engine::new();
-        let mut session =
-            Session::open(engine.store(), holos_security::Principal::anonymous(), Policy::permit_all())
-                .expect("session");
+        let mut session = Session::open(
+            engine.store(),
+            holos_security::Principal::anonymous(),
+            Policy::permit_all(),
+        )
+        .expect("session");
         let map = Mapping::parse(mapping).expect("mapping");
         let mut source =
             source::Csv::from_reader(std::io::Cursor::new(csv.to_owned()), &CsvOptions::default())
@@ -324,9 +325,12 @@ mod tests {
             Scope::Predicate(NamedNode::new_unchecked("http://example.org/email")),
             PrincipalMatch::Everyone,
         ));
-        let mut session =
-            Session::open(engine.store(), holos_security::Principal::anonymous(), policy)
-                .expect("session");
+        let mut session = Session::open(
+            engine.store(),
+            holos_security::Principal::anonymous(),
+            policy,
+        )
+        .expect("session");
         let map = Mapping::parse(MAPPING).expect("mapping");
         let mut source =
             source::Csv::from_reader(std::io::Cursor::new(CSV.to_owned()), &CsvOptions::default())
@@ -343,7 +347,9 @@ mod tests {
         assert!(
             matches!(
                 outcome,
-                Err(TabularError::Engine(holos_engine::EngineError::AccessDenied))
+                Err(TabularError::Engine(
+                    holos_engine::EngineError::AccessDenied
+                ))
             ),
             "a denied predicate must stop the load, got {outcome:?}"
         );

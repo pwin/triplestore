@@ -27,9 +27,7 @@ fn engine_with(quads: &[(&str, &str, &str, Option<&str>)]) -> Engine {
                     subject: ex(s).into(),
                     predicate: ex(p),
                     object: Term::NamedNode(ex(o)),
-                    graph_name: g.map_or(GraphName::DefaultGraph, |g| {
-                        GraphName::NamedNode(ex(g))
-                    }),
+                    graph_name: g.map_or(GraphName::DefaultGraph, |g| GraphName::NamedNode(ex(g))),
                 }
                 .as_ref(),
             )
@@ -92,7 +90,11 @@ fn insert_data_into_a_named_graph() {
     let session = unrestricted(&engine);
     assert_eq!(count(&engine, &session, "SELECT * WHERE { ?s ?p ?o }"), 0);
     assert_eq!(
-        count(&engine, &session, "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }"),
+        count(
+            &engine,
+            &session,
+            "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }"
+        ),
         1
     );
 }
@@ -112,11 +114,7 @@ fn delete_data_removes_exactly_what_it_names() {
 #[test]
 fn delete_where_removes_matches() {
     let mut engine = engine_with(&[("a", "p", "b", None), ("c", "p", "d", None)]);
-    let outcome = run(
-        &mut engine,
-        &format!("DELETE WHERE {{ ?s <{EX}p> ?o }}"),
-    )
-    .expect("update");
+    let outcome = run(&mut engine, &format!("DELETE WHERE {{ ?s <{EX}p> ?o }}")).expect("update");
     assert_eq!(outcome.deleted, 2);
     assert_eq!(engine.store().len(), 0);
 }
@@ -425,13 +423,8 @@ fn a_principal_cannot_delete_what_it_cannot_read() {
     let mut session =
         Session::open(engine.store(), Principal::anonymous(), policy).expect("session");
 
-    let outcome = update(
-        &mut engine,
-        &mut session,
-        "DELETE WHERE { ?s ?p ?o }",
-        None,
-    )
-    .expect("update");
+    let outcome =
+        update(&mut engine, &mut session, "DELETE WHERE { ?s ?p ?o }", None).expect("update");
 
     assert_eq!(outcome.deleted, 1, "only the readable quad was deletable");
     assert_eq!(
@@ -471,8 +464,7 @@ fn remote_load_is_refused_with_a_reason() {
     // primitive. Refusing is a decision, so the message has to say so rather than looking
     // like a missing feature.
     let mut engine = Engine::new();
-    let err = run(&mut engine, "LOAD <http://example.com/data.ttl>")
-        .expect_err("should refuse");
+    let err = run(&mut engine, "LOAD <http://example.com/data.ttl>").expect_err("should refuse");
     let message = err.to_string();
     assert!(
         message.contains("remote fetch is not enabled"),
@@ -541,7 +533,12 @@ fn an_update_with_nothing_to_match_is_left_alone() {
     )
     .expect("parses");
     with_protocol_dataset(&mut parsed, vec![ex("g1")], Vec::new()).expect("not a conflict");
-    assert_eq!(apply(&mut engine, &mut session, &parsed).expect("applies").inserted, 1);
+    assert_eq!(
+        apply(&mut engine, &mut session, &parsed)
+            .expect("applies")
+            .inserted,
+        1
+    );
 }
 
 #[test]
@@ -551,5 +548,9 @@ fn no_parameters_change_nothing() {
     let before = format!("{parsed:?}");
     // An empty dataset is not a conflict even against an update that names its own.
     with_protocol_dataset(&mut parsed, Vec::new(), Vec::new()).expect("no conflict");
-    assert_eq!(format!("{parsed:?}"), before, "the update must be untouched");
+    assert_eq!(
+        format!("{parsed:?}"),
+        before,
+        "the update must be untouched"
+    );
 }

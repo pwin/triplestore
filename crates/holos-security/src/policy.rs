@@ -275,7 +275,11 @@ impl Policy {
 
         let resolve = |n: &NamedNode| store.lookup_term(n.as_ref().into());
 
-        for rule in self.rules.iter().filter(|r| r.applies_to.matches(principal)) {
+        for rule in self
+            .rules
+            .iter()
+            .filter(|r| r.applies_to.matches(principal))
+        {
             let entry = (rule.scope.specificity(), rule.effect, rule.modes);
             match &rule.scope {
                 Scope::Everything => merge(&mut everything, entry),
@@ -343,10 +347,7 @@ fn merge_map<K: std::hash::Hash + Eq>(
 }
 
 /// Two rules at the same scope: deny wins, and the mode sets union.
-fn resolve_conflict(
-    a: (u8, Effect, Modes),
-    b: (u8, Effect, Modes),
-) -> (u8, Effect, Modes) {
+fn resolve_conflict(a: (u8, Effect, Modes), b: (u8, Effect, Modes)) -> (u8, Effect, Modes) {
     match (a.1, b.1) {
         (Effect::Deny, Effect::Deny) => (a.0, Effect::Deny, a.2.union(b.2)),
         (Effect::Deny, Effect::Allow) => a,
@@ -407,8 +408,7 @@ impl CompiledPolicy {
     /// recompile when this returns `true`; [`crate::Session`] does it automatically.
     #[must_use]
     pub fn is_stale(&self, store: &Store) -> bool {
-        !self.unresolved.is_empty()
-            && store.dictionary_len() != self.compiled_at_dictionary_len
+        !self.unresolved.is_empty() && store.dictionary_len() != self.compiled_at_dictionary_len
     }
 
     /// IRIs the policy names that the store had not seen at compile time.
@@ -536,9 +536,9 @@ mod tests {
             store
                 .insert(
                     Quad {
-                    subject: nn(s).into(),
-                    predicate: nn(p),
-                    object: nn(o).into(),
+                        subject: nn(s).into(),
+                        predicate: nn(p),
+                        object: nn(o).into(),
                         graph_name: g.map_or(GraphName::DefaultGraph, |g| nn(g).into()),
                     }
                     .as_ref(),
@@ -578,7 +578,8 @@ mod tests {
                 Scope::Graph(nn("public")),
                 PrincipalMatch::Role("reader".into()),
             ))
-            .compile(&store, &p).unwrap();
+            .compile(&store, &p)
+            .unwrap();
         let seen = visible(&store, &compiled);
         assert_eq!(seen.len(), 2, "only the public graph: {seen:?}");
         assert!(seen.iter().all(|s| s.contains("alice")));
@@ -600,7 +601,8 @@ mod tests {
                 Scope::Predicate(nn("salary")),
                 PrincipalMatch::Everyone,
             ))
-            .compile(&store, &p).unwrap();
+            .compile(&store, &p)
+            .unwrap();
         let seen = visible(&store, &compiled);
         assert_eq!(seen.len(), 3, "three names, no salaries: {seen:?}");
         assert!(!seen.iter().any(|s| s.contains("salary")));
@@ -627,7 +629,8 @@ mod tests {
                 Scope::GraphPredicate(nn("hr"), nn("salary")),
                 PrincipalMatch::Role("hr".into()),
             ))
-            .compile(&store, &p).unwrap();
+            .compile(&store, &p)
+            .unwrap();
         let seen = visible(&store, &compiled);
         assert!(
             seen.contains(&format!("{} {}", nn("bob"), nn("salary"))),
@@ -654,8 +657,11 @@ mod tests {
                 Scope::Predicate(nn("salary")),
                 PrincipalMatch::Role("b".into()),
             ))
-            .compile(&store, &p).unwrap();
-        assert!(!visible(&store, &compiled).iter().any(|s| s.contains("salary")));
+            .compile(&store, &p)
+            .unwrap();
+        assert!(!visible(&store, &compiled)
+            .iter()
+            .any(|s| s.contains("salary")));
     }
 
     #[test]
@@ -668,7 +674,8 @@ mod tests {
                 Scope::Everything,
                 PrincipalMatch::Everyone,
             ))
-            .compile(&store, &p).unwrap();
+            .compile(&store, &p)
+            .unwrap();
         let quad = store
             .quads_for_pattern(None, None, None, holos_store::GraphFilter::Any)
             .next()
@@ -692,7 +699,8 @@ mod tests {
         let p = Principal::anonymous().with_role("reader");
         let compiled = Policy::permit_all()
             .with_graph_label(nn("hr"), Label::level(3))
-            .compile(&store, &p).unwrap();
+            .compile(&store, &p)
+            .unwrap();
         let seen = visible(&store, &compiled);
         assert!(
             !seen.iter().any(|s| s.contains("bob")),
@@ -703,7 +711,8 @@ mod tests {
         let cleared = Principal::anonymous().with_clearance(Label::level(3));
         let compiled = Policy::permit_all()
             .with_graph_label(nn("hr"), Label::level(3))
-            .compile(&store, &cleared).unwrap();
+            .compile(&store, &cleared)
+            .unwrap();
         assert!(visible(&store, &compiled).iter().any(|s| s.contains("bob")));
     }
 
@@ -757,7 +766,8 @@ mod tests {
         let p = Principal::anonymous();
         let compiled = Policy::default()
             .with_semantics(Semantics::Fail)
-            .compile(&store, &p).unwrap();
+            .compile(&store, &p)
+            .unwrap();
         let quad = store
             .quads_for_pattern(None, None, None, holos_store::GraphFilter::Any)
             .next()
@@ -809,7 +819,9 @@ mod tests {
             "policy must be recompiled once its IRIs resolve"
         );
         let recompiled = policy.compile(&store, &p).unwrap();
-        assert!(!visible(&store, &recompiled).iter().any(|s| s.contains("salary")));
+        assert!(!visible(&store, &recompiled)
+            .iter()
+            .any(|s| s.contains("salary")));
     }
 }
 
@@ -861,16 +873,25 @@ mod decision_tests {
         let permissive = compile(Policy::permit_all());
         for mode in [Modes::READ, Modes::WRITE, Modes::ADMIN] {
             assert_eq!(permissive.decide_quad(quad(None, 1), mode), Decision::Allow);
-            assert_eq!(permissive.decide_quad(quad(Some(3), 7), mode), Decision::Allow);
+            assert_eq!(
+                permissive.decide_quad(quad(Some(3), 7), mode),
+                Decision::Allow
+            );
         }
 
         // deny-all filters everything.
         let restrictive = compile(Policy::default());
-        assert_eq!(restrictive.decide_quad(quad(None, 1), Modes::READ), Decision::Filter);
+        assert_eq!(
+            restrictive.decide_quad(quad(None, 1), Modes::READ),
+            Decision::Filter
+        );
 
         // ...and errors instead, under Fail semantics.
         let failing = compile(Policy::default().with_semantics(Semantics::Fail));
-        assert_eq!(failing.decide_quad(quad(None, 1), Modes::READ), Decision::Fail);
+        assert_eq!(
+            failing.decide_quad(quad(None, 1), Modes::READ),
+            Decision::Fail
+        );
 
         // A blanket rule scoped to one mode leaves the others on the default.
         let read_only = compile(Policy::default().with_rule(Rule::allow(
@@ -878,8 +899,14 @@ mod decision_tests {
             Scope::Everything,
             PrincipalMatch::Everyone,
         )));
-        assert_eq!(read_only.decide_quad(quad(None, 1), Modes::READ), Decision::Allow);
-        assert_eq!(read_only.decide_quad(quad(None, 1), Modes::WRITE), Decision::Filter);
+        assert_eq!(
+            read_only.decide_quad(quad(None, 1), Modes::READ),
+            Decision::Allow
+        );
+        assert_eq!(
+            read_only.decide_quad(quad(None, 1), Modes::WRITE),
+            Decision::Filter
+        );
 
         // A predicate rule beats the blanket default, and only for that predicate.
         let one_denied = compile(Policy::permit_all().with_rule(Rule::deny(

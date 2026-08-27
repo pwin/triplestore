@@ -3,7 +3,10 @@
 //! `cargo run -p holos-tabular --example debug_mapping`
 use holos_engine::Engine;
 use holos_security::{Policy, Principal, Session};
-use holos_tabular::{source::{Csv, CsvOptions, RowSource}, Mapping};
+use holos_tabular::{
+    source::{Csv, CsvOptions, RowSource},
+    Mapping,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mapping = Mapping::parse(

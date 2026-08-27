@@ -111,8 +111,18 @@ pub fn bridge_pair(
     let mut builder = GraphBuilder::new();
     for quad in store.quads_for_pattern(None, None, None, shapes_graph) {
         let quad = quad?;
-        let s = intern(store, &mut bridged.terms, &mut bridged.forward, quad.subject)?;
-        let p = intern(store, &mut bridged.terms, &mut bridged.forward, quad.predicate)?;
+        let s = intern(
+            store,
+            &mut bridged.terms,
+            &mut bridged.forward,
+            quad.subject,
+        )?;
+        let p = intern(
+            store,
+            &mut bridged.terms,
+            &mut bridged.forward,
+            quad.predicate,
+        )?;
         let o = intern(store, &mut bridged.terms, &mut bridged.forward, quad.object)?;
         builder.push(s, p, o);
     }
@@ -249,12 +259,21 @@ mod tests {
             .unwrap();
         let engine_person = bridged.engine_id(person).expect("bridged");
         // The same integer appears on both sides.
-        assert!(shapes.objects_of(bridged.vocab.sh_targetClass).any(|t| t == engine_person));
+        assert!(shapes
+            .objects_of(bridged.vocab.sh_targetClass)
+            .any(|t| t == engine_person));
         assert!(bridged
             .graph
-            .objects_of(bridged.engine_id(
-                store.lookup_term(oxrdf::vocab::rdf::TYPE.into()).unwrap().unwrap()
-            ).unwrap())
+            .objects_of(
+                bridged
+                    .engine_id(
+                        store
+                            .lookup_term(oxrdf::vocab::rdf::TYPE.into())
+                            .unwrap()
+                            .unwrap()
+                    )
+                    .unwrap()
+            )
             .any(|t| t == engine_person));
     }
 }

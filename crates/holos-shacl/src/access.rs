@@ -115,9 +115,13 @@ impl<'a> GraphView<'a> {
     ///
     /// Bounded rather than trusting `rdf:rest`: a cyclic list in a hostile shapes graph
     /// must not hang the validator.
-    pub fn list(&self, head: TermId, rdf_first: TermId, rdf_rest: TermId, rdf_nil: TermId)
-        -> Result<Vec<TermId>>
-    {
+    pub fn list(
+        &self,
+        head: TermId,
+        rdf_first: TermId,
+        rdf_rest: TermId,
+        rdf_nil: TermId,
+    ) -> Result<Vec<TermId>> {
         let mut out = Vec::new();
         let mut node = head;
         for _ in 0..100_000 {

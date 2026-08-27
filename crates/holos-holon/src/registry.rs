@@ -125,12 +125,10 @@ pub fn version(engine: &Engine, holon: &Holon) -> Result<u64, HolonError> {
     let Some(subject) = store.lookup_term(holon.id.as_ref().into())? else {
         return Ok(0);
     };
-    Ok(
-        match object(store, graph, subject, &holos("version"))? {
-            Some(Term::Literal(l)) => l.value().parse().unwrap_or(0),
-            _ => 0,
-        },
-    )
+    Ok(match object(store, graph, subject, &holos("version"))? {
+        Some(Term::Literal(l)) => l.value().parse().unwrap_or(0),
+        _ => 0,
+    })
 }
 
 /// The version the next tick will produce.
@@ -190,12 +188,7 @@ fn graph_filter(store: &Store, graph: &NamedNode) -> Result<Option<GraphFilter>,
         .map(GraphFilter::Named))
 }
 
-fn quad(
-    subject: &NamedNode,
-    predicate: NamedNode,
-    object: NamedNode,
-    graph: &GraphName,
-) -> Quad {
+fn quad(subject: &NamedNode, predicate: NamedNode, object: NamedNode, graph: &GraphName) -> Quad {
     Quad {
         subject: subject.clone().into(),
         predicate,

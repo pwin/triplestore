@@ -24,29 +24,57 @@ fn ex(name: &str) -> NamedNode {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let people: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(50_000);
+    let people: usize = std::env::args()
+        .nth(1)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(50_000);
     let orgs = 20;
 
     let mut engine = Engine::new();
     {
         let store = engine.store_mut();
         let mut add = |s: NamedNode, p: NamedNode, o: oxrdf::Term| {
-            store.insert(Quad { subject: s.into(), predicate: p, object: o,
-                                graph_name: GraphName::DefaultGraph }.as_ref()).expect("insert");
+            store
+                .insert(
+                    Quad {
+                        subject: s.into(),
+                        predicate: p,
+                        object: o,
+                        graph_name: GraphName::DefaultGraph,
+                    }
+                    .as_ref(),
+                )
+                .expect("insert");
         };
         for i in 0..people {
             let s = ex(&format!("person{i}"));
             add(s.clone(), rdf::TYPE.into_owned(), ex("Person").into());
-            add(s.clone(), ex("name"), Literal::new_simple_literal(format!("P{i}")).into());
-            add(s.clone(), ex("worksFor"), ex(&format!("org{}", i % orgs)).into());
+            add(
+                s.clone(),
+                ex("name"),
+                Literal::new_simple_literal(format!("P{i}")).into(),
+            );
+            add(
+                s.clone(),
+                ex("worksFor"),
+                ex(&format!("org{}", i % orgs)).into(),
+            );
             // One person in the whole dataset has this. A plan that starts here does
             // almost no work; a plan that starts anywhere else does a great deal.
             if i == 0 {
-                add(s, ex("badgeNumber"), Literal::new_simple_literal("0001").into());
+                add(
+                    s,
+                    ex("badgeNumber"),
+                    Literal::new_simple_literal("0001").into(),
+                );
             }
         }
         for i in 0..orgs {
-            add(ex(&format!("org{i}")), ex("country"), Literal::new_simple_literal("GB").into());
+            add(
+                ex(&format!("org{i}")),
+                ex("country"),
+                Literal::new_simple_literal("GB").into(),
+            );
         }
     }
 
@@ -79,7 +107,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (rows_a, time_a) = run(&selective_first)?;
     let (rows_b, time_b) = run(&selective_last)?;
 
-    println!("{} triples, {} subjects", engine.store().len(), people + orgs);
+    println!(
+        "{} triples, {} subjects",
+        engine.store().len(),
+        people + orgs
+    );
     println!("both queries return the same answers: {}", rows_a == rows_b);
     println!();
     println!("most selective pattern written first   {rows_a} rows in {time_a:.4}s");

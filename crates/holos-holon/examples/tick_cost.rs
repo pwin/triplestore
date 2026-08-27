@@ -56,7 +56,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..scale {
         for triple in [
             (rdf::TYPE.into_owned(), oxrdf::Term::from(ex("Person"))),
-            (ex("name"), Literal::new_simple_literal(format!("P{i}")).into()),
+            (
+                ex("name"),
+                Literal::new_simple_literal(format!("P{i}")).into(),
+            ),
             (
                 ex("age"),
                 Literal::new_typed_literal((20 + i % 60).to_string(), xsd::INTEGER).into(),
@@ -155,7 +158,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let refused = tick(&mut engine, &holon, &mut session, &Delta::adding(bad))?;
     let reject_time = started.elapsed();
 
-    println!("scene                {} instances, {} triples", scale, scale * 3);
+    println!(
+        "scene                {} instances, {} triples",
+        scale,
+        scale * 3
+    );
     println!("seeded in            {:.2}s", seeded.as_secs_f64());
     println!(
         "full validation      {:.3}s ({} results)",
