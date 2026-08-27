@@ -8,7 +8,7 @@
 
 use holos_engine::Engine;
 use holos_security::{Modes, Policy, Principal, PrincipalMatch, Rule, Scope, Session};
-use oxrdf::NamedNode;
+use oxrdf::{NamedNode, Term};
 use oxrdfio::RdfFormat;
 use spareval::QueryResults;
 
@@ -80,6 +80,94 @@ fn a_topological_relation_filters_by_geometry() {
         out,
         vec![r#"name="London""#, r#"name="Paris""#],
         "Sydney is not in western Europe: {out:?}"
+    );
+}
+
+#[test]
+fn distance_works_for_geometries_that_are_not_points() {
+    // `spargeo`'s `geof:distance` reads both operands as points and returns unbound for
+    // anything else. Against the OGC example dataset that was every Polygon and every
+    // LineString: a perfectly ordinary `geof:distance(?point, ?polygon, uom:metre)` produced
+    // no binding at all rather than a distance, which is the quietest kind of wrong.
+    let mut engine = Engine::new();
+    engine
+        .bulk_load(
+            br#"@prefix ex:  <http://example.com/> .
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+ex:point   geo:asWKT "POINT(0 0)"^^geo:wktLiteral .
+ex:far     geo:asWKT "POINT(1 0)"^^geo:wktLiteral .
+ex:square  geo:asWKT "POLYGON((1 -1, 2 -1, 2 1, 1 1, 1 -1))"^^geo:wktLiteral .
+ex:through geo:asWKT "POLYGON((-1 -1, 1 -1, 1 1, -1 1, -1 -1))"^^geo:wktLiteral .
+ex:line    geo:asWKT "LINESTRING(1 -5, 1 5)"^^geo:wktLiteral .
+"#
+            .as_ref(),
+            RdfFormat::Turtle,
+            None,
+        )
+        .expect("load");
+    let session = Session::unrestricted(engine.store()).expect("session");
+    let view = engine.view(&session);
+
+    let distance = |a: &str, b: &str| -> Option<f64> {
+        let sparql = format!(
+            "PREFIX ex: <http://example.com/> \
+             PREFIX geo: <http://www.opengis.net/ont/geosparql#> \
+             PREFIX geof: <http://www.opengis.net/def/function/geosparql/> \
+             PREFIX uom: <http://www.opengis.net/def/uom/OGC/1.0/> \
+             SELECT ?d WHERE {{ ex:{a} geo:asWKT ?x . ex:{b} geo:asWKT ?y . \
+             BIND(geof:distance(?x, ?y, uom:metre) AS ?d) }}"
+        );
+        let (results, _) = Engine::query(&view, &sparql, None)
+            .map(|r| (r, ()))
+            .expect("query");
+        match results {
+            QueryResults::Solutions(iter) => iter
+                .map(|s| s.expect("solution").get("d").cloned())
+                .next()
+                .flatten()
+                .and_then(|t| match t {
+                    Term::Literal(l) => l.value().parse::<f64>().ok(),
+                    _ => None,
+                }),
+            _ => panic!("expected solutions"),
+        }
+    };
+
+    // Point to polygon: the shortest distance is to the polygon's near edge at x = 1, which
+    // is the same great-circle distance as the point (1 0) itself.
+    let to_square = distance("point", "square").expect("a distance to a polygon");
+    let to_far = distance("point", "far").expect("a distance to a point");
+    assert!(
+        (to_square - to_far).abs() < 1.0,
+        "the nearest point of the square lies on x = 1, so this should match the distance to \
+         POINT(1 0): {to_square} against {to_far}"
+    );
+
+    // Point to line: same edge, same answer.
+    let to_line = distance("point", "line").expect("a distance to a linestring");
+    assert!(
+        (to_line - to_far).abs() < 1.0,
+        "the line crosses x = 1: {to_line} against {to_far}"
+    );
+
+    // A point inside a polygon is zero away from it, not unbound.
+    assert_eq!(
+        distance("point", "through"),
+        Some(0.0),
+        "a point inside a polygon is not at an undefined distance from it"
+    );
+
+    // Polygon to polygon, neither of them a point anywhere in the call.
+    assert!(
+        distance("through", "square").is_some(),
+        "two polygons must have a distance"
+    );
+
+    // And the case that already worked must return exactly what it returned before, which is
+    // why the replacement reuses the same Haversine rather than its own arithmetic.
+    assert!(
+        (to_far - 111_195.079_734_0).abs() < 0.01,
+        "point-to-point changed: {to_far}"
     );
 }
 

@@ -47,9 +47,11 @@ const SYM_DIFFERENCE: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.opengis.net/def/function/geosparql/symDifference");
 const BOUNDARY: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.opengis.net/def/function/geosparql/boundary");
+const DISTANCE: NamedNodeRef<'_> =
+    NamedNodeRef::new_unchecked("http://www.opengis.net/def/function/geosparql/distance");
 
-/// The functions this module adds to `spargeo`'s 43.
-pub const EXTRA_GEOSPARQL_FUNCTIONS: [(NamedNodeRef<'static>, fn(&[Term]) -> Option<Term>); 6] = [
+/// The functions this module adds to, or replaces in, `spargeo`'s 43.
+pub const EXTRA_GEOSPARQL_FUNCTIONS: [(NamedNodeRef<'static>, fn(&[Term]) -> Option<Term>); 7] = [
     (BUFFER, geof_buffer),
     (BOUNDARY, geof_boundary),
     // The four set operations are `spargeo`'s, wrapped to snap their output back onto the
@@ -59,6 +61,9 @@ pub const EXTRA_GEOSPARQL_FUNCTIONS: [(NamedNodeRef<'static>, fn(&[Term]) -> Opt
     (INTERSECTION, geof_intersection),
     (DIFFERENCE, geof_difference),
     (SYM_DIFFERENCE, geof_sym_difference),
+    // Also a replacement, and for a plainer reason: `spargeo`'s takes both operands as
+    // points and returns unbound for anything else. See `geof_distance`.
+    (DISTANCE, geof_distance),
 ];
 
 // ---------------------------------------------------------------------------------
@@ -498,6 +503,103 @@ fn line_endpoints(lines: &[LineString]) -> Vec<Point> {
         .filter(|(_, n)| n % 2 == 1)
         .map(|(c, _)| Point::from(c))
         .collect()
+}
+
+// ---------------------------------------------------------------------------------
+// distance
+// ---------------------------------------------------------------------------------
+
+/// `geof:distance(g1, g2, units)` — the shortest distance between two geometries.
+///
+/// # Why this replaces `spargeo`'s
+///
+/// `spargeo`'s implementation reads both operands as *points* and returns `None` — an
+/// unbound variable — for anything else. Against the OGC GeoSPARQL example dataset that was
+/// every Polygon and every LineString in it: `geof:distance(?point, ?polygon, uom:metre)`
+/// silently produced no binding rather than a distance. GeoSPARQL defines the function for
+/// any two geometries, as the shortest distance between a point of one and a point of the
+/// other.
+///
+/// # How the shortest distance is found
+///
+/// 1. Intersecting geometries are zero apart, which is the definition when they meet.
+/// 2. Otherwise the minimum is taken over every vertex of each geometry against its closest
+///    point on the other, in both directions.
+///
+/// Step 2 is exact, not a sample. For two straight segments that do not cross, the closest
+/// pair is always attained at an endpoint of at least one of them; a polyline or a polygon
+/// boundary is a union of segments, so walking every vertex against the whole of the other
+/// geometry considers every candidate pair there is.
+///
+/// The closest pair is located in planar degrees and then measured with the same Haversine
+/// formula `spargeo` uses, so a point-to-point call returns exactly the number it returned
+/// before this existed. That is asserted by a test rather than assumed.
+///
+/// # Cost
+///
+/// Quadratic in the vertex counts: every vertex of each operand is tested against the whole
+/// of the other. That is nothing for the geometries GeoSPARQL datasets actually carry — the
+/// OGC example's polygons have five vertices each — and it would matter for two detailed
+/// coastlines. Narrowing it needs an index reaching *inside* a single geometry, which is a
+/// different structure from §17's, and that one indexes whole geometries.
+fn geof_distance(args: &[Term]) -> Option<Term> {
+    let [left, right, units] = args else {
+        return None;
+    };
+    let factor = meter_factor(units)?;
+    let left = extract_geometry(left)?;
+    let right = extract_geometry(right)?;
+    let meters = shortest_distance(&left, &right)?;
+    Some(Literal::from(meters / factor).into())
+}
+
+/// The metres one unit of `units` represents, or `None` for an IRI that is not a length.
+///
+/// Restated rather than borrowed: `spargeo` keeps its unit tables private. The two it
+/// supports are the two here, so a query that worked before still works, and one naming a
+/// unit neither of us handles still comes back unbound rather than wrong.
+fn meter_factor(units: &Term) -> Option<f64> {
+    const OGC_UOM: &str = "http://www.opengis.net/def/uom/OGC/1.0/";
+    let Term::NamedNode(iri) = units else {
+        return None;
+    };
+    match iri.as_str().strip_prefix(OGC_UOM)? {
+        "metre" | "meter" => Some(1.0),
+        "kilometre" | "kilometer" => Some(1000.0),
+        _ => None,
+    }
+}
+
+/// The shortest distance in metres between two geometries.
+fn shortest_distance(left: &Geometry, right: &Geometry) -> Option<f64> {
+    use geo::algorithm::{ClosestPoint, Intersects};
+    use geo::CoordsIter;
+    use geo::{Closest, Distance, Haversine};
+
+    if left.intersects(right) {
+        return Some(0.0);
+    }
+
+    let mut best = f64::INFINITY;
+    let mut consider = |from: &Geometry, to: &Geometry| {
+        for coord in from.coords_iter() {
+            let vertex = Point::from(coord);
+            // `Indeterminate` means the geometry is empty, and an empty geometry has no
+            // closest point to offer; skipping it leaves `best` untouched.
+            let closest = match to.closest_point(&vertex) {
+                Closest::Intersection(p) | Closest::SinglePoint(p) => p,
+                Closest::Indeterminate => continue,
+            };
+            let meters = Haversine.distance(vertex, closest);
+            if meters < best {
+                best = meters;
+            }
+        }
+    };
+    consider(left, right);
+    consider(right, left);
+
+    best.is_finite().then_some(best)
 }
 
 /// The IRIs this module registers, for the documentation and tests to assert against.

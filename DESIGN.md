@@ -1303,6 +1303,31 @@ find nothing, because §14's property does not get a geospatial exemption.
 Reused rather than rewritten, for the same reason as the rest of L0 (§4): conformance-heavy
 geometry code that already exists and is already tested.
 
+### `geof:distance` only worked between two points
+
+Found by re-running the OGC GeoSPARQL example dataset through a live server, query by query,
+rather than through the test suite. `geof:distance(?point, ?polygon, uom:metre)` came back
+with **no binding at all** — not an error, not a zero, an unbound variable that `ORDER BY`
+then sorted to the top. Against that dataset it was every Polygon and every LineString in it:
+five of the ten geometries.
+
+The cause is upstream. `spargeo`'s implementation reads both operands as points and returns
+`None` for anything else, and an extension function returning `None` is indistinguishable
+from one whose arguments were the wrong type. GeoSPARQL defines the function for any two
+geometries, as the shortest distance between a point of one and a point of the other.
+
+It is replaced in `geo_ext`, registered after `spargeo`'s so it wins, in the same way the set
+operations already are. Intersecting geometries are zero apart; otherwise the minimum is
+taken over every vertex of each geometry against its closest point on the other, in both
+directions. That is exact rather than a sample: for two straight segments that do not cross
+the closest pair is always attained at an endpoint of one of them, and a polyline or polygon
+boundary is a union of segments.
+
+The closest pair is located in planar degrees and then measured with the same Haversine
+formula `spargeo` uses, so **a point-to-point call returns exactly the number it returned
+before** — asserted by a test, and confirmed against the four point-to-point distances the
+example dataset produces, which are unchanged to the last digit.
+
 ### What is missing, and where it goes
 
 These are **filter** functions. They evaluate over whatever bindings reach them, so
