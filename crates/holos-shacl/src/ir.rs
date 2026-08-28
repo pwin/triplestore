@@ -141,8 +141,19 @@ pub enum Constraint {
     Property(ShapeIdx),
     /// `sh:qualifiedValueShape` with its counts.
     Qualified(Box<Qualified>),
-    /// `sh:closed`
-    Closed(Vec<TermId>),
+    /// `sh:closed` — the ignored properties, and where the allowed set comes from.
+    ///
+    /// `sh:closed true` closes against the shape's *own* property shapes.
+    /// `sh:closed sh:ByTypes` closes against the property shapes of every shape that is a
+    /// class the focus node is an instance of, following `rdfs:subClassOf` upwards — so a
+    /// subclass may use its superclass's properties, and an instance of the superclass alone
+    /// may not use the subclass's.
+    Closed {
+        /// `sh:ignoredProperties`.
+        ignored: Vec<TermId>,
+        /// True for `sh:ByTypes`, which cannot be resolved until a focus node is known.
+        by_types: bool,
+    },
     /// `sh:hasValue`
     HasValue(TermId),
     /// `sh:in`
@@ -246,7 +257,7 @@ impl Constraint {
                     sh.qualified_max_count_component
                 }
             }
-            Self::Closed(_) => sh.closed_component,
+            Self::Closed { .. } => sh.closed_component,
             Self::HasValue(_) => sh.has_value_component,
             Self::In(_) => sh.in_component,
         }
@@ -765,7 +776,7 @@ impl<'a> Compiler<'a> {
             Constraint::In(_) => parameter == sh.r#in,
             Constraint::LanguageIn(_) => parameter == sh.language_in,
             Constraint::UniqueLang => parameter == sh.unique_lang,
-            Constraint::Closed(_) => parameter == sh.closed,
+            Constraint::Closed { .. } => parameter == sh.closed,
             Constraint::SingleLine => parameter == sh.single_line,
             // Shape-valued constraints identify themselves by the shape they name.
             Constraint::Property(i)
@@ -1028,12 +1039,15 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        if matches!(g.object(node, sh.closed)?, Some(v) if self.is_true(v)) {
-            let mut ignored = Vec::new();
-            if let Some(list) = g.object(node, sh.ignored_properties)? {
-                ignored = self.list(list)?;
+        if let Some(closed) = g.object(node, sh.closed)? {
+            let by_types = closed == sh.by_types;
+            if by_types || self.is_true(closed) {
+                let mut ignored = Vec::new();
+                if let Some(list) = g.object(node, sh.ignored_properties)? {
+                    ignored = self.list(list)?;
+                }
+                out.push(Constraint::Closed { ignored, by_types });
             }
-            out.push(Constraint::Closed(ignored));
         }
 
         Ok(out)

@@ -696,8 +696,12 @@ impl<'a> Validator<'a> {
                     results.push(self.result(shape, focus, None, component));
                 }
             }
-            Constraint::Closed(ignored) => {
-                let allowed = self.allowed_predicates(shape, ignored);
+            Constraint::Closed { ignored, by_types } => {
+                let allowed = if *by_types {
+                    self.allowed_by_types(focus, ignored)?
+                } else {
+                    self.allowed_predicates(shape, ignored)
+                };
                 for quad in
                     self.data
                         .store()
@@ -724,6 +728,69 @@ impl<'a> Validator<'a> {
 
     /// Predicates `sh:closed` permits: those named by the shape's property shapes, plus
     /// `sh:ignoredProperties`.
+    /// The predicates `sh:closed sh:ByTypes` admits at one focus node.
+    ///
+    /// Every class the node is an instance of, and every class those are subclasses of,
+    /// contributes the property shapes of the shape that *is* that class. So a node typed as
+    /// a subclass may use its superclass's properties, and a node typed only as the
+    /// superclass may not use the subclass's — which is exactly what the suite checks.
+    ///
+    /// Unlike `sh:closed true`, this cannot be resolved when the shape is compiled: it
+    /// depends on the focus node's types, which are data.
+    fn allowed_by_types(
+        &self,
+        focus: TermId,
+        ignored: &[TermId],
+    ) -> Result<FxHashSet<TermId>, ShaclError> {
+        let mut allowed: FxHashSet<TermId> = ignored.iter().copied().collect();
+        // `rdf:type` is always admitted here, unlike under `sh:closed true`: it is the
+        // mechanism this mode closes *by*, so flagging the triple that selects the allowed
+        // set would make every typed node violate.
+        allowed.insert(self.sh.rdf_type);
+        let mut classes = self.data.objects(focus, self.sh.rdf_type)?;
+        let mut seen: FxHashSet<TermId> = classes.iter().copied().collect();
+        let mut i = 0;
+        // Bounded for the same reason `instances_of` is: a cyclic class hierarchy must not
+        // hang validation.
+        while i < classes.len() && classes.len() < 10_000 {
+            let class = classes[i];
+            i += 1;
+            for sup in self.data.objects(class, self.sh.rdfs_subclass_of)? {
+                if seen.insert(sup) {
+                    classes.push(sup);
+                }
+            }
+        }
+
+        // Every shape that applies to a node of these classes contributes its properties:
+        // the shape that *is* the class, any shape targeting the class, and anything those
+        // reach through `sh:node`. A node typed as a subclass may therefore use properties
+        // declared anywhere in that reachable set, which is what makes the mode "by types"
+        // rather than "by this shape".
+        let mut queue: Vec<ShapeIdx> = Vec::new();
+        for &class in &classes {
+            queue.extend(self.shapes.by_node(class));
+            queue.extend(self.shapes.shapes_targeting_class(class).iter().copied());
+        }
+        let mut visited: FxHashSet<usize> = FxHashSet::default();
+        let mut j = 0;
+        while j < queue.len() {
+            let idx = queue[j];
+            j += 1;
+            if !visited.insert(idx.0 as usize) {
+                continue;
+            }
+            let shape = self.shapes.shape(idx);
+            allowed.extend(self.allowed_predicates(shape, &[]));
+            for constraint in &shape.constraints {
+                if let Constraint::Node(inner) = constraint {
+                    queue.push(*inner);
+                }
+            }
+        }
+        Ok(allowed)
+    }
+
     fn allowed_predicates(&self, shape: &Shape, ignored: &[TermId]) -> FxHashSet<TermId> {
         let mut allowed: FxHashSet<TermId> = ignored.iter().copied().collect();
         for constraint in &shape.constraints {

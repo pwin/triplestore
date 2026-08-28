@@ -115,6 +115,7 @@ sh_vocab! {
     subset_of => sh!("subsetOf"),
     unique_values_for => sh!("uniqueValuesFor"),
     some_value => sh!("someValue"),
+    by_types => sh!("ByTypes"),
     rdf_reifies => rdf!("reifies"),
     equals => sh!("equals"),
     disjoint => sh!("disjoint"),
