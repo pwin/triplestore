@@ -260,8 +260,27 @@ impl<'a> Validator<'a> {
             Some(path) => self.eval_path(path, focus)?,
             None => vec![focus],
         };
-        for constraint in &shape.constraints {
+        for (i, constraint) in shape.constraints.iter().enumerate() {
+            // A `{| sh:deactivated true |}` annotation switches off one constraint, where
+            // `sh:deactivated` on the shape switches off all of them.
+            if shape.annotations.get(i).is_some_and(|a| a.deactivated) {
+                continue;
+            }
+            let before = results.len();
             self.check(shape, constraint, focus, &values, depth, results)?;
+            // Message and severity annotations replace the shape's own, for results this
+            // constraint produced. Applied afterwards rather than threaded through `check`,
+            // which would mean passing them to twenty-five arms that do not care.
+            if let Some(annotation) = shape.annotations.get(i) {
+                for result in &mut results[before..] {
+                    if !annotation.messages.is_empty() {
+                        result.messages.clone_from(&annotation.messages);
+                    }
+                    if let Some(severity) = annotation.severity {
+                        result.severity = severity;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -492,6 +511,21 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
+            // `sh:someValue` is existential where `sh:node` is universal, so the result
+            // is about the focus node rather than about any one value: no single value is at
+            // fault for the absence of a conforming one.
+            Constraint::SomeValue(inner) => {
+                let mut any = false;
+                for &v in values {
+                    if self.holds(*inner, v, depth)? {
+                        any = true;
+                        break;
+                    }
+                }
+                if !any {
+                    results.push(self.result(shape, focus, None, component));
+                }
+            }
             Constraint::Node(inner) => {
                 for &v in values {
                     if !self.holds(*inner, v, depth)? {
@@ -591,8 +625,8 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
-            Constraint::Equals(predicate) => {
-                let others = self.data.objects(focus, *predicate)?;
+            Constraint::Equals(path) => {
+                let others = self.eval_path(*path, focus)?;
                 for &v in values {
                     if !others.contains(&v) {
                         violate_value(v, results);
@@ -604,8 +638,8 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
-            Constraint::Disjoint(predicate) => {
-                let others = self.data.objects(focus, *predicate)?;
+            Constraint::Disjoint(path) => {
+                let others = self.eval_path(*path, focus)?;
                 for &v in values {
                     if others.contains(&v) {
                         violate_value(v, results);
