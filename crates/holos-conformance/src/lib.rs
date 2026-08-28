@@ -458,11 +458,14 @@ fn run_query_evaluation(test: &TestEntry) -> Outcome {
     let Some(result_path) = test.result.as_ref() else {
         return Outcome::skip("no mf:result");
     };
-    if test.needs_entailment {
-        // The answer depends on RDFS or OWL entailment. L4 (DESIGN.md §8) materialises
-        // those through the rule engine; until it exists these cannot pass, and counting
-        // them as failures would hide the ones that are actually broken.
-        return Outcome::skip("needs an entailment regime: L4 is not built");
+    // A test that names an entailment regime is answered against the *entailed* graph, not
+    // the asserted one. RDFS is materialisable here; OWL and RIF are not, and are skipped
+    // with the regime named rather than under one word that covers both cases.
+    if test.needs_entailment() && !test.rdfs_entailment_suffices() {
+        return Outcome::skip(format!(
+            "needs an entailment regime this engine does not implement: {}",
+            test.entailment_regimes.join(", ")
+        ));
     }
     let query = match read_and_parse_query(test) {
         Ok(q) => q,
@@ -498,10 +501,26 @@ fn run_query_evaluation(test: &TestEntry) -> Outcome {
         }
     }
 
-    let session = match Session::unrestricted(engine.store()) {
+    let mut session = match Session::unrestricted(engine.store()) {
         Ok(s) => s,
         Err(e) => return Outcome::fail(format!("opening session: {e}")),
     };
+
+    // Materialised into the *default* graph rather than beside it. Under an entailment
+    // regime the basic graph pattern is matched against the entailed graph, so the closure
+    // has to be the graph the query reads; a second graph next to it would be invisible to
+    // a query with no `GRAPH` clause, which is every query in this suite.
+    if test.needs_entailment() {
+        if let Err(e) = holos_engine::entailment::materialise(
+            &mut engine,
+            &mut session,
+            None,
+            holos_engine::entailment::DEFAULT_BUDGET,
+        ) {
+            return Outcome::fail(format!("materialising the RDFS closure: {e}"));
+        }
+    }
+
     let view = engine.view(&session);
     let actual = match Engine::query_prepared_with_services(&view, &query, services) {
         Ok(r) => r,
@@ -534,6 +553,14 @@ fn attribute(
     ordered: bool,
     failure: String,
 ) -> Outcome {
+    // The rig compares two *evaluators* over the same data, which is only meaningful when
+    // both see the same data. Under an entailment regime they do not: HOLOS is answering
+    // against a materialised closure and the reference against the assertions alone, so
+    // they agree exactly when the closure added nothing — and reading that as "upstream"
+    // would file this engine's own missing inferences under someone else's name.
+    if test.needs_entailment() {
+        return Outcome::Failed(failure);
+    }
     let Ok(dataset) = reference_dataset(test) else {
         return Outcome::Failed(failure);
     };

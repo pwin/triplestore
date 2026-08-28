@@ -45,8 +45,13 @@ fn load(turtle: &str) -> Engine {
 fn run(engine: &mut Engine) -> Entailed {
     let graph = entailed_graph(engine);
     let mut session = Session::unrestricted(engine.store()).expect("session");
-    entailment::materialise(engine, &mut session, graph, entailment::DEFAULT_BUDGET)
-        .expect("materialise")
+    entailment::materialise(
+        engine,
+        &mut session,
+        Some(graph),
+        entailment::DEFAULT_BUDGET,
+    )
+    .expect("materialise")
 }
 
 /// Rows of a query, with the entailed graph folded into the default one.
@@ -224,7 +229,7 @@ fn a_closure_over_budget_is_refused_and_writes_nothing() {
     let graph = entailed_graph(&mut engine);
     let after_marker = engine.store().len();
     let mut session = Session::unrestricted(engine.store()).expect("session");
-    let outcome = entailment::materialise(&mut engine, &mut session, graph, 1);
+    let outcome = entailment::materialise(&mut engine, &mut session, Some(graph), 1);
     assert!(outcome.is_err(), "a budget of one should not be met here");
     assert_eq!(
         engine.store().len(),

@@ -41,12 +41,25 @@
 //! | rdfs7 | `p rdfs:subPropertyOf q` and `x p y` | `x q y` |
 //! | rdfs9 | `c rdfs:subClassOf d` and `x rdf:type c` | `x rdf:type d` |
 //! | rdfs11 | `c rdfs:subClassOf d`, `d … e` | `c rdfs:subClassOf e` |
+//! | rdfs6 | `p` is a property | `p rdfs:subPropertyOf p` |
+//! | rdfs10 | `c` is a class | `c rdfs:subClassOf c` |
 //!
-//! The axiomatic and reflexive rules — rdfs4, rdfs6, rdfs10 and the RDF/RDFS axioms — are
-//! left out deliberately. They entail `x rdf:type rdfs:Resource` for every term in the
-//! graph, which no query is improved by and which would multiply a graph's size for nothing.
-//! This is the same set, and the same reasoning, as `holos_shacl_engine::inference`, which
-//! does it over the SHACL crate's own graph model rather than over a store.
+//! rdfs4 — `x rdf:type rdfs:Resource` for every term in the graph — is left out. It is
+//! bounded by the size of the *data*, so it roughly doubles a graph, and no query is
+//! improved by it.
+//!
+//! rdfs6 and rdfs10 were left out under the same heading, and that was wrong: they are
+//! bounded by the number of properties and classes, which is the size of the *schema*, and
+//! a schema is small. Leaving them out is also visible from outside, because
+//! `?c rdfs:subClassOf :d` is expected to match `:d` itself — five tests in the W3C
+//! entailment suite turn on exactly that. What counts as a class or a property follows from
+//! the RDF/RDFS axiomatic `rdfs:domain` and `rdfs:range` declarations, so those positions
+//! are read directly rather than materialising the axioms to re-derive them.
+//!
+//! The reflexive statements are emitted as facts and are deliberately *not* fed back into
+//! the inference maps: `c rdfs:subClassOf c` entails nothing that `c` did not already
+//! entail, and a self-loop in the hierarchy makes rdfs7 and rdfs9 rewrite every triple to
+//! itself for ever.
 //!
 //! # Cost
 //!
@@ -106,7 +119,13 @@ impl Rdfs {
     }
 }
 
-/// Materialises the RDFS closure of `engine`'s data into `graph`.
+/// Materialises the RDFS closure of `engine`'s data into `graph`, or into the default graph
+/// when that is `None`.
+///
+/// A separate graph is the right default and the module note says why. `None` is for the
+/// caller who wants the closure to *be* the graph the query reads — which is what SPARQL's
+/// entailment regimes actually specify, since there a basic graph pattern is matched against
+/// the entailed graph rather than against the assertions plus a second graph beside them.
 ///
 /// Reads every graph, including any previous entailment, so running it twice is idempotent
 /// rather than compounding: the second run finds everything already present and adds
@@ -119,7 +138,7 @@ impl Rdfs {
 pub fn materialise(
     engine: &mut Engine,
     session: &mut Session,
-    graph: TermId,
+    graph: Option<TermId>,
     budget: usize,
 ) -> Result<Entailed, EngineError> {
     let Some(rdfs) = Rdfs::new() else {
@@ -234,6 +253,48 @@ pub fn materialise(
         frontier = next;
     }
 
+    // rdfs6 and rdfs10. Computed after the fixpoint because the closure creates classes:
+    // rdfs2 and rdfs3 produce `rdf:type` statements whose object is a class by definition.
+    //
+    // The positions below are the ones the RDF/RDFS axiomatic triples make definitional —
+    // `rdfs:subClassOf` has domain and range `rdfs:Class`, `rdf:type` has range
+    // `rdfs:Class`, `rdfs:domain` and `rdfs:range` have domain `rdf:Property` and range
+    // `rdfs:Class`, and anything used as a predicate is a property. Reading the positions is
+    // equivalent to materialising those axioms and applying rdfs2/rdfs3 to them, without
+    // putting forty vocabulary triples into everyone's store to get there.
+    let mut classes: FxHashSet<TermId> = FxHashSet::default();
+    let mut properties: FxHashSet<TermId> = FxHashSet::default();
+    for &(s, p, o) in &known {
+        properties.insert(p);
+        if p == rdfs.ty {
+            classes.insert(o);
+        } else if p == rdfs.sub_class_of {
+            classes.insert(s);
+            classes.insert(o);
+        } else if p == rdfs.sub_property_of {
+            properties.insert(s);
+            properties.insert(o);
+        } else if p == rdfs.domain || p == rdfs.range {
+            properties.insert(s);
+            classes.insert(o);
+        }
+    }
+    for c in classes {
+        if known.insert((c, rdfs.sub_class_of, c)) {
+            fresh.push((c, rdfs.sub_class_of, c));
+        }
+    }
+    for p in properties {
+        if known.insert((p, rdfs.sub_property_of, p)) {
+            fresh.push((p, rdfs.sub_property_of, p));
+        }
+    }
+    if known.len().saturating_sub(asserted.len()) > budget {
+        return Err(EngineError::BadRequest(format!(
+            "the RDFS closure exceeded {budget} new triples and was abandoned; nothing was              written. A schema entailing this much is worth reading before it is              materialised."
+        )));
+    }
+
     // Written only now, so a closure that overruns its budget leaves the store untouched.
     let mut added = 0usize;
     for (s, p, o) in fresh {
@@ -246,7 +307,7 @@ pub fn materialise(
             subject: s,
             predicate: p,
             object: o,
-            graph_name: Some(graph),
+            graph_name: graph,
         };
         if !session
             .policy(engine.store())?

@@ -450,7 +450,7 @@ fn entail(engine: &mut Engine, opts: &Options) -> Result<()> {
 
     let mut session = opts.session(engine)?;
     let before = engine.store().len();
-    let report = holos_engine::entailment::materialise(engine, &mut session, graph, budget)?;
+    let report = holos_engine::entailment::materialise(engine, &mut session, Some(graph), budget)?;
     engine.store_mut().flush()?;
 
     println!("entailed {} triple(s) into <{iri}>", report.added);

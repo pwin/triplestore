@@ -86,11 +86,35 @@ pub struct TestEntry {
     pub result_data: Option<PathBuf>,
     /// The base IRI test content must be parsed against. See the module note.
     pub base: String,
-    /// True when the test declares an entailment regime, and so needs a reasoner.
-    pub needs_entailment: bool,
+    /// The `sd:entailmentRegime` IRIs the test declares, if any.
+    ///
+    /// A list rather than a flag, because *which* regime it asks for decides whether this
+    /// engine can run it at all: RDFS is materialisable here, OWL-Direct is not, and a
+    /// single boolean cannot tell the two apart.
+    pub entailment_regimes: Vec<String>,
 }
 
 impl TestEntry {
+    /// Whether the test asks for an entailment regime at all.
+    #[must_use]
+    pub fn needs_entailment(&self) -> bool {
+        !self.entailment_regimes.is_empty()
+    }
+
+    /// Whether RDFS materialisation answers the regime this test asks for.
+    ///
+    /// A test names every regime it holds under, so RDFS appearing anywhere in the list is
+    /// enough: the expected answers are the same under all of them. `ent:RDF` is weaker than
+    /// RDFS, so a materialised RDFS closure entails everything it asks for and possibly more
+    /// — which is why an RDF-only test is *not* accepted here, since "possibly more" is
+    /// exactly what would break an exact result comparison.
+    #[must_use]
+    pub fn rdfs_entailment_suffices(&self) -> bool {
+        self.entailment_regimes
+            .iter()
+            .any(|r| r.ends_with("/entailment/RDFS"))
+    }
+
     /// Short local name, for readable failure output.
     #[must_use]
     pub fn short_id(&self) -> &str {
@@ -182,7 +206,7 @@ fn load_into(manifest: &Path, out: &mut Vec<TestEntry>, seen: &mut HashSet<PathB
             result_graph_data: Vec::new(),
             result_data: None,
             base: assumed_base.clone(),
-            needs_entailment: false,
+            entailment_regimes: Vec::new(),
         };
 
         match object(&graph, subject, &mf("action")) {
@@ -215,7 +239,18 @@ fn load_into(manifest: &Path, out: &mut Vec<TestEntry>, seen: &mut HashSet<PathB
                 {
                     test.script = crate::protocol::read_script(&graph, action).ok();
                 }
-                test.needs_entailment = object(&graph, action, &sd("entailmentRegime")).is_some();
+                // `sd:entailmentRegime` is one IRI or an RDF list of them, and a test
+                // holds under any it names.
+                if let Some(term) = object(&graph, action, &sd("entailmentRegime")) {
+                    test.entailment_regimes = match &term {
+                        Term::NamedNode(n) => vec![n.as_str().to_owned()],
+                        _ => collection(&graph, term)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(term_as_iri)
+                            .collect(),
+                    };
+                }
             }
             _ => {}
         }

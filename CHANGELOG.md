@@ -24,6 +24,34 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### RDFS entailment runs against the W3C suite, and it found two missing rules
+
+`SPARQL 1.1: 476/477` was resting on **148 skipped tests**, 70 of them skipped as "needs an
+entailment regime: L4 is not built" — written before `holos_engine::entailment` existed. Of
+those 70, 36 name RDFS among their regimes; the rest need OWL or RIF.
+
+The harness now materialises the RDFS closure for a test that asks for one, into the
+*default* graph rather than beside it: under an entailment regime a basic graph pattern is
+matched against the entailed graph, so the closure has to be the graph the query reads. A
+test naming only OWL or RIF is still skipped, but now says which regime it wanted.
+
+**SPARQL 1.1 goes 476/477 to 512/513** — 36 tests that had never been run, none of which
+regressed anything.
+
+Five of the 36 failed at first, and all five were the same gap: `rdfs6` and `rdfs10`, the
+reflexivity of `rdfs:subPropertyOf` and `rdfs:subClassOf`. The module had left them out
+alongside `rdfs4` on the grounds that they "entail `x rdf:type rdfs:Resource` for every term
+in the graph". That is true of rdfs4 and false of the other two: those are bounded by the
+number of properties and classes, which is the size of the *schema*. Both are implemented
+now, and the note says what each rule actually costs rather than covering three with one
+sentence. The reflexive statements are emitted as facts and kept out of the inference maps,
+because a self-loop in the hierarchy makes rdfs7 and rdfs9 rewrite every triple to itself.
+
+The differential rig also had to be told to stand down. It attributes a failure to upstream
+when HOLOS and a reference evaluator agree over the same data — but under an entailment
+regime they do *not* see the same data, so they agree exactly when the closure added nothing.
+All five of these gaps were being filed under someone else's name.
+
 ### All four SHACL suites are complete
 
 | Suite | Was | Now |
