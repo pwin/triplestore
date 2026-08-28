@@ -112,6 +112,7 @@ sh_vocab! {
     unique_members => sh!("uniqueMembers"),
     member_shape => sh!("memberShape"),
     single_line => sh!("singleLine"),
+    subset_of => sh!("subsetOf"),
     equals => sh!("equals"),
     disjoint => sh!("disjoint"),
     less_than => sh!("lessThan"),
@@ -141,6 +142,10 @@ sh_vocab! {
     violation => sh!("Violation"),
     warning => sh!("Warning"),
     info => sh!("Info"),
+    // SHACL 1.2 adds two levels below `sh:Info`. They are diagnostic rather than
+    // judgemental: a report may carry them and still say the data conforms.
+    debug => sh!("Debug"),
+    trace => sh!("Trace"),
 
     // --- report vocabulary
     validation_report => sh!("ValidationReport"),
@@ -176,6 +181,7 @@ sh_vocab! {
     unique_members_component => sh!("UniqueMembersConstraintComponent"),
     member_shape_component => sh!("MemberShapeConstraintComponent"),
     single_line_component => sh!("SingleLineConstraintComponent"),
+    subset_of_component => sh!("SubsetOfConstraintComponent"),
     equals_component => sh!("EqualsConstraintComponent"),
     disjoint_component => sh!("DisjointConstraintComponent"),
     less_than_component => sh!("LessThanConstraintComponent"),

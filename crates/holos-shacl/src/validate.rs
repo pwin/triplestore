@@ -474,6 +474,16 @@ impl<'a> Validator<'a> {
                     results.push(self.result(shape, focus, None, component));
                 }
             }
+            // `sh:subsetOf` is `sh:equals` in one direction only: every value node has to
+            // be among the other property's values, and the other property may have more.
+            Constraint::SubsetOf(path) => {
+                let others = self.eval_path(*path, focus)?;
+                for &v in values {
+                    if !others.contains(&v) {
+                        violate_value(v, results);
+                    }
+                }
+            }
             Constraint::Equals(predicate) => {
                 let others = self.data.objects(focus, *predicate)?;
                 for &v in values {

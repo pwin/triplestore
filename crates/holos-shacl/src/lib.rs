@@ -98,10 +98,21 @@ pub struct Report {
 
 impl Report {
     /// Builds a report from results.
+    ///
+    /// `sh:conforms` is **not** "no results". SHACL 1.2 adds `sh:Debug` and `sh:Trace`
+    /// below `sh:Info`, and they are diagnostic rather than judgemental: a report may carry
+    /// them and still say the data conforms. Everything from `sh:Info` upwards is a finding
+    /// about the data and makes it non-conforming.
+    ///
+    /// The suite pins both halves of that. `severity-004` and `severity-005` carry a
+    /// `sh:Debug` and a `sh:Trace` result respectively and expect `sh:conforms true`;
+    /// `severity-003` carries a `sh:Warning` and expects `false`. Treating every result as
+    /// disqualifying, or none below `sh:Violation` as disqualifying, gets one of those
+    /// wrong.
     #[must_use]
     pub fn new(results: Vec<ValidationResult>) -> Self {
         Self {
-            conforms: results.is_empty(),
+            conforms: !results.iter().any(is_judgement),
             results,
         }
     }
@@ -111,6 +122,22 @@ impl Report {
     pub fn conforming() -> Self {
         Self::new(Vec::new())
     }
+}
+
+/// Whether a result is a finding about the data rather than a diagnostic note.
+///
+/// Compared against the well-known ids directly rather than through a `Sh` vocabulary
+/// struct, because [`Report::new`] is a plain constructor with no graph to resolve against —
+/// and these two IRIs are compile-time constants precisely so that is possible.
+fn is_judgement(result: &ValidationResult) -> bool {
+    let diagnostic = [
+        "http://www.w3.org/ns/shacl#Debug",
+        "http://www.w3.org/ns/shacl#Trace",
+    ]
+    .into_iter()
+    .filter_map(holos_core::vocab::encode_iri)
+    .any(|id| id == result.severity);
+    !diagnostic
 }
 
 /// Which graphs to read.

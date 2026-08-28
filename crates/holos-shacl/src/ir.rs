@@ -141,6 +141,10 @@ pub enum Constraint {
     MemberShape(ShapeIdx),
     /// `sh:singleLine` — the lexical form contains no line break.
     SingleLine,
+    /// `sh:subsetOf` — every value node is also reached by this *path* from the focus
+    /// node. A path rather than a predicate: SHACL 1.2 allows
+    /// `sh:subsetOf ( ex:a ex:b )`, and reading it as an IRI makes every value violate.
+    SubsetOf(PathIdx),
 }
 
 /// A compiled `sh:pattern`.
@@ -191,6 +195,7 @@ impl Constraint {
             Self::UniqueMembers => sh.unique_members_component,
             Self::MemberShape(_) => sh.member_shape_component,
             Self::SingleLine => sh.single_line_component,
+            Self::SubsetOf(_) => sh.subset_of_component,
             Self::Equals(_) => sh.equals_component,
             Self::Disjoint(_) => sh.disjoint_component,
             Self::LessThan(_) => sh.less_than_component,
@@ -723,6 +728,10 @@ impl<'a> Compiler<'a> {
         }
         if matches!(g.object(node, sh.single_line)?, Some(v) if self.is_true(v)) {
             out.push(Constraint::SingleLine);
+        }
+        for p in g.objects(node, sh.subset_of)? {
+            let path = self.compile_path(p, 0)?;
+            out.push(Constraint::SubsetOf(path));
         }
 
         // Logical constraints and nested shapes.
