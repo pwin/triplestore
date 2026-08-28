@@ -584,9 +584,9 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
-            Constraint::LessThan(predicate) | Constraint::LessThanOrEquals(predicate) => {
+            Constraint::LessThan(path) | Constraint::LessThanOrEquals(path) => {
                 let inclusive = matches!(constraint, Constraint::LessThanOrEquals(_));
-                let others = self.data.objects(focus, *predicate)?;
+                let others = self.eval_path(*path, focus)?;
                 for &v in values {
                     for &o in &others {
                         let ok = match self.compare(v, o)? {

@@ -107,10 +107,10 @@ pub enum Constraint {
     Equals(TermId),
     /// `sh:disjoint`
     Disjoint(TermId),
-    /// `sh:lessThan`
-    LessThan(TermId),
-    /// `sh:lessThanOrEquals`
-    LessThanOrEquals(TermId),
+    /// `sh:lessThan` — a path, because SHACL 1.2 allows `sh:lessThan ( ex:a ex:b )`.
+    LessThan(PathIdx),
+    /// `sh:lessThanOrEquals`, likewise.
+    LessThanOrEquals(PathIdx),
     /// `sh:not`
     Not(ShapeIdx),
     /// `sh:and`
@@ -481,10 +481,16 @@ impl<'a> Compiler<'a> {
         }
         for constraint in &shape.constraints {
             match constraint {
-                Constraint::Equals(p)
-                | Constraint::Disjoint(p)
-                | Constraint::LessThan(p)
-                | Constraint::LessThanOrEquals(p) => out.push(*p),
+                Constraint::Equals(p) | Constraint::Disjoint(p) => out.push(*p),
+                // Path-valued comparisons. Their predicates have to be walked out of the
+                // path rather than taken directly, or incremental revalidation stops
+                // noticing writes to them — the constraint would still be evaluated on a
+                // full run and silently skipped on a partial one.
+                Constraint::LessThan(path)
+                | Constraint::LessThanOrEquals(path)
+                | Constraint::SubsetOf(path) => self.path_predicates(*path, &mut out),
+                // A composite key reads each of its properties.
+                Constraint::UniqueValuesFor(properties) => out.extend(properties.iter().copied()),
                 // A class constraint reads rdf:type, so a new type triple must reach it.
                 Constraint::Class(_) => out.push(self.sh.rdf_type),
                 _ => {}
@@ -650,7 +656,30 @@ impl<'a> Compiler<'a> {
             out.push(Constraint::Datatype(d));
         }
         for k in g.objects(node, sh.node_kind)? {
-            if let Some(spec) = self.node_kind_spec(k) {
+            // SHACL 1.2 allows a *list* of kinds — `sh:nodeKind ( sh:BlankNode sh:IRI )` —
+            // as well as a single one. The list is a union: a value satisfying any of them
+            // satisfies the constraint, which is why the flags are or-ed rather than one
+            // constraint being pushed per member.
+            let kinds = if g.object(k, sh.rdf_first)?.is_some() {
+                self.list(k)?
+            } else {
+                vec![k]
+            };
+            let mut spec = NodeKindSpec {
+                iri: false,
+                blank: false,
+                literal: false,
+            };
+            let mut any = false;
+            for kind in kinds {
+                if let Some(one) = self.node_kind_spec(kind) {
+                    spec.iri |= one.iri;
+                    spec.blank |= one.blank;
+                    spec.literal |= one.literal;
+                    any = true;
+                }
+            }
+            if any {
                 out.push(Constraint::NodeKind(spec));
             }
         }
@@ -671,11 +700,24 @@ impl<'a> Compiler<'a> {
             (sh.has_value, Constraint::HasValue),
             (sh.equals, Constraint::Equals),
             (sh.disjoint, Constraint::Disjoint),
-            (sh.less_than, Constraint::LessThan),
-            (sh.less_than_or_equals, Constraint::LessThanOrEquals),
         ] {
             for v in g.objects(node, parameter)? {
                 out.push(make(v));
+            }
+        }
+        // `sh:lessThan` and `sh:lessThanOrEquals` take a *path* in SHACL 1.2, not just a
+        // predicate — `sh:lessThan ( ex:a ex:b )`. Read as an IRI a sequence path finds
+        // nothing to compare against, and the constraint silently passes.
+        for (parameter, make) in [
+            (
+                sh.less_than,
+                Constraint::LessThan as fn(PathIdx) -> Constraint,
+            ),
+            (sh.less_than_or_equals, Constraint::LessThanOrEquals),
+        ] {
+            for v in g.objects(node, parameter)? {
+                let path = self.compile_path(v, 0)?;
+                out.push(make(path));
             }
         }
         if let Some(v) = g.object(node, sh.min_length)?.and_then(|v| self.integer(v)) {
