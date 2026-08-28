@@ -446,3 +446,44 @@ pub fn suite_root() -> Option<PathBuf> {
     let dir = root.join("testsuites").join("data-shapes");
     dir.is_dir().then_some(dir)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The SHACL baselines quoted a sample of the differing triples chosen by hash iteration,
+    /// so `shacl-core-adapted.failures` and its siblings churned on every re-baseline even
+    /// when no test had changed state. Sorted before truncating; this pins that, because the
+    /// original check was a manual double re-baseline and a manual check does not survive the
+    /// next edit.
+    fn triple(n: u32) -> Quad {
+        Quad {
+            subject: NamedNode::new_unchecked(format!("http://example.com/s{n:02}")).into(),
+            predicate: NamedNode::new_unchecked("http://example.com/p"),
+            object: NamedNode::new_unchecked(format!("http://example.com/o{n:02}")).into(),
+            graph_name: GraphName::DefaultGraph,
+        }
+    }
+
+    #[test]
+    fn the_quoted_sample_is_sorted_and_independent_of_insertion_order() {
+        let expected = Dataset::new();
+        let mut forwards = Dataset::new();
+        let mut backwards = Dataset::new();
+        for n in 0..10 {
+            forwards.insert(&triple(n));
+        }
+        for n in (0..10).rev() {
+            backwards.insert(&triple(n));
+        }
+
+        let one = compare(&expected, &forwards).expect_err("the datasets differ");
+        let two = compare(&expected, &backwards).expect_err("the datasets differ");
+        assert_eq!(one, two, "insertion order must not reach the message");
+        assert!(
+            one.contains("s00") && one.contains("s01") && one.contains("s02"),
+            "the three lexicographically smallest should be quoted, got: {one}"
+        );
+        assert!(!one.contains("s09"), "and nothing later, got: {one}");
+    }
+}

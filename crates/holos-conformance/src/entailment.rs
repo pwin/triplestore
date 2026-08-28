@@ -233,7 +233,12 @@ fn entails(closure: &Graph, conclusion: &Dataset) -> bool {
     // Ground goals first. One either matches or fails outright, so putting them ahead of the
     // goals carrying blank nodes prunes the search before any binding is guessed.
     goals.sort_by_key(|t| blank_count(t));
-    let facts: Vec<Triple> = closure.iter().map(oxrdf::TripleRef::into_owned).collect();
+    // Sorted, so the search visits candidates in the same order on every run. The answer
+    // does not depend on the order — that is what the backtracking is for — but the work
+    // does, and a conformance tool whose cost and diagnostics move with a hash seed is one
+    // whose results cannot be compared between runs.
+    let mut facts: Vec<Triple> = closure.iter().map(oxrdf::TripleRef::into_owned).collect();
+    facts.sort_by_cached_key(ToString::to_string);
     search(&goals, &facts, &mut HashMap::new())
 }
 
@@ -346,4 +351,194 @@ fn rdfs_closure(g: &Graph) -> Result<Graph, String> {
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxrdfio::{RdfFormat, RdfParser};
+
+    /// The checker decides ninety-odd conformance tests and had no tests of its own. A
+    /// mutation audit put numbers on that: removing the binding-consistency check, or the
+    /// predicate comparison, each cost only four of them. The suites exercise the search;
+    /// they do not stress it, because most fixtures are small and most conclusions differ
+    /// from their premises in one place. These do stress it.
+    fn graph(turtle: &str) -> Graph {
+        let mut g = Graph::new();
+        let parser = RdfParser::from_format(RdfFormat::Turtle)
+            .with_base_iri("http://example.com/")
+            .expect("base");
+        for quad in parser.for_reader(turtle.as_bytes()) {
+            let quad = quad.expect("parse");
+            g.insert(&Triple {
+                subject: quad.subject,
+                predicate: quad.predicate,
+                object: quad.object,
+            });
+        }
+        g
+    }
+
+    fn dataset(turtle: &str) -> Dataset {
+        let mut d = Dataset::new();
+        for triple in graph(turtle).iter() {
+            d.insert(&oxrdf::Quad {
+                subject: triple.subject.into_owned(),
+                predicate: triple.predicate.into_owned(),
+                object: triple.object.into_owned(),
+                graph_name: GraphName::DefaultGraph,
+            });
+        }
+        d
+    }
+
+    const PREFIX: &str = "@prefix : <http://example.com/ns#> .\n";
+
+    fn holds(premise: &str, conclusion: &str) -> bool {
+        entails(
+            &graph(&format!("{PREFIX}{premise}")),
+            &dataset(&format!("{PREFIX}{conclusion}")),
+        )
+    }
+
+    #[test]
+    fn a_subgraph_is_entailed_and_a_stranger_is_not() {
+        assert!(holds(":a :p :b . :c :q :d .", ":a :p :b ."));
+        assert!(!holds(":a :p :b .", ":a :p :c ."));
+    }
+
+    #[test]
+    fn the_predicate_is_not_a_wildcard() {
+        // Removing the predicate comparison was caught by only four conformance tests, none
+        // of which stated this as the thing they were checking.
+        assert!(!holds(":a :p :b .", ":a :q :b ."));
+    }
+
+    #[test]
+    fn a_blank_node_generalises_any_term() {
+        // Generalisation needs no rule of its own: a blank node in the conclusion is free.
+        assert!(holds(":a :p :b .", ":a :p _:x ."));
+        assert!(holds(":a :p \"10\" .", ":a :p _:x ."));
+        assert!(holds(":a :p :b .", "_:x :p :b ."));
+    }
+
+    #[test]
+    fn one_blank_node_cannot_denote_two_things() {
+        // The property the binding map exists for. Both goals match *some* triple; what
+        // must fail is matching them with inconsistent values for `_:x`.
+        assert!(!holds(":a :p :b . :c :p :d .", "_:x :p :b . _:x :p :d ."));
+        assert!(holds(":a :p :b . :a :p :d .", "_:x :p :b . _:x :p :d ."));
+    }
+
+    #[test]
+    fn distinct_blank_nodes_may_denote_the_same_thing() {
+        // An instance mapping is a function, not an injection: two conclusion blank nodes
+        // are allowed to land on one term. Requiring them to differ would reject
+        // entailments that hold.
+        assert!(holds(":a :p :b .", "_:x :p _:y ."));
+        assert!(holds(":a :p :a .", "_:x :p _:x ."));
+    }
+
+    #[test]
+    fn the_search_backtracks_rather_than_taking_the_first_match() {
+        // Both `:a` and `:b` satisfy the first goal, and only `:b` satisfies the second, so
+        // a search that committed to its first candidate would answer no. The facts are
+        // visited in sorted order, which puts the dead end first — without that this test
+        // would pass or fail on a hash seed, and a version of it that did exactly that
+        // failed to catch the mutation it was written for.
+        assert!(holds(
+            ":a :p :two . :b :p :two . :b :q :three .",
+            "_:x :p :two . _:x :q :three ."
+        ));
+    }
+
+    #[test]
+    fn a_conclusion_larger_than_the_premise_can_still_hold() {
+        // Two goals may map onto one fact. Nothing requires an instance to be injective on
+        // triples either.
+        assert!(holds(":a :p :b .", "_:x :p :b . _:y :p :b ."));
+    }
+
+    #[test]
+    fn blank_nodes_inside_triple_terms_are_variables() {
+        // RDF 1.2. Comparing triple terms whole made this fail, which is what eight tests in
+        // the rdf12 semantics suite are about.
+        assert!(holds(
+            ":a1 :p1 <<( :a :b :c )>> .",
+            ":a1 :p1 <<( _:x :b :c )>> ."
+        ));
+        assert!(holds(
+            ":a1 :p1 <<( :a :b :c )>> .",
+            ":a1 :p1 <<( :a :b _:x )>> ."
+        ));
+        assert!(!holds(
+            ":a1 :p1 <<( :a :b :c )>> .",
+            ":a1 :p1 <<( _:x :b :d )>> ."
+        ));
+    }
+
+    #[test]
+    fn a_blank_node_stays_consistent_across_a_triple_term_boundary() {
+        // The same variable appearing inside a triple term and outside it must denote one
+        // thing. This is what separates `same-bnode-same-triple-term` from
+        // `different-bnodes-same-triple-term` in the suite.
+        assert!(holds(
+            ":a :q :a . :a :p <<( :a :b :c )>> .",
+            "_:x :q _:x . _:x :p <<( _:x :b :c )>> ."
+        ));
+        assert!(!holds(
+            ":a :q :a . :d :p <<( :a :b :c )>> .",
+            "_:x :q _:x . _:x :p <<( _:x :b :c )>> ."
+        ));
+    }
+
+    #[test]
+    fn a_predicate_inside_a_triple_term_is_still_not_a_wildcard() {
+        assert!(!holds(
+            ":a1 :p1 <<( :a :b :c )>> .",
+            ":a1 :p1 <<( :a :other :c )>> ."
+        ));
+    }
+
+    #[test]
+    fn rdf1_is_what_separates_the_rdf_regime_from_simple() {
+        // The one thing the RDF closure adds. Without it the conclusion names a triple no
+        // premise contains.
+        let premise = dataset(&format!("{PREFIX}:a :p :b ."));
+        let conclusion = dataset(&format!(
+            "{PREFIX}@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
+             :p a rdf:Property ."
+        ));
+        assert!(!entails(
+            &close(&premise, Regime::Simple).expect("simple"),
+            &conclusion
+        ));
+        assert!(entails(
+            &close(&premise, Regime::Rdf).expect("rdf"),
+            &conclusion
+        ));
+    }
+
+    #[test]
+    fn a_triple_term_witnesses_a_proposition() {
+        // Not expressible as a triple — RDF admits a triple term only as an object — so the
+        // entailment is stated with a fresh blank node, and the witness construction is what
+        // makes it hold.
+        let premise = dataset(&format!("{PREFIX}:a1 :p1 <<( :a :b :c )>> ."));
+        let conclusion = dataset(&format!(
+            "{PREFIX}@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             :a1 :p1 _:pp . _:pp a rdfs:Proposition ."
+        ));
+        assert!(entails(
+            &close(&premise, Regime::Rdfs).expect("rdfs"),
+            &conclusion
+        ));
+        assert!(
+            !entails(
+                &close(&premise, Regime::Simple).expect("simple"),
+                &conclusion
+            ),
+            "simple entailment says nothing about what a triple term denotes"
+        );
+    }
 }

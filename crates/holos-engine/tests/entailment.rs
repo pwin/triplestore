@@ -119,8 +119,11 @@ fn rdfs9_carries_a_type_up_a_class_hierarchy() {
          ex:rex a ex:Dog .\n"
     ));
     run(&mut engine);
-    // Transitive: the chain is two long, so `ex:Animal` only appears if rdfs11 ran before
-    // rdfs9 rather than a single hop being applied once.
+    // `ex:Animal` appears even though the chain is two long. That is *not* evidence of
+    // rdfs11: the fixpoint re-processes the `rex a ex:Mammal` it just derived and applies
+    // rdfs9 to it again, so a one-hop rule reaches the end of any chain on its own. The
+    // transitive hierarchy statements are a separate claim and are checked separately, in
+    // `rdfs11_materialises_the_transitive_class_hierarchy`.
     assert_eq!(
         ask(&engine, &format!("SELECT ?c WHERE {{ <{EX}rex> a ?c }}")).len(),
         3,
@@ -281,5 +284,176 @@ fn the_geosparql_example_gains_its_feature_level_geometries() {
     assert!(
         after.len() > before.len(),
         "entailment should add features rather than replace geometries: {before:?} -> {after:?}"
+    );
+}
+
+// --------------------------------------------------------------------------------------
+// One test per rule, each of which fails when its rule is removed.
+//
+// These exist because a mutation audit found the opposite: `close_transitively` on the class
+// hierarchy could be deleted outright and every test in the workspace still passed, because
+// the rules that *consume* the closed hierarchy reach the same conclusions through the
+// fixpoint. A rule that no test distinguishes from its own absence is a rule nobody is
+// checking.
+
+/// rdfs11: `A ⊑ B ⊑ C` entails `A ⊑ C` **as a statement**, not merely as its consequences.
+///
+/// The distinction is the whole point. rdfs9 alone already types an instance of `A` as a `C`,
+/// because the fixpoint feeds each derived type statement back in and applies the one-hop
+/// rule again. What only rdfs11 produces is the hierarchy triple itself — which is what a
+/// query *about the schema* reads, and what a subsequent reasoner or a shapes graph consults.
+#[test]
+fn rdfs11_materialises_the_transitive_class_hierarchy() {
+    let mut engine = load(&format!(
+        "@prefix ex: <{EX}> .
+         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+         ex:A rdfs:subClassOf ex:B .
+         ex:B rdfs:subClassOf ex:C .
+"
+    ));
+    run(&mut engine);
+    let supers = ask(
+        &engine,
+        &format!(
+            "SELECT ?c WHERE {{ <{EX}A> <http://www.w3.org/2000/01/rdf-schema#subClassOf> ?c }}"
+        ),
+    );
+    assert!(
+        supers.contains(&format!("c=<{EX}C>")),
+        "A is a subclass of C by transitivity, and the statement should be materialised; got          {supers:?}"
+    );
+}
+
+/// rdfs5, the same claim for the property hierarchy.
+#[test]
+fn rdfs5_materialises_the_transitive_property_hierarchy() {
+    let mut engine = load(&format!(
+        "@prefix ex: <{EX}> .
+         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+         ex:p rdfs:subPropertyOf ex:q .
+         ex:q rdfs:subPropertyOf ex:r .
+"
+    ));
+    run(&mut engine);
+    let supers = ask(
+        &engine,
+        &format!(
+            "SELECT ?c WHERE {{ <{EX}p> <http://www.w3.org/2000/01/rdf-schema#subPropertyOf> ?c }}"
+        ),
+    );
+    assert!(
+        supers.contains(&format!("c=<{EX}r>")),
+        "p is a sub-property of r by transitivity; got {supers:?}"
+    );
+}
+
+/// rdfs10: every class is a subclass of itself.
+///
+/// Invisible to any query that only asks about *instances*, and visible immediately to one
+/// that asks which classes are subclasses of a given class — which is what five tests in the
+/// W3C entailment suite do, and what this rule was originally left out of the reasoner for
+/// missing.
+#[test]
+fn rdfs10_makes_the_class_hierarchy_reflexive() {
+    let mut engine = load(&format!(
+        "@prefix ex: <{EX}> .
+         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+         ex:A rdfs:subClassOf ex:B .
+         ex:x a ex:A .
+"
+    ));
+    run(&mut engine);
+    let subs = ask(
+        &engine,
+        &format!(
+            "SELECT ?c WHERE {{ ?c <http://www.w3.org/2000/01/rdf-schema#subClassOf> <{EX}B> }}"
+        ),
+    );
+    assert!(
+        subs.contains(&format!("c=<{EX}B>")),
+        "B is a subclass of itself; got {subs:?}"
+    );
+    assert!(subs.contains(&format!("c=<{EX}A>")), "and A still is too");
+}
+
+/// rdfs6, the same claim for properties.
+#[test]
+fn rdfs6_makes_the_property_hierarchy_reflexive() {
+    let mut engine = load(&format!(
+        "@prefix ex: <{EX}> .
+         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+         ex:p rdfs:subPropertyOf ex:q .
+         ex:a ex:p ex:b .
+"
+    ));
+    run(&mut engine);
+    let subs = ask(
+        &engine,
+        &format!(
+            "SELECT ?p WHERE {{ ?p <http://www.w3.org/2000/01/rdf-schema#subPropertyOf> <{EX}q> }}"
+        ),
+    );
+    assert!(
+        subs.contains(&format!("p=<{EX}q>")),
+        "q is a sub-property of itself; got {subs:?}"
+    );
+}
+
+/// rdfs12: a container membership property is a sub-property of `rdfs:member`.
+///
+/// Only the `rdf:_n` a graph actually mentions are produced — RDFS states one axiom per `n`
+/// and there are infinitely many — so the test asserts both halves: that `rdf:_1` gets its
+/// axioms because the graph uses it, and that the consequence reaches the data through rdfs7.
+#[test]
+fn rdfs12_makes_a_container_position_a_member() {
+    let mut engine = load(&format!(
+        "@prefix ex: <{EX}> .
+         ex:bag <http://www.w3.org/1999/02/22-rdf-syntax-ns#_1> ex:first .
+"
+    ));
+    run(&mut engine);
+    assert_eq!(
+        ask(
+            &engine,
+            &format!(
+                "SELECT ?o WHERE {{ <{EX}bag> <http://www.w3.org/2000/01/rdf-schema#member> ?o }}"
+            )
+        ),
+        vec![format!("o=<{EX}first>")],
+        "rdf:_1 is a sub-property of rdfs:member, so the membership statement follows"
+    );
+    assert!(
+        ask(
+            &engine,
+            &format!(
+                "SELECT ?p WHERE {{ ?p a <http://www.w3.org/2000/01/rdf-schema#ContainerMembershipProperty> }}"
+            )
+        )
+        .contains(&format!("p=<http://www.w3.org/1999/02/22-rdf-syntax-ns#_1>")),
+        "and rdf:_1 is one"
+    );
+}
+
+/// The RDF 1.2 axiom: `rdf:reifies` has range `rdfs:Proposition`.
+///
+/// An axiomatic triple rather than a rule, fed to rdfs3. Worth a test of its own because it
+/// is the only axiom the reasoner carries, and an axiom that is quietly dropped looks exactly
+/// like a graph that never mentioned the property.
+#[test]
+fn rdf_reifies_has_range_proposition() {
+    let mut engine = load(&format!(
+        "@prefix ex: <{EX}> .
+         ex:r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ex:statement .
+"
+    ));
+    run(&mut engine);
+    assert_eq!(
+        ask(
+            &engine,
+            &format!(
+                "SELECT ?x WHERE {{ ?x a <http://www.w3.org/2000/01/rdf-schema#Proposition> }}"
+            )
+        ),
+        vec![format!("x=<{EX}statement>")]
     );
 }

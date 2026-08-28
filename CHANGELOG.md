@@ -24,6 +24,34 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### Coverage gaps a mutation audit found
+
+Passing tests are not evidence that a rule is checked. Breaking each rule deliberately and
+seeing whether anything notices is, and it found three rules with no witness at all —
+`close_transitively` on the class hierarchy could be **deleted outright** and all 587 tests
+still passed, because the rules that consume the closed hierarchy reach the same conclusions
+through the fixpoint. What silently disappeared was `A rdfs:subClassOf C`, which only a query
+about the schema would miss.
+
+Every RDFS rule now has a test that fails when that rule is removed: rdfs2, 3, 5, 6, 7, 9,
+10, 11, 12 and the `rdf:reifies` range axiom, ten mutations, ten named tests. A comment on
+the rdfs9 test claiming it exercised rdfs11 is corrected — it does not, and the audit is how
+that was established.
+
+The entailment checker decides ninety-odd conformance tests and had none of its own; removing
+its binding-consistency check cost only four of them. It has twelve now, covering
+generalisation, one blank node not denoting two things, distinct blank nodes being allowed to
+denote one, backtracking, blank nodes nested in triple terms, and the boundary between the
+regimes. Its fact iteration is sorted, so the search visits candidates in the same order every
+run — the answer never depended on that, but a test for backtracking does, and the first
+version of that test passed on a hash seed rather than on the property.
+
+The deterministic-diagnostics fix had been verified by hand and by nothing else. Three tests
+pin it, one per comparison. The third turned out never to have been broken — it dumps into a
+`BTreeSet`, which is ordered — so its comment claiming the sort provided the determinism is
+corrected, and its test pins the observable property instead: it fails if the container is
+ever swapped for an unordered one, which is how it would really break.
+
 ### The RDF entailment suites are run as entailment
 
 All 134 failures in the RDF 1.1 and 1.2 suites were labelled `upstream:`. 92 of them were

@@ -420,12 +420,15 @@ fn compare_stores(actual: &holos_engine::Engine, expected: &holos_engine::Engine
         return Outcome::Passed;
     }
 
+    // The examples quoted have to be the *sorted* prefix, not whichever the set reached
+    // first: the recorded `.failures` baselines carry this text, so a sample that moves makes
+    // every re-baseline churn, and a ratchet whose diff is always noise is one nobody reads.
+    //
+    // Here that comes from `dump` returning a `BTreeSet`, which is ordered already — the sort
+    // below is a no-op today and is kept only so the property survives a change of container.
+    // The two sibling comparisons build from unordered sets and genuinely need theirs.
     let mut missing: Vec<&String> = expected.difference(&actual).collect();
     let mut extra: Vec<&String> = actual.difference(&expected).collect();
-    // Sorted before truncating: which examples get shown must not depend on hash iteration
-    // order. The recorded `.failures` baselines carry this text, so a nondeterministic sample
-    // makes every re-baseline churn, and a ratchet whose diff is always noise is one nobody
-    // reads.
     missing.sort_unstable();
     extra.sort_unstable();
     missing.truncate(3);
@@ -955,4 +958,103 @@ pub(crate) fn local_name(iri: &str) -> &str {
 #[must_use]
 pub fn rdf_format(path: &Path) -> Option<RdfFormat> {
     manifest::format_for(path)
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+    use oxrdf::{Dataset, NamedNode, Quad};
+
+    /// The recorded `.failures` baselines quote a sample of the differing quads, and the
+    /// sample used to be whichever ones hash iteration reached first. Every re-baseline then
+    /// rewrote files where nothing had changed — on one run six baselines moved and only one
+    /// had actually changed state — so the ratchet's diff was noise and hid real movement.
+    ///
+    /// The fix was to sort before truncating. It was verified by hand, by re-baselining twice
+    /// and diffing, which is exactly the kind of verification that does not survive contact
+    /// with a later edit.
+    fn quad(n: u32) -> Quad {
+        Quad {
+            subject: NamedNode::new_unchecked(format!("http://example.com/s{n:02}")).into(),
+            predicate: NamedNode::new_unchecked("http://example.com/p"),
+            object: NamedNode::new_unchecked(format!("http://example.com/o{n:02}")).into(),
+            graph_name: oxrdf::GraphName::DefaultGraph,
+        }
+    }
+
+    #[test]
+    fn the_quoted_sample_is_the_sorted_prefix_not_whatever_came_first() {
+        // Ten differing quads, so the two that get quoted are a choice rather than the whole
+        // set — which is the situation the sample has to be deterministic in.
+        let expected = Dataset::new();
+        let mut actual = Dataset::new();
+        for n in (0..10).rev() {
+            actual.insert(&quad(n));
+        }
+        let message = compare_datasets(&expected, &actual).expect_err("the datasets differ");
+
+        assert!(
+            message.contains("s00") && message.contains("s01"),
+            "the two lexicographically smallest should be quoted, got: {message}"
+        );
+        assert!(
+            !message.contains("s09"),
+            "and nothing later than them, got: {message}"
+        );
+        assert!(
+            message.find("s00") < message.find("s01"),
+            "quoted in sorted order, got: {message}"
+        );
+    }
+
+    /// Insertion order must not reach the output either. Two datasets holding the same quads
+    /// built in opposite orders have to produce the same text, because a baseline that moves
+    /// when nothing did is a baseline nobody reads.
+    #[test]
+    fn insertion_order_does_not_reach_the_message() {
+        let expected = Dataset::new();
+        let mut forwards = Dataset::new();
+        let mut backwards = Dataset::new();
+        for n in 0..10 {
+            forwards.insert(&quad(n));
+        }
+        for n in (0..10).rev() {
+            backwards.insert(&quad(n));
+        }
+        assert_eq!(
+            compare_datasets(&expected, &forwards).expect_err("differ"),
+            compare_datasets(&expected, &backwards).expect_err("differ"),
+        );
+    }
+
+    /// `compare_stores` is the third place the same sample is built.
+    ///
+    /// Unlike the other two it was never actually broken: it dumps into a `BTreeSet`, which
+    /// is ordered, so its prefix was already the sorted one and its explicit sort is a no-op.
+    /// The test pins the *observable* property rather than the mechanism, which is what makes
+    /// it worth having — it does not fail if the redundant sort goes, and it does fail if the
+    /// container is ever swapped for an unordered one, which is how this would really break.
+    #[test]
+    fn the_store_comparison_quotes_a_sorted_prefix_too() {
+        let mut actual = holos_engine::Engine::new();
+        let expected = holos_engine::Engine::new();
+        for n in (0..10).rev() {
+            actual.store_mut().insert(quad(n).as_ref()).expect("insert");
+        }
+        let Outcome::Failed(message) = compare_stores(&actual, &expected) else {
+            panic!("the stores differ, so this must fail");
+        };
+        for n in 0..3 {
+            assert!(
+                message.contains(&format!("s{n:02}")),
+                "s{n:02} is in the three smallest and should be quoted, got: {message}"
+            );
+        }
+        for n in 3..10 {
+            assert!(
+                !message.contains(&format!("s{n:02}")),
+                "s{n:02} is outside the three smallest, got: {message}"
+            );
+        }
+    }
 }
