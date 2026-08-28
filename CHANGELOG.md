@@ -65,6 +65,25 @@ store.
   referenced, guarded by `--purge-role`. No timer: schedule it as you already schedule
   backups.
 
+### RDFS entailment
+
+`holos_engine::entailment` materialises the RDFS closure into a graph of its own, so the
+entailed triples are real ones every reader sees — the query path, the topology rewrite,
+SHACL, the statistics — without any of them knowing about entailment. Six rules (rdfs2, 3, 5,
+7, 9, 11); the axiomatic and reflexive ones are left out because they entail
+`x rdf:type rdfs:Resource` for every term and no query is improved by it.
+
+This is what makes the OGC GeoSPARQL example work at the feature level. It attaches
+geometries with `my:hasExactGeometry rdfs:subPropertyOf geo:hasGeometry`, and the topology
+rewrite looks for `geo:hasGeometry` — so before entailment a feature-level query returned the
+geometries rather than the features.
+
+### SHACL
+
+SHACL 1.2 Core rises from 94/138 to 103/138: `sh:minListLength`, `sh:maxListLength`,
+`sh:uniqueMembers`, `sh:memberShape` and `sh:singleLine`, plus `sh:detail` so a result about
+a structure can explain itself.
+
 ### Conformance
 
 The SPARQL 1.0 suite is now a ratchet of its own at 262/263. Graph Store Protocol 13/13 and
