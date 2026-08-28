@@ -249,7 +249,17 @@ fn run_adapted(store: &Store, options: Options, expected: &Dataset) -> Result<su
         Ok(r) => r,
         Err(e) => return Ok(super::Outcome::fail(format!("validating: {e}"))),
     };
-    let graph = run.report_to_oxrdf(&report);
+    // Same rule as the native path: `sh:conformanceDisallows` is a property of the report,
+    // so a test that sets one is asking for a run judged under it.
+    let declared: Vec<_> = disallowed_iris(expected)
+        .iter()
+        .filter_map(|iri| run.term_for_iri(iri))
+        .collect();
+    let graph = if declared.is_empty() {
+        run.report_to_oxrdf(&report)
+    } else {
+        run.report_to_oxrdf_with(&report, &declared)
+    };
     let mut actual = Dataset::new();
     for triple in graph.iter() {
         actual.insert(&Quad {
@@ -316,6 +326,19 @@ fn load_into(store: &mut Store, path: &Path, graph: Option<NamedNode>) -> Result
         store.insert(quad.as_ref())?;
     }
     Ok(())
+}
+
+/// The `sh:conformanceDisallows` IRIs an expected report names.
+fn disallowed_iris(expected: &Dataset) -> Vec<String> {
+    let predicate = NamedNode::new_unchecked("http://www.w3.org/ns/shacl#conformanceDisallows");
+    expected
+        .iter()
+        .filter(|q| q.predicate == predicate.as_ref())
+        .filter_map(|q| match q.object {
+            TermRef::NamedNode(n) => Some(n.as_str().to_owned()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The severities an expected report declares as disqualifying, if it declares any.

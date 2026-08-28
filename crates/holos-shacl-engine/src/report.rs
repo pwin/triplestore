@@ -96,6 +96,23 @@ impl ValidationReport {
         shapes: &Graph,
         disallowed: &[TermId],
     ) -> OxGraph {
+        self.to_oxrdf_declaring(store, vocab, shapes, disallowed, false)
+    }
+
+    /// As [`Self::to_oxrdf`], writing `sh:conformanceDisallows` when `declare` is set.
+    ///
+    /// Only a caller that *chose* the set declares it. Naming the default would make a
+    /// report differ from one that simply used it, for no difference in meaning — whereas a
+    /// chosen set is exactly the thing a reader needs to know, because it is the rule the
+    /// verdict was reached under.
+    pub fn to_oxrdf_declaring(
+        &self,
+        store: &TermStore,
+        vocab: &Vocab,
+        shapes: &Graph,
+        disallowed: &[TermId],
+        declare: bool,
+    ) -> OxGraph {
         let mut g = OxGraph::new();
         let mut next_bnode = 0u64;
         let report = fresh_bnode(&mut next_bnode);
@@ -113,6 +130,15 @@ impl ValidationReport {
             iri(vocab.sh_conforms),
             Literal::from(self.conforms(disallowed)),
         ));
+        if declare {
+            for &severity in disallowed {
+                g.insert(&Triple::new(
+                    report.clone(),
+                    iri(vocab.sh_conformanceDisallows),
+                    iri(severity),
+                ));
+            }
+        }
 
         for result in &self.results {
             self.write_result(
@@ -194,18 +220,18 @@ impl ValidationReport {
             ));
         }
         if let Some(p) = result.path {
-            // HOLOS change: a compound path is copied into the report *per result*, under
-            // blank-node labels unique to that result. Rendering one shared copy makes two
-            // results share a node, and the graph is then not isomorphic to the one the
-            // SHACL test suite expects — every complex-path test fails on the structure
-            // rather than on the violation it found.
+            // HOLOS change: a compound path is copied into the report *per result*, and
+            // per *occurrence* within it. Two things go wrong otherwise. One shared copy
+            // across results makes two results share a node; and copying node-by-node
+            // within a result collapses a path that names the same blank node twice —
+            // `sh:path ( _:pinv _:pinv )` is legal and says "inverse p, then inverse p",
+            // which as an expression has two occurrences and only one node. Either way the
+            // graph is not isomorphic to the one the suite expects, and a complex-path test
+            // then fails on report structure rather than on the violation it found.
             let tag = blank_tag(&node);
-            g.insert(&Triple::new(
-                node.clone(),
-                iri(vocab.sh_resultPath),
-                scoped(store.to_oxrdf(p), &tag),
-            ));
-            copy_subtree(p, shapes, store, g, &tag);
+            let mut next = 0u64;
+            let root = copy_occurrence(p, shapes, store, g, &tag, &mut next, 0);
+            g.insert(&Triple::new(node.clone(), iri(vocab.sh_resultPath), root));
         }
         for &m in &result.messages {
             g.insert(&Triple::new(
@@ -396,30 +422,39 @@ fn scoped(term: Term, tag: &str) -> Term {
     }
 }
 
-fn copy_subtree(root: TermId, src: &Graph, store: &TermStore, dst: &mut OxGraph, tag: &str) {
-    if !store.is_blank(root) {
-        return;
+/// Copies one *occurrence* of a path node into the report, and everything below it.
+///
+/// Deliberately a tree copy. The source is a path *expression*, and an expression that
+/// mentions the same sub-expression twice has two occurrences of it even where the shapes
+/// graph stores one node. A copier keyed on the source node writes it once, and the reader
+/// cannot recover the path from the result.
+///
+/// `depth` is a cycle guard. A well-formed path expression is finite and acyclic, but a
+/// shapes graph is data and may say otherwise; a copier that trusted it would not return.
+fn copy_occurrence(
+    node: TermId,
+    src: &Graph,
+    store: &TermStore,
+    dst: &mut OxGraph,
+    tag: &str,
+    next: &mut u64,
+    depth: u32,
+) -> Term {
+    const MAX_DEPTH: u32 = 64;
+    if !store.is_blank(node) || depth >= MAX_DEPTH {
+        return scoped(store.to_oxrdf(node), tag);
     }
-    let mut seen = vec![root];
-    let mut queue = vec![root];
-    while let Some(node) = queue.pop() {
-        for (p, o) in src.predicate_objects(node) {
-            let subject = match scoped(store.to_oxrdf(node), tag) {
-                Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b),
-                Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n),
-                _ => continue,
-            };
-            dst.insert(&Triple::new(
-                subject,
-                NamedNode::new_unchecked(store.iri(p).unwrap_or_default()),
-                scoped(store.to_oxrdf(o), tag),
-            ));
-            if store.is_blank(o) && !seen.contains(&o) {
-                seen.push(o);
-                queue.push(o);
-            }
-        }
+    let here = oxrdf::BlankNode::new_unchecked(format!("{tag}_p{}", *next));
+    *next += 1;
+    for (p, o) in src.predicate_objects(node) {
+        let object = copy_occurrence(o, src, store, dst, tag, next, depth + 1);
+        dst.insert(&Triple::new(
+            NamedOrBlankNode::BlankNode(here.clone()),
+            NamedNode::new_unchecked(store.iri(p).unwrap_or_default()),
+            object,
+        ));
     }
+    here.into()
 }
 
 #[cfg(test)]

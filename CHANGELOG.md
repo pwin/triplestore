@@ -24,6 +24,25 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### The adapted engine reaches 138/138 too
+
+HOLOS runs two validators — the native evaluator on the write path, because it revalidates
+incrementally, and the adapted SHACL_Engine for constraint coverage — and the suite is run
+against both. The adapted engine went 127/138 and 90/98 to **138/138 and 96/98**:
+
+- `sh:pattern` reported the pattern string as `sh:sourceConstraint`. That property names the
+  node which *stated* a constraint, and a Core constraint is stated by its shape, which
+  `sh:sourceShape` already names. Five tests, one cause.
+- Compound paths were copied into reports node-by-node rather than occurrence-by-occurrence,
+  so `sh:path ( _:pinv _:pinv )` — legal, and meaning "inverse p, then inverse p" — arrived
+  as one node where the expression has two. The same defect as the native one below, found
+  independently in the other validator.
+- `{| ... |}` annotations on a constraint were not read at all, so `sh:message` and
+  `sh:severity` written that way were ignored.
+- `sh:reificationRequired` was unimplemented, leaving a statement with no reifier vacuously
+  conforming.
+- `sh:nodeByExpression` did not report the expression it evaluated.
+
 ### Four SHACL 1.0 defects the 1.2 suite exposed
 
 These had been passing the project's own ratchet. A stricter suite over the same code found

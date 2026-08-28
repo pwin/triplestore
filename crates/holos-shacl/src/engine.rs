@@ -147,6 +147,34 @@ impl EngineRun {
         )
     }
 
+    /// Renders a report judged by an explicit set of disqualifying severities.
+    ///
+    /// The rendered report says which set it was, as `sh:conformanceDisallows`, so the
+    /// verdict travels with the rule that produced it.
+    #[must_use]
+    pub fn report_to_oxrdf_with(
+        &self,
+        report: &ValidationReport,
+        disallowed: &[EngineId],
+    ) -> OxGraph {
+        report.to_oxrdf_declaring(
+            &self.bridged.terms,
+            &self.bridged.vocab,
+            &self.shapes_graph,
+            disallowed,
+            true,
+        )
+    }
+
+    /// Resolves an IRI to this run's term id, if the bridged graph knows it.
+    ///
+    /// A severity the graph has never seen cannot be the severity of any result, so it
+    /// disqualifies nothing and `None` is the right answer rather than an error.
+    #[must_use]
+    pub fn term_for_iri(&self, iri: &str) -> Option<EngineId> {
+        self.bridged.terms.get_named_node(iri)
+    }
+
     /// Whether a report conforms.
     #[must_use]
     pub fn conforms(&self, report: &ValidationReport) -> bool {

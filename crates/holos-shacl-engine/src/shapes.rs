@@ -87,11 +87,12 @@ pub enum Constraint {
     // String based
     MinLength(u32),
     MaxLength(u32),
-    Pattern {
-        regex: Regex,
-        /// The original `sh:pattern` literal, reported as `sh:sourceConstraint`.
-        source: TermId,
-    },
+    // No `source` alongside the regex. `sh:sourceConstraint` points at the node that
+    // *stated* a constraint, and Core constraints are stated by the shape itself, which
+    // `sh:sourceShape` already names. The suite is explicit: pattern-001 expects four
+    // results with no `sh:sourceConstraint` between them, while nodeByExpression-001
+    // requires one -- there the expression really is a separate node.
+    Pattern(Regex),
     LanguageIn(Vec<TermId>),
     UniqueLang,
 
@@ -130,7 +131,16 @@ pub enum Constraint {
     },
     /// `sh:reifierShape`: the reifiers of each `(focus, path, value)` triple
     /// must conform to the given shape.
-    ReifierShape(ShapeId),
+    ReifierShape {
+        /// The shape every reifier of the statement must conform to.
+        shape: ShapeId,
+        /// `sh:reificationRequired` — a statement with no reifier at all fails.
+        ///
+        /// Without it the constraint is vacuously satisfied by an unreified statement,
+        /// which is the right default: it says what a reifier must look like, not that
+        /// there must be one.
+        required: bool,
+    },
     HasValue(TermId),
     In(Vec<TermId>),
 
@@ -191,7 +201,7 @@ impl Constraint {
             Self::MaxInclusive(_) => v.sh_MaxInclusiveConstraintComponent,
             Self::MinLength(_) => v.sh_MinLengthConstraintComponent,
             Self::MaxLength(_) => v.sh_MaxLengthConstraintComponent,
-            Self::Pattern { .. } => v.sh_PatternConstraintComponent,
+            Self::Pattern(_) => v.sh_PatternConstraintComponent,
             Self::LanguageIn(_) => v.sh_LanguageInConstraintComponent,
             Self::UniqueLang => v.sh_UniqueLangConstraintComponent,
             Self::Equals(_) => v.sh_EqualsConstraintComponent,
@@ -209,7 +219,7 @@ impl Constraint {
             // evaluator overrides this.
             Self::QualifiedValueShape { .. } => v.sh_QualifiedMinCountConstraintComponent,
             Self::Closed { .. } => v.sh_ClosedConstraintComponent,
-            Self::ReifierShape(_) => v.sh_ReifierShapeConstraintComponent,
+            Self::ReifierShape { .. } => v.sh_ReifierShapeConstraintComponent,
             Self::HasValue(_) => v.sh_HasValueConstraintComponent,
             Self::In(_) => v.sh_InConstraintComponent,
             Self::MinListLength(_) => v.sh_MinListLengthConstraintComponent,
@@ -242,6 +252,26 @@ impl Constraint {
 }
 
 /// A compiled shape.
+/// What a `{| ... |}` annotation said about one constraint.
+///
+/// No `deactivated` here, unlike the shape-level flag: `objects_active` drops a deactivated
+/// statement's value before a constraint is built from it, so by this point the constraint
+/// does not exist to annotate.
+#[derive(Debug, Clone, Default)]
+pub struct Annotation {
+    /// `sh:message` — replaces the shape's own messages for results from this constraint.
+    pub messages: Vec<TermId>,
+    /// `sh:severity` — replaces the shape's severity for results from this constraint.
+    pub severity: Option<TermId>,
+}
+
+impl Annotation {
+    /// Whether this says anything, so the common empty case can be skipped whole.
+    fn is_empty(&self) -> bool {
+        self.messages.is_empty() && self.severity.is_none()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Shape {
     /// The shape's node in the shapes graph, reported as `sh:sourceShape`.
@@ -255,6 +285,11 @@ pub struct Shape {
     pub constraints: Vec<Constraint>,
     pub severity: TermId,
     pub messages: Vec<TermId>,
+    /// Per-constraint `{| ... |}` annotations, one entry per entry in `constraints`.
+    ///
+    /// Parallel to `constraints` rather than a map, so a constraint index is enough to find
+    /// its annotation and the two cannot be looked up inconsistently.
+    pub annotations: Vec<Annotation>,
     pub deactivated: bool,
     /// SHACL-AF rules attached with `sh:rule`. Empty for almost every shape,
     /// and never consulted unless rules are asked for.
@@ -315,6 +350,7 @@ impl Shape {
             constraints: Vec::new(),
             severity,
             messages: Vec::new(),
+            annotations: Vec::new(),
             deactivated: false,
             rules: Vec::new(),
             order: 0.0,
@@ -551,6 +587,7 @@ impl<'a> Compiler<'a> {
         let constraints = self.compile_constraints(node, path.as_ref())?;
 
         let rules = self.compile_rules(node)?;
+        let annotations = self.annotations_for(node, &constraints);
 
         Ok(Shape {
             node,
@@ -560,6 +597,7 @@ impl<'a> Compiler<'a> {
             constraints,
             severity,
             messages: g.objects(node, v.sh_message).collect(),
+            annotations,
             deactivated,
             rules,
             order: self.number(node, v.sh_order).unwrap_or(0.0),
@@ -737,10 +775,7 @@ impl<'a> Compiler<'a> {
                 .store
                 .lexical_form(t)
                 .ok_or_else(|| Error::Shape("sh:pattern is not a string".into()))?;
-            out.push(Constraint::Pattern {
-                regex: build_regex(pattern, flags)?,
-                source: t,
-            });
+            out.push(Constraint::Pattern(build_regex(pattern, flags)?));
         }
         for t in self.objects_active(node, v.sh_languageIn) {
             let langs = g
@@ -862,7 +897,10 @@ impl<'a> Compiler<'a> {
         }
         for t in self.objects_active(node, v.sh_reifierShape) {
             let id = self.shape_id(t)?;
-            out.push(Constraint::ReifierShape(id));
+            out.push(Constraint::ReifierShape {
+                shape: id,
+                required: self.flag(node, v.sh_reificationRequired),
+            });
         }
         for t in self.objects_active(node, v.sh_memberShape) {
             let id = self.shape_id(t)?;
@@ -1046,6 +1084,113 @@ impl<'a> Compiler<'a> {
             .objects(node, pred)
             .filter(|&o| !self.statement_deactivated(node, pred, o))
             .collect()
+    }
+
+    /// Reads `{| ... |}` annotations off the triples that declared `node`'s constraints.
+    ///
+    /// The parser has already turned the syntax into ordinary triples — a reifier, an
+    /// `rdf:reifies` pointing at a triple term, and whatever was said about it — so this
+    /// walks reifiers rather than parsing anything.
+    ///
+    /// Annotations are matched back to constraints by the parameter they were written on,
+    /// and by the value where a constraint carries one that identifies it. That avoids
+    /// threading a source triple through all forty places a constraint is pushed, at the
+    /// cost of not distinguishing two constraints from the same parameter with the same
+    /// value — which would be the same constraint written twice.
+    fn annotations_for(&self, node: TermId, constraints: &[Constraint]) -> Vec<Annotation> {
+        let v = self.vocab;
+        let mut out = vec![Annotation::default(); constraints.len()];
+        // Nothing to look up unless the graph reifies at all, which almost none do.
+        if self.graph.subjects_of(v.rdf_reifies).next().is_none() {
+            return out;
+        }
+        for (p, o) in self.graph.predicate_objects(node) {
+            let Some(tt) = self.store.get_triple_term(node, p, o) else {
+                continue;
+            };
+            for r in self.graph.subjects(v.rdf_reifies, tt) {
+                let annotation = Annotation {
+                    messages: self.graph.objects(r, v.sh_message).collect(),
+                    severity: self.graph.object(r, v.sh_severity),
+                };
+                if annotation.is_empty() {
+                    continue;
+                }
+                for (i, c) in constraints.iter().enumerate() {
+                    if self.declared_by(c, p, o) {
+                        out[i] = annotation.clone();
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether a constraint came from `(parameter, value)` on its shape.
+    ///
+    /// Parameters that can appear more than once on a shape — the bounds, `sh:hasValue`,
+    /// and everything shape-valued — are matched on the value too, so two of them on one
+    /// shape get their own annotations. Parameters that can only appear once need only the
+    /// name.
+    ///
+    /// Constraints assembled from several parameters at once (`sh:qualifiedValueShape` with
+    /// its counts, `sh:closed` with its ignored list, custom and SPARQL constraints) are not
+    /// matched at all: there is no single triple that declared them, so there is no
+    /// well-defined statement to annotate.
+    #[allow(clippy::match_same_arms)]
+    fn declared_by(&self, c: &Constraint, parameter: TermId, value: TermId) -> bool {
+        let v = self.vocab;
+        let shape_node = |id: &ShapeId| self.shapes[id.index()].node;
+        match c {
+            Constraint::Class(_) => parameter == v.sh_class,
+            Constraint::Datatype(_) => parameter == v.sh_datatype,
+            Constraint::NodeKind(_) => parameter == v.sh_nodeKind,
+            Constraint::MinCount(_) => parameter == v.sh_minCount,
+            Constraint::MaxCount(_) => parameter == v.sh_maxCount,
+            Constraint::MinExclusive(t) => parameter == v.sh_minExclusive && value == *t,
+            Constraint::MinInclusive(t) => parameter == v.sh_minInclusive && value == *t,
+            Constraint::MaxExclusive(t) => parameter == v.sh_maxExclusive && value == *t,
+            Constraint::MaxInclusive(t) => parameter == v.sh_maxInclusive && value == *t,
+            Constraint::MinLength(_) => parameter == v.sh_minLength,
+            Constraint::MaxLength(_) => parameter == v.sh_maxLength,
+            Constraint::Pattern(_) => parameter == v.sh_pattern,
+            Constraint::LanguageIn(_) => parameter == v.sh_languageIn,
+            Constraint::UniqueLang => parameter == v.sh_uniqueLang,
+            Constraint::SingleLine => parameter == v.sh_singleLine,
+            Constraint::UniqueMembers => parameter == v.sh_uniqueMembers,
+            Constraint::MinListLength(_) => parameter == v.sh_minListLength,
+            Constraint::MaxListLength(_) => parameter == v.sh_maxListLength,
+            Constraint::HasValue(t) => parameter == v.sh_hasValue && value == *t,
+            Constraint::In(_) => parameter == v.sh_in,
+            Constraint::RootClass(t) => parameter == v.sh_rootClass && value == *t,
+            Constraint::UniqueValuesFor(_) => parameter == v.sh_uniqueValuesFor,
+            Constraint::Expression(t) => parameter == v.sh_expression && value == *t,
+            Constraint::NodeByExpression(t) => parameter == v.sh_nodeByExpression && value == *t,
+            // Path-valued: the value is the path node, which identifies the statement.
+            Constraint::Equals(_) => parameter == v.sh_equals,
+            Constraint::Disjoint(_) => parameter == v.sh_disjoint,
+            Constraint::LessThan(_) => parameter == v.sh_lessThan,
+            Constraint::LessThanOrEquals(_) => parameter == v.sh_lessThanOrEquals,
+            Constraint::SubsetOf(_) => parameter == v.sh_subsetOf,
+            // Shape-valued: identified by the shape the statement named.
+            Constraint::Not(i) => parameter == v.sh_not && value == shape_node(i),
+            Constraint::Node(i) => parameter == v.sh_node && value == shape_node(i),
+            Constraint::Property(i) => parameter == v.sh_property && value == shape_node(i),
+            Constraint::MemberShape(i) => parameter == v.sh_memberShape && value == shape_node(i),
+            Constraint::SomeValue(i) => parameter == v.sh_someValue && value == shape_node(i),
+            Constraint::ReifierShape { shape: i, .. } => {
+                parameter == v.sh_reifierShape && value == shape_node(i)
+            }
+            // List-valued: one statement, one constraint, and the value is the list head.
+            Constraint::And(_) => parameter == v.sh_and,
+            Constraint::Or(_) => parameter == v.sh_or,
+            Constraint::Xone(_) => parameter == v.sh_xone,
+            // Assembled from several parameters; no single statement declared them.
+            Constraint::QualifiedValueShape { .. }
+            | Constraint::Closed { .. }
+            | Constraint::Sparql(_)
+            | Constraint::Custom(_) => false,
+        }
     }
 
     fn statement_deactivated(&self, s: TermId, p: TermId, o: TermId) -> bool {
@@ -1347,7 +1492,7 @@ mod tests {
         let (mut store, _, s) =
             compile("ex:S a sh:NodeShape ; sh:pattern \"^a\" ; sh:flags \"i\" .");
         let shape = shape_of(&s, &mut store, "http://ex/S");
-        let Constraint::Pattern { regex, .. } = &shape.constraints[0] else {
+        let Constraint::Pattern(regex) = &shape.constraints[0] else {
             panic!("expected sh:pattern");
         };
         assert!(regex.is_match("Abc"));
@@ -1359,7 +1504,7 @@ mod tests {
         // XPath fn:matches, which sh:pattern follows, is a search.
         let (mut store, _, s) = compile("ex:S a sh:NodeShape ; sh:pattern \"b\" .");
         let shape = shape_of(&s, &mut store, "http://ex/S");
-        let Constraint::Pattern { regex, .. } = &shape.constraints[0] else {
+        let Constraint::Pattern(regex) = &shape.constraints[0] else {
             panic!()
         };
         assert!(regex.is_match("abc"));
