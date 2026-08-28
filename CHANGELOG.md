@@ -3,6 +3,54 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## Unreleased
+
+### SHACL 1.2 Core is complete
+
+138/138, from the 103/138 that shipped in 0.2.0. The remaining thirty-five were mostly not
+new constraints but constraints whose *parameter* SHACL 1.2 widened without changing the
+syntax — `sh:class` and `sh:datatype` take lists, `sh:equals`, `sh:disjoint`, `sh:lessThan`
+and `sh:lessThanOrEquals` take paths — each failing silently in whichever direction hurt that
+constraint most.
+
+The last two are report-level rather than constraint-level:
+
+- `sh:nodeByExpression` names a shape through a node expression. Core defines no node
+  expression more interesting than a constant IRI, so what it adds over `sh:node` is the
+  report: the expression is recorded as `sh:sourceConstraint`. A non-constant expression is
+  left uncompiled rather than approximated.
+- `sh:conformanceDisallows` says which severities disqualify. It is a property of the report,
+  not of the shapes — it is the rule the data was judged by, which is the difference between
+  "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
+  recomputes conformance against an explicit set and records it.
+
+### Four SHACL 1.0 defects the 1.2 suite exposed
+
+These had been passing the project's own ratchet. A stricter suite over the same code found
+them:
+
+- dates were compared as strings, so `"…T12:00:00-05:00"` and `"…T12:00:00"` were ordered when
+  XSD says an untimezoned value is *indeterminate* against a timezoned one;
+- `sh:lessThan` counted per value rather than per pair;
+- every bounded integer type — `xsd:byte`, `xsd:short`, `xsd:unsignedInt` and six others —
+  validated as unbounded, so `sh:datatype xsd:byte` accepted any integer;
+- compound paths were copied into reports as graphs rather than trees, so a report described
+  a different path than the one that failed.
+
+### `sh:targetWhere` reaches the revalidation frontier
+
+`sh:targetWhere` selects focus nodes by evaluating a shape, so a write can pull a node into a
+shape's scope without touching anything that shape's own constraints read. The dependency
+walk covered constraints only, so the outer shape was never revalidated. Incremental
+revalidation is what lets the Boundary gate a commit (`DESIGN.md` §8), and a gap in it is a
+violation admitted, not merely a violation reported late.
+
+### Conformance diagnostics are deterministic
+
+The recorded `.failures` baselines quote a sample of the differing quads, chosen and ordered
+by hash iteration. Every re-baseline churned, so the ratchet's diff was noise and hid real
+movement. Sorted before sampling: two consecutive re-baselines are now byte-identical.
+
 ## 0.2.0
 
 The release that made the query engine fast on the shapes it was slowest at, and made the

@@ -264,6 +264,10 @@ vocab_table![
     "http://www.w3.org/ns/shacl#reificationRequired",
     "http://www.w3.org/ns/shacl#rootClass",
     "http://www.w3.org/ns/shacl#targetWhere",
+    "http://www.w3.org/ns/shacl#nodeByExpression",
+    "http://www.w3.org/ns/shacl#NodeByExpressionConstraintComponent",
+    "http://www.w3.org/ns/shacl#sourceConstraint",
+    "http://www.w3.org/ns/shacl#conformanceDisallows",
     "http://www.w3.org/ns/shacl#RootClassConstraintComponent",
     "http://www.w3.org/ns/shacl#ReifierShapeConstraintComponent",
     // --- prov: (the holon Event graph is PROV-O shaped, DESIGN.md §9)

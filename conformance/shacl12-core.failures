@@ -1,4 +1,2 @@
 # shacl12-core — tests known to fail. Regenerate with HOLOS_UPDATE_CONFORMANCE=1.
-# 136/138 passed, 2 failed, 0 skipped
-node/nodeByExpression-001	10 expected vs 2 actual triples; missing ["_:c14n1 <http://www.w3.org/ns/shacl#result> _:c14n0", "_:c14n1 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/shacl#ValidationReport>", "_:c14n1 <http://www.w3.org/ns/shacl#conforms> \"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>"]; unexpected ["_:c14n0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/shacl#ValidationReport>", "_:c14n0 <http://www.w3.org/ns/shacl#conforms> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"]
-validation-reports/conformance-disallows-001	11 expected vs 10 actual triples; missing ["_:c14n1 <http://www.w3.org/ns/shacl#conforms> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>", "_:c14n1 <http://www.w3.org/ns/shacl#conformanceDisallows> <http://www.w3.org/ns/shacl#Violation>"]; unexpected ["_:c14n1 <http://www.w3.org/ns/shacl#conforms> \"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>"]
+# 138/138 passed, 0 failed, 0 skipped

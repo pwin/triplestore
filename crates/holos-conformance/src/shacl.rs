@@ -223,6 +223,14 @@ fn run_inner(test: &ShaclTest, engine: Engine) -> Result<super::Outcome> {
         }
         Err(e) => return Ok(super::Outcome::fail(format!("validating: {e}"))),
     };
+    // `sh:conformanceDisallows` is a property of the *report*, not of the shapes: it says
+    // which severities the validator was asked to treat as disqualifying. A test that sets
+    // it is asking for a run under that rule, so the harness has to read it from the
+    // expected report and apply it — there is nowhere else it could come from.
+    let report = match disallowed_severities(&expected, &store)? {
+        Some(severities) => report.with_conformance_disallows(severities),
+        None => report,
+    };
     let actual = to_dataset(shapes.report_to_quads(&store, &report)?);
 
     Ok(match compare(&expected, &actual) {
@@ -310,6 +318,26 @@ fn load_into(store: &mut Store, path: &Path, graph: Option<NamedNode>) -> Result
     Ok(())
 }
 
+/// The severities an expected report declares as disqualifying, if it declares any.
+fn disallowed_severities(
+    expected: &Dataset,
+    store: &Store,
+) -> Result<Option<Vec<holos_core::TermId>>> {
+    let predicate = NamedNode::new_unchecked("http://www.w3.org/ns/shacl#conformanceDisallows");
+    let mut out = Vec::new();
+    for quad in expected.iter() {
+        if quad.predicate != predicate.as_ref() {
+            continue;
+        }
+        // Looked up rather than interned: a severity the store has never seen cannot be the
+        // severity of any result, so it disqualifies nothing and can be dropped.
+        if let Some(id) = store.lookup_term(quad.object)? {
+            out.push(id);
+        }
+    }
+    Ok((!out.is_empty()).then_some(out))
+}
+
 /// Extracts the expected report — the subgraph reachable from `mf:result`.
 fn expected_report(graph: &Graph, entry: NamedOrBlankNodeRef<'_>) -> Result<Dataset> {
     let Some(result) = graph.object_for_subject_predicate(entry, mf("result").as_ref()) else {
@@ -363,18 +391,24 @@ fn compare(expected: &Dataset, actual: &Dataset) -> std::result::Result<(), Stri
     if a == b {
         return Ok(());
     }
-    let missing: Vec<String> = a
+    let mut missing: Vec<String> = a
         .iter()
         .filter(|q| !b.contains(*q))
-        .take(3)
         .map(|q| q.to_string())
         .collect();
-    let extra: Vec<String> = b
+    let mut extra: Vec<String> = b
         .iter()
         .filter(|q| !a.contains(*q))
-        .take(3)
         .map(|q| q.to_string())
         .collect();
+    // Sorted before truncating: which examples get shown must not depend on hash iteration
+    // order. The recorded `.failures` baselines carry this text, so a nondeterministic sample
+    // makes every re-baseline churn, and a ratchet whose diff is always noise is one nobody
+    // reads.
+    missing.sort_unstable();
+    extra.sort_unstable();
+    missing.truncate(3);
+    extra.truncate(3);
     Err(format!(
         "{} expected vs {} actual triples; missing {missing:?}; unexpected {extra:?}",
         a.len(),

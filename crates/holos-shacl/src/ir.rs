@@ -194,6 +194,22 @@ pub enum Constraint {
         /// Without it, an unannotated triple passes vacuously: there is nothing to check.
         required: bool,
     },
+    /// `sh:nodeByExpression` — the focus node conforms to a shape a node expression names.
+    ///
+    /// SHACL Core defines no interesting node expressions, so the only form reachable here
+    /// is a constant IRI, which evaluates to itself and therefore names a shape directly.
+    /// That makes this `sh:node` with a different report: the expression is recorded as
+    /// `sh:sourceConstraint` so a reader can see which one was evaluated.
+    ///
+    /// A non-constant expression is not compiled at all rather than approximated. That means
+    /// such a shape reports nothing, which is a real limitation and is why it is written
+    /// here rather than left to be inferred from the code.
+    NodeByExpression {
+        /// The shape the expression named.
+        shape: ShapeIdx,
+        /// The expression itself, reported as `sh:sourceConstraint`.
+        expression: TermId,
+    },
     /// `sh:rootClass` — the value is that class, or a subclass of it.
     ///
     /// About the class hierarchy rather than about instances: `sh:class ex:Animal` asks
@@ -267,6 +283,7 @@ impl Constraint {
             Self::SubsetOf(_) => sh.subset_of_component,
             Self::SomeValue(_) => sh.some_value_component,
             Self::RootClass(_) => sh.root_class_component,
+            Self::NodeByExpression { .. } => sh.node_by_expression_component,
             Self::ReifierShape { .. } => sh.reifier_shape_component,
             Self::UniqueValuesFor(_) => sh.unique_values_for_component,
             Self::Equals(_) => sh.equals_component,
@@ -435,15 +452,25 @@ impl Shapes {
 /// Every shape a shape refers to.
 fn referenced_shapes(shape: &Shape) -> Vec<ShapeIdx> {
     let mut out = Vec::new();
+    // Targets first. `sh:targetWhere` names a shape whose *conforming nodes* are this shape's
+    // focus set, so a change that alters what the inner shape selects alters what this shape
+    // validates — even when nothing this shape's own constraints read has changed. Walking
+    // constraints alone leaves the outer shape out of the revalidation frontier entirely.
+    for target in &shape.targets {
+        if let Target::Where(i) = target {
+            out.push(*i);
+        }
+    }
     for constraint in &shape.constraints {
         match constraint {
             Constraint::Not(i)
             | Constraint::Node(i)
             | Constraint::Property(i)
             | Constraint::MemberShape(i)
-            | Constraint::SomeValue(i)
             | Constraint::SomeValue(i) => out.push(*i),
-            Constraint::ReifierShape { shape, .. } => out.push(*shape),
+            Constraint::ReifierShape { shape, .. } | Constraint::NodeByExpression { shape, .. } => {
+                out.push(*shape)
+            }
             Constraint::And(v) | Constraint::Or(v) | Constraint::Xone(v) => {
                 out.extend(v.iter().copied());
             }
@@ -1031,6 +1058,17 @@ impl<'a> Compiler<'a> {
         for n in g.objects(node, sh.some_value)? {
             let idx = self.shape_for(n)?;
             out.push(Constraint::SomeValue(idx));
+        }
+        for e in g.objects(node, sh.node_by_expression)? {
+            // Only a constant IRI is a node expression this can evaluate. Anything else is
+            // left uncompiled rather than guessed at.
+            if matches!(self.graph.term(e)?, Some(Term::NamedNode(_))) {
+                let shape = self.shape_for(e)?;
+                out.push(Constraint::NodeByExpression {
+                    shape,
+                    expression: e,
+                });
+            }
         }
         for c in g.objects(node, sh.root_class)? {
             out.push(Constraint::RootClass(c));

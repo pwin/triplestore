@@ -625,6 +625,16 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
+            Constraint::NodeByExpression {
+                shape: inner,
+                expression,
+            } => {
+                if !self.holds(*inner, focus, depth)? {
+                    let mut result = self.result(shape, focus, Some(focus), component);
+                    result.source_constraint = Some(*expression);
+                    results.push(result);
+                }
+            }
             // `rdfs:subClassOf*` from the value, upwards. `sh:class` walks the other way
             // — it asks whether a value is an *instance* — so despite the similar name these
             // traverse the hierarchy in opposite directions.
@@ -845,6 +855,7 @@ impl<'a> Validator<'a> {
                             component,
                             severity: shape.severity,
                             messages: shape.messages.clone(),
+                            source_constraint: None,
                             details: Vec::new(),
                         });
                     }
@@ -967,6 +978,7 @@ impl<'a> Validator<'a> {
             component,
             severity: shape.severity,
             messages: shape.messages.clone(),
+            source_constraint: None,
             details: Vec::new(),
         }
     }

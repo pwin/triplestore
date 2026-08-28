@@ -74,6 +74,13 @@ pub struct ValidationResult {
     pub source_shape: TermId,
     /// `sh:sourceConstraintComponent`.
     pub component: TermId,
+    /// `sh:sourceConstraint` — the node that *stated* the constraint, where that is a thing
+    /// distinct from the shape carrying it.
+    ///
+    /// Most constraints are written inline and have no such node. A node expression does:
+    /// the expression is a term in the shapes graph, and a reader needs it to know which
+    /// expression failed.
+    pub source_constraint: Option<TermId>,
     /// `sh:resultSeverity`.
     pub severity: TermId,
     /// `sh:resultMessage`, in shapes-graph order.
@@ -94,6 +101,12 @@ pub struct Report {
     pub conforms: bool,
     /// Every violation found.
     pub results: Vec<ValidationResult>,
+    /// `sh:conformanceDisallows` — the severities that make the data non-conforming.
+    ///
+    /// `None` is the default rule: everything from `sh:Info` upwards disqualifies, and
+    /// `sh:Debug` and `sh:Trace` do not. A caller with a policy of its own says so here, and
+    /// the report then states which rule it used rather than leaving a reader to assume.
+    pub conformance_disallows: Option<Vec<TermId>>,
 }
 
 impl Report {
@@ -114,7 +127,24 @@ impl Report {
         Self {
             conforms: !results.iter().any(is_judgement),
             results,
+            conformance_disallows: None,
         }
+    }
+
+    /// Recomputes conformance against an explicit set of disqualifying severities.
+    ///
+    /// The default rule is a rule, not a law: a caller may decide that only `sh:Violation`
+    /// disqualifies, and then a report full of warnings still conforms. Saying so here makes
+    /// the report carry the rule it was judged by, which is the difference between "this
+    /// data is fine" and "this data is fine *by these lights*".
+    #[must_use]
+    pub fn with_conformance_disallows(mut self, disallowed: Vec<TermId>) -> Self {
+        self.conforms = !self
+            .results
+            .iter()
+            .any(|r| disallowed.contains(&r.severity));
+        self.conformance_disallows = Some(disallowed);
+        self
     }
 
     /// A conforming report.

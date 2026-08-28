@@ -63,6 +63,19 @@ pub fn to_quads(
         &mut out,
     );
 
+    if let Some(disallowed) = &report.conformance_disallows {
+        for severity in disallowed {
+            if let Some(term) = shapes_graph.term(*severity)? {
+                triple(
+                    report_node.clone().into(),
+                    iri(sh.conformance_disallows)?,
+                    term,
+                    &mut out,
+                );
+            }
+        }
+    }
+
     // Sorted before numbering: the blank-node labels are a function of the content, so two
     // runs over the same data produce byte-identical reports.
     let mut results = report.results.clone();
@@ -149,6 +162,11 @@ fn write_result(
     );
     if let Some(shape) = shapes_graph.term(result.source_shape)? {
         triple(node.clone().into(), iri(sh.source_shape)?, shape, out);
+    }
+    if let Some(source) = result.source_constraint {
+        if let Some(term) = shapes_graph.term(source)? {
+            triple(node.clone().into(), iri(sh.source_constraint)?, term, out);
+        }
     }
     if let Some(value) = result.value {
         if let Some(term) = shapes_graph.term(value)? {

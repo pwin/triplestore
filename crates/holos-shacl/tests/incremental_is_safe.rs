@@ -46,6 +46,18 @@ ex:carol a ex:Person ; ex:name "Carol" ; ex:age 28 ; ex:email "carol@example.com
 # shape through that constraint's dependency. Removing the alias below leaves the nickname
 # outside the set it must be a subset of.
 ex:carol ex:nickname "Caz" ; ex:alias "Caz" .
+
+# `sh:targetWhere` selects focus nodes by *evaluating* a shape, so a write can pull a node
+# into a shape's scope without touching anything that shape's own constraints read. Nothing
+# but this filter names `ex:clearance`, so the only route from a write there to
+# `ex:BadgeShape` runs through the target.
+ex:Cleared a sh:NodeShape ;
+    sh:class ex:Person ;
+    sh:property [ sh:path ex:clearance ; sh:minCount 1 ] .
+
+ex:BadgeShape a sh:NodeShape ;
+    sh:targetWhere ex:Cleared ;
+    sh:property [ sh:path ex:badge ; sh:minCount 1 ] .
 "#;
 
 fn load(store: &mut Store, turtle: &str) {
@@ -303,5 +315,19 @@ fn a_unique_values_for_violation_survives_incremental_revalidation() {
            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
            ex:dave a ex:Person ; ex:name "Dave" ; ex:email "alice@example.com" ."#,
         "a duplicate email, colliding with a node the change did not touch",
+    );
+}
+
+/// A node pulled into a shape's scope by `sh:targetWhere` must be revalidated.
+///
+/// The write is to `ex:clearance`, which `ex:BadgeShape` does not mention: it makes `ex:bob`
+/// conform to the filter shape, and *that* makes him a focus node of a shape he violates.
+/// Reaching `ex:BadgeShape` from the write means following the target, not a constraint.
+#[test]
+fn a_node_newly_selected_by_target_where_is_revalidated() {
+    check_change(
+        r#"@prefix ex: <http://example.com/> .
+           ex:bob ex:clearance "secret" ."#,
+        "target-where selection",
     );
 }

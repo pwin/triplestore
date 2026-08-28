@@ -222,14 +222,28 @@ fn compare_datasets(expected: &Dataset, actual: &Dataset) -> std::result::Result
     if a == b {
         return Ok(());
     }
-    let missing: Vec<_> = a.iter().filter(|q| !b.contains(*q)).take(2).collect();
-    let extra: Vec<_> = b.iter().filter(|q| !a.contains(*q)).take(2).collect();
+    let mut missing: Vec<String> = a
+        .iter()
+        .filter(|q| !b.contains(*q))
+        .map(|q| q.to_string())
+        .collect();
+    let mut extra: Vec<String> = b
+        .iter()
+        .filter(|q| !a.contains(*q))
+        .map(|q| q.to_string())
+        .collect();
+    // Sorted before truncating: which examples get shown must not depend on hash iteration
+    // order. The recorded `.failures` baselines carry this text, so a nondeterministic sample
+    // makes every re-baseline churn, and a ratchet whose diff is always noise is one nobody
+    // reads.
+    missing.sort_unstable();
+    extra.sort_unstable();
+    missing.truncate(2);
+    extra.truncate(2);
     Err(format!(
-        "{} expected vs {} actual quads; missing {:?}; unexpected {:?}",
+        "{} expected vs {} actual quads; missing {missing:?}; unexpected {extra:?}",
         a.len(),
         b.len(),
-        missing.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        extra.iter().map(ToString::to_string).collect::<Vec<_>>()
     ))
 }
 
@@ -398,8 +412,16 @@ fn compare_stores(actual: &holos_engine::Engine, expected: &holos_engine::Engine
         return Outcome::Passed;
     }
 
-    let missing: Vec<&String> = expected.difference(&actual).take(3).collect();
-    let extra: Vec<&String> = actual.difference(&expected).take(3).collect();
+    let mut missing: Vec<&String> = expected.difference(&actual).collect();
+    let mut extra: Vec<&String> = actual.difference(&expected).collect();
+    // Sorted before truncating: which examples get shown must not depend on hash iteration
+    // order. The recorded `.failures` baselines carry this text, so a nondeterministic sample
+    // makes every re-baseline churn, and a ratchet whose diff is always noise is one nobody
+    // reads.
+    missing.sort_unstable();
+    extra.sort_unstable();
+    missing.truncate(3);
+    extra.truncate(3);
 
     if (missing.iter().any(|q| q.contains("_:")) || extra.iter().any(|q| q.contains("_:")))
         && missing.len() == extra.len()
