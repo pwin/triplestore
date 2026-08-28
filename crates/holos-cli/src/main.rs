@@ -30,6 +30,7 @@ USAGE
     holos validate --data <FILE>... [--shapes <FILE>]
     holos backup   --store <DIR> --to <DIR>
     holos compact  --store <DIR> --to <DIR>
+    holos entail   --store <DIR> [--entail-graph <IRI>] [--entail-budget <N>]
 
 DATA
     --data <FILE>            Load a file. Repeatable. Format is taken from the extension:
@@ -44,6 +45,9 @@ DATA
                              faster; a load interrupted part-way must be discarded.
 
 MAINTENANCE
+    --entail-graph <IRI>     Where `entail` writes. Default holos:entailed. Its own graph so
+                             it can be dropped again and told apart from what was asserted.
+    --entail-budget <N>      Refuse a closure larger than N new triples. Default 10,000,000.
     --to <DIR>               Destination for `backup` and `compact`. Must not exist.
                              `backup` writes a RocksDB checkpoint: near-instant, hard-linked,
                              and it preserves the store exactly — including the dictionary
@@ -146,6 +150,7 @@ fn main() -> Result<()> {
         "validate" => validate(&mut engine, &opts),
         "backup" => backup(&engine, &opts),
         "compact" => compact(&engine, &opts),
+        "entail" => entail(&mut engine, &opts),
         other => bail!("unknown command `{other}`\n\n{USAGE}"),
     }
 }
@@ -397,6 +402,67 @@ fn compact(engine: &Engine, opts: &Options) -> Result<()> {
     Ok(())
 }
 
+/// Materialises the RDFS closure of the store.
+///
+/// # What it is for
+///
+/// A store answers what is *in* it. `ex:father rdfs:subPropertyOf ex:parent` says that every
+/// use of the first is a use of the second, and no query acts on that — so a query for
+/// `ex:parent` misses everyone who only has an `ex:father`. The most concrete instance is
+/// GeoSPARQL: the OGC example attaches geometries with a sub-property of `geo:hasGeometry`,
+/// and §17's rewrite looks for `geo:hasGeometry`, so a feature-level query returns the
+/// geometries rather than the features they belong to.
+///
+/// # It writes to its own graph
+///
+/// Not into the data. An inference can then be dropped again with `DROP GRAPH`, a reader can
+/// tell it from something somebody asserted, and access policy has something to name. The
+/// cost is that queries see it only under the union default graph or by naming it, which is
+/// the trade rather than an oversight.
+///
+/// Running it twice adds nothing the second time.
+fn entail(engine: &mut Engine, opts: &Options) -> Result<()> {
+    let iri = opts
+        .entail_graph
+        .as_deref()
+        .unwrap_or(holos_engine::entailment::DEFAULT_GRAPH_IRI);
+    let budget = if opts.entail_budget == 0 {
+        holos_engine::entailment::DEFAULT_BUDGET
+    } else {
+        opts.entail_budget
+    };
+
+    // The graph name has to be a term id, and interning it is the only way to get one.
+    let graph = engine
+        .store_mut()
+        .encode_quad(
+            oxrdf::Quad {
+                subject: oxrdf::NamedNode::new(iri)?.into(),
+                predicate: oxrdf::NamedNode::new_unchecked(
+                    "https://holos.dev/ns#entailmentGraphMarker",
+                ),
+                object: oxrdf::Term::NamedNode(oxrdf::NamedNode::new(iri)?),
+                graph_name: oxrdf::GraphName::DefaultGraph,
+            }
+            .as_ref(),
+        )?
+        .object;
+
+    let mut session = opts.session(engine)?;
+    let before = engine.store().len();
+    let report = holos_engine::entailment::materialise(engine, &mut session, graph, budget)?;
+    engine.store_mut().flush()?;
+
+    println!("entailed {} triple(s) into <{iri}>", report.added);
+    println!("  rounds  {}", report.rounds);
+    println!("  store   {before} -> {} quads", engine.store().len());
+    println!();
+    println!("they are in a graph of their own, so a query sees them only with");
+    println!("--default-graph <{iri}> alongside the default one, and");
+    println!("`DROP GRAPH <{iri}>` undoes this exactly");
+    Ok(())
+}
+
 fn stats(engine: &Engine) -> Result<()> {
     let store = engine.store();
     println!("quads            {}", store.len());
@@ -634,6 +700,10 @@ struct Options {
     data: Vec<String>,
     /// Destination for `holos backup`.
     to: Option<String>,
+    /// Where `holos entail` writes its conclusions.
+    entail_graph: Option<String>,
+    /// How many new triples `holos entail` may add before it refuses.
+    entail_budget: usize,
     base: Option<String>,
     query: Option<String>,
     query_file: Option<String>,
@@ -765,6 +835,8 @@ impl Options {
                 "--except-role" => o.except_role = Some(value(&mut i)?),
                 "--store" => o.store = Some(value(&mut i)?),
                 "--to" => o.to = Some(value(&mut i)?),
+                "--entail-graph" => o.entail_graph = Some(value(&mut i)?),
+                "--entail-budget" => o.entail_budget = value(&mut i)?.parse()?,
                 "--bulk" => o.bulk = true,
                 "--shapes" => o.shapes = Some(value(&mut i)?),
                 "--report" => o.report = true,
