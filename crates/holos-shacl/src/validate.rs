@@ -221,10 +221,56 @@ impl<'a> Validator<'a> {
                 crate::ir::Target::Class(c) => out.extend(self.instances_of(c)?),
                 crate::ir::Target::SubjectsOf(p) => out.extend(self.data.subjects_of(p)?),
                 crate::ir::Target::ObjectsOf(p) => out.extend(self.data.objects_of(p)?),
+                crate::ir::Target::Where(inner) => out.extend(self.conforming_nodes(inner)?),
             }
         }
         out.sort_unstable();
         out.dedup();
+        Ok(out)
+    }
+
+    /// Every node that conforms to a shape — the focus set of `sh:targetWhere`.
+    ///
+    /// Every other target is an index lookup. This one has to *evaluate* the shape, and the
+    /// set of candidates is in principle every node in the graph.
+    ///
+    /// So it narrows first where it soundly can: a filter shape carrying `sh:class` cannot
+    /// admit a node that is not an instance of one of those classes, which usually reduces
+    /// "every node" to a handful. Without such a constraint it falls back to scanning, which
+    /// is honest about what the target asks for rather than quietly selecting less.
+    fn conforming_nodes(&self, inner: ShapeIdx) -> Result<Vec<TermId>, ShaclError> {
+        let filter = self.shapes.shape(inner);
+        let mut candidates: Vec<TermId> = Vec::new();
+        let mut narrowed = false;
+        for constraint in &filter.constraints {
+            if let Constraint::Class(classes) = constraint {
+                for &class in classes {
+                    candidates.extend(self.instances_of(class)?);
+                }
+                narrowed = true;
+                break;
+            }
+        }
+        if !narrowed {
+            for quad in self
+                .data
+                .store()
+                .quads_for_pattern(None, None, None, self.data.graph())
+            {
+                let quad = quad?;
+                candidates.push(quad.subject);
+                candidates.push(quad.object);
+            }
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+
+        let mut out = Vec::new();
+        for node in candidates {
+            if self.holds(inner, node, 0)? {
+                out.push(node);
+            }
+        }
         Ok(out)
     }
 
@@ -576,6 +622,16 @@ impl<'a> Validator<'a> {
                             violate_value(v, results);
                             break;
                         }
+                    }
+                }
+            }
+            // `rdfs:subClassOf*` from the value, upwards. `sh:class` walks the other way
+            // — it asks whether a value is an *instance* — so despite the similar name these
+            // traverse the hierarchy in opposite directions.
+            Constraint::RootClass(root) => {
+                for &v in values {
+                    if !self.is_subclass_of(v, *root)? {
+                        violate_value(v, results);
                     }
                 }
             }
@@ -962,6 +1018,32 @@ impl<'a> Validator<'a> {
             Some(Term::NamedNode(n)) => Some(n.into_string()),
             _ => None,
         })
+    }
+
+    /// Whether `class` is `root`, or reaches it through `rdfs:subClassOf`.
+    ///
+    /// Bounded like every other hierarchy walk here: a cyclic class hierarchy is legal RDFS
+    /// and must not hang validation.
+    fn is_subclass_of(&self, class: TermId, root: TermId) -> Result<bool, ShaclError> {
+        if class == root {
+            return Ok(true);
+        }
+        let mut queue = vec![class];
+        let mut seen: FxHashSet<TermId> = [class].into_iter().collect();
+        let mut i = 0;
+        while i < queue.len() && queue.len() < 10_000 {
+            let current = queue[i];
+            i += 1;
+            for sup in self.data.objects(current, self.sh.rdfs_subclass_of)? {
+                if sup == root {
+                    return Ok(true);
+                }
+                if seen.insert(sup) {
+                    queue.push(sup);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// The reifiers of the triple `(subject, predicate, object)`.

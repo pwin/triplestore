@@ -40,6 +40,11 @@ pub enum Target {
     SubjectsOf(TermId),
     /// `sh:targetObjectsOf`.
     ObjectsOf(TermId),
+    /// `sh:targetWhere` — every node that conforms to a shape.
+    ///
+    /// The only target that has to *evaluate* something to know what it selects, so it is
+    /// also the only one whose cost is not bounded by an index lookup.
+    Where(ShapeIdx),
 }
 
 /// What a `{| ... |}` annotation said about one constraint.
@@ -189,6 +194,11 @@ pub enum Constraint {
         /// Without it, an unannotated triple passes vacuously: there is nothing to check.
         required: bool,
     },
+    /// `sh:rootClass` — the value is that class, or a subclass of it.
+    ///
+    /// About the class hierarchy rather than about instances: `sh:class ex:Animal` asks
+    /// whether a value *is* an animal, and this asks whether it is a *kind* of animal.
+    RootClass(TermId),
     /// `sh:someValue` — at least one value node conforms to this shape.
     ///
     /// The existential counterpart of `sh:node`, which requires *every* value to conform.
@@ -256,6 +266,7 @@ impl Constraint {
             Self::SingleLine => sh.single_line_component,
             Self::SubsetOf(_) => sh.subset_of_component,
             Self::SomeValue(_) => sh.some_value_component,
+            Self::RootClass(_) => sh.root_class_component,
             Self::ReifierShape { .. } => sh.reifier_shape_component,
             Self::UniqueValuesFor(_) => sh.unique_values_for_component,
             Self::Equals(_) => sh.equals_component,
@@ -493,7 +504,11 @@ impl<'a> Compiler<'a> {
                     Target::SubjectsOf(p) | Target::ObjectsOf(p) => {
                         by_predicate.entry(*p).or_default().push(idx);
                     }
-                    Target::Node(_) => {}
+                    // A filter target selects by evaluation rather than by predicate, so
+                    // there is no single predicate a change to it would arrive on. Left out
+                    // of the index deliberately: incremental revalidation cannot narrow it,
+                    // and pretending otherwise would make it miss changes.
+                    Target::Where(_) | Target::Node(_) => {}
                 }
             }
             for predicate in self.predicates_of(shape) {
@@ -664,6 +679,10 @@ impl<'a> Compiler<'a> {
         }
         for p in g.objects(node, sh.target_objects_of)? {
             targets.push(Target::ObjectsOf(p));
+        }
+        for n in g.objects(node, sh.target_where)? {
+            let idx = self.shape_for(n)?;
+            targets.push(Target::Where(idx));
         }
         // Implicit class target: a shape that is also an rdfs:Class targets its instances.
         //
@@ -1012,6 +1031,9 @@ impl<'a> Compiler<'a> {
         for n in g.objects(node, sh.some_value)? {
             let idx = self.shape_for(n)?;
             out.push(Constraint::SomeValue(idx));
+        }
+        for c in g.objects(node, sh.root_class)? {
+            out.push(Constraint::RootClass(c));
         }
         for n in g.objects(node, sh.reifier_shape)? {
             let shape = self.shape_for(n)?;
