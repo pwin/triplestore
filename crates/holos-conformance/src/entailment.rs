@@ -31,11 +31,21 @@
 //! here, so this suite tests the code that ships rather than a second copy written to pass
 //! it.
 //!
-//! Datatype entailment is **not** implemented, and a test that turns on it is skipped by
-//! name rather than failed. Deciding that `"010"^^xsd:integer` and `"10"^^xsd:integer`
-//! denote the same value is a value-space question, and the same machinery decides whether
-//! an ill-formed literal makes a graph inconsistent — which is what `mf:result false`
-//! asserts. Answering half of that would be worse than not answering it.
+//! # Datatype entailment
+//!
+//! `mf:recognizedDatatypes` says which datatypes the recogniser knows, and for those, two
+//! literals denoting the same *value* are interchangeable: `"042"^^xsd:integer` entails
+//! `"42"^^xsd:integer`. Handled by canonicalising both graphs before the instance check, so
+//! the search stays a comparison of terms rather than growing a notion of equality.
+//!
+//! A datatype the test recognises but this canonicaliser does not is a skip by name rather
+//! than a guess: leaving `rdf:JSON` literals lexical would answer the negative tests right by
+//! accident and the positive ones wrong, which is worse than declining both.
+//!
+//! Consistency — what `mf:result false` asserts — is still not decided. It is the other half
+//! of the same machinery: an ill-formed literal of a recognised datatype makes a graph
+//! inconsistent, and so does a range clash between two datatypes whose value spaces are
+//! disjoint.
 
 use crate::manifest::TestEntry;
 use crate::Outcome;
@@ -83,23 +93,57 @@ pub fn run(test: &TestEntry) -> Outcome {
         ));
     };
 
-    // `mf:result false` asserts consistency rather than naming a conclusion, and every
-    // inconsistency in these suites is a datatype judgement: an ill-formed literal, or two
-    // datatypes declared to subsume one another under the intensional semantics.
-    if test.result_is_false {
-        return Outcome::skip(
-            "asserts (in)consistency, which needs datatype entailment: not implemented",
-        );
-    }
-    // A recogniser list means the answer turns on a datatype's value space whatever regime
-    // the test also names.
-    if !test.recognized_datatypes.is_empty() {
+    // A datatype this canonicaliser does not know is declined rather than treated
+    // lexically: that would answer the negative tests right by accident and the positive
+    // ones wrong.
+    let unsupported: Vec<&str> = test
+        .recognized_datatypes
+        .iter()
+        .filter(|d| !CANONICALISABLE.contains(&d.as_str()))
+        .map(String::as_str)
+        .collect();
+    if !unsupported.is_empty() {
         return Outcome::skip(format!(
-            "needs datatype entailment over {}: not implemented",
-            test.recognized_datatypes.join(", ")
+            "recognises datatypes this canonicaliser does not: {}",
+            unsupported.join(", ")
         ));
     }
+    let recognized: std::collections::HashSet<&str> = test
+        .recognized_datatypes
+        .iter()
+        .map(String::as_str)
+        .collect();
 
+    // `mf:result false` asserts (in)consistency rather than naming a conclusion. A positive
+    // test says the premise entails falsehood — it has no model — and a negative one says it
+    // has. Both are datatype judgements here: nothing else in these suites can make an RDF
+    // graph unsatisfiable.
+    if test.result_is_false {
+        let Some(action) = test.action.as_ref() else {
+            return Outcome::skip("no mf:action");
+        };
+        let premise = match crate::manifest::parse_dataset(
+            action,
+            &crate::manifest::base_for(test, action),
+        ) {
+            Ok(d) => d,
+            Err(e) => return Outcome::fail(format!("upstream: premise did not parse: {e}")),
+        };
+        let closure = match close(&premise, regime) {
+            Ok(g) => g,
+            Err(e) => return Outcome::fail(format!("computing the {regime:?} closure: {e}")),
+        };
+        let broken = inconsistent(&closure, &recognized);
+        return match (positive, broken) {
+            (true, true) | (false, false) => Outcome::Passed,
+            (true, false) => Outcome::fail(
+                "the premise should be inconsistent and no datatype clash was found".to_owned(),
+            ),
+            (false, true) => Outcome::fail(
+                "the premise should be consistent and a datatype clash was found".to_owned(),
+            ),
+        };
+    }
     let Some(action) = test.action.as_ref() else {
         return Outcome::skip("no mf:action");
     };
@@ -117,10 +161,16 @@ pub fn run(test: &TestEntry) -> Outcome {
             Err(e) => return Outcome::fail(format!("upstream: conclusion did not parse: {e}")),
         };
 
-    let closure = match close(&premise, regime) {
+    let mut closure = match close(&premise, regime) {
         Ok(g) => g,
         Err(e) => return Outcome::fail(format!("computing the {regime:?} closure: {e}")),
     };
+    // Witnesses before canonicalisation, because the type a literal witnesses is the
+    // datatype the graph *wrote* — `"42"^^xsd:integer` is an `xsd:integer`, and it stays one
+    // after canonicalising into the decimal value space it shares.
+    add_literal_witnesses(&mut closure, &recognized);
+    canonicalise(&mut closure, &recognized);
+    let conclusion = canonicalised(&conclusion, &recognized);
     let holds = entails(&closure, &conclusion);
 
     match (positive, holds) {
@@ -212,6 +262,288 @@ fn fnv(s: &str) -> u64 {
         h = h.wrapping_mul(0x1000_0000_01b3);
     }
     h
+}
+
+/// The datatypes whose value space this can compute.
+///
+/// Everything else is left alone and, if a test *recognises* it, declines the test.
+const CANONICALISABLE: &[&str] = &[
+    "http://www.w3.org/2001/XMLSchema#integer",
+    "http://www.w3.org/2001/XMLSchema#decimal",
+    "http://www.w3.org/2001/XMLSchema#int",
+    "http://www.w3.org/2001/XMLSchema#long",
+    "http://www.w3.org/2001/XMLSchema#short",
+    "http://www.w3.org/2001/XMLSchema#byte",
+    "http://www.w3.org/2001/XMLSchema#nonNegativeInteger",
+    "http://www.w3.org/2001/XMLSchema#positiveInteger",
+    "http://www.w3.org/2001/XMLSchema#unsignedInt",
+    "http://www.w3.org/2001/XMLSchema#unsignedLong",
+    "http://www.w3.org/2001/XMLSchema#float",
+    "http://www.w3.org/2001/XMLSchema#double",
+    "http://www.w3.org/2001/XMLSchema#string",
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString",
+];
+
+/// A literal rewritten so that equal values are equal terms, or `None` to leave it alone.
+///
+/// The integer family and `xsd:decimal` share one value space, so they canonicalise into it
+/// together — which is what makes `"10"^^xsd:integer` entail `"10.0"^^xsd:decimal`.
+///
+/// `xsd:float` and `xsd:double` do not, and are keyed by their IEEE *bits* rather than by
+/// comparison. That gets three things right at once that `==` gets wrong: `+0` and `-0` are
+/// distinct values and must not be interchangeable, two lexical forms that round to one
+/// binary value must be, and `NaN` is identical to itself.
+fn canonical_literal(
+    lit: &oxrdf::Literal,
+    recognized: &std::collections::HashSet<&str>,
+) -> Option<oxrdf::Literal> {
+    let datatype = lit.datatype().as_str().to_owned();
+    if !recognized.contains(datatype.as_str()) {
+        // An unrecognised datatype is opaque: two lexical forms of it are two values, which
+        // is exactly what `mf:unrecognizedDatatypes` asserts.
+        return None;
+    }
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+    let local = datatype.strip_prefix(XSD)?;
+    // Not trimmed. `" 3 "^^xsd:int` is *ill-formed*, not a spelling of 3 — the suite is
+    // explicit that a well-formed literal is unrelated to an ill-formed one even when they
+    // differ only by whitespace. Trimming here made them one value and broke the test that
+    // says they are two.
+    let text = lit.value();
+    match local {
+        "float" => {
+            let v: f32 = text.parse().ok()?;
+            Some(oxrdf::Literal::new_typed_literal(
+                format!("{:08x}", v.to_bits()),
+                oxrdf::NamedNode::new_unchecked(format!("{XSD}float")),
+            ))
+        }
+        "double" => {
+            let v: f64 = text.parse().ok()?;
+            Some(oxrdf::Literal::new_typed_literal(
+                format!("{:016x}", v.to_bits()),
+                oxrdf::NamedNode::new_unchecked(format!("{XSD}double")),
+            ))
+        }
+        "integer" | "decimal" | "int" | "long" | "short" | "byte" | "nonNegativeInteger"
+        | "positiveInteger" | "unsignedInt" | "unsignedLong" => {
+            let v: oxsdatatypes::Decimal = text.parse().ok()?;
+            Some(oxrdf::Literal::new_typed_literal(
+                v.to_string(),
+                oxrdf::NamedNode::new_unchecked(format!("{XSD}decimal")),
+            ))
+        }
+        // `xsd:string` is already the datatype of a plain literal in RDF 1.1, so oxrdf has
+        // unified them before this sees them. Trimming is *not* right here: whitespace is
+        // significant in a string.
+        "string" => None,
+        _ => None,
+    }
+}
+
+/// A term rewritten so equal values are equal terms, recursing through triple terms.
+///
+/// The recursion is not decoration: `opaque-literal` states the whole property inside a
+/// triple term — `<<( :a :b "042"^^xsd:integer )>>` entails `<<( :a :b "42"^^xsd:integer )>>`
+/// — so a canonicaliser that only looked at the top level would answer no.
+fn canonical_term(term: &Term, recognized: &std::collections::HashSet<&str>) -> Option<Term> {
+    match term {
+        Term::Literal(lit) => canonical_literal(lit, recognized).map(Term::Literal),
+        Term::Triple(inner) => {
+            let object = canonical_term(&inner.object, recognized)?;
+            Some(Term::Triple(Box::new(Triple {
+                subject: inner.subject.clone(),
+                predicate: inner.predicate.clone(),
+                object,
+            })))
+        }
+        _ => None,
+    }
+}
+
+fn canonicalise(g: &mut Graph, recognized: &std::collections::HashSet<&str>) {
+    if recognized.is_empty() {
+        return;
+    }
+    let rewritten: Vec<(Triple, Triple)> = g
+        .iter()
+        .filter_map(|t| {
+            let before = t.into_owned();
+            let object = canonical_term(&before.object, recognized)?;
+            let after = Triple {
+                subject: before.subject.clone(),
+                predicate: before.predicate.clone(),
+                object,
+            };
+            (before != after).then_some((before, after))
+        })
+        .collect();
+    for (before, after) in rewritten {
+        g.remove(&before);
+        g.insert(&after);
+    }
+}
+
+fn canonicalised(d: &Dataset, recognized: &std::collections::HashSet<&str>) -> Dataset {
+    let mut out = Dataset::new();
+    for quad in d.iter() {
+        let mut quad = quad.into_owned();
+        if let Some(canonical) = canonical_term(&quad.object, recognized) {
+            quad.object = canonical;
+        }
+        out.insert(&quad);
+    }
+    out
+}
+
+/// Witnesses for what a typed literal is an instance of.
+///
+/// A literal with datatype `D` is a `D` and an `rdfs:Literal`, but neither can be written
+/// down: RDF admits a literal only in object position and both triples would have one as
+/// their subject. The entailment is `s p _:b . _:b rdf:type D`, so it is a construction on
+/// the graph under test — the same shape as the triple-term witnesses, and for the same
+/// reason.
+fn add_literal_witnesses(g: &mut Graph, recognized: &std::collections::HashSet<&str>) {
+    let ty = NamedNode::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+    let rdfs_literal = NamedNode::new_unchecked("http://www.w3.org/2000/01/rdf-schema#Literal");
+    let occurrences: Vec<Triple> = g
+        .iter()
+        .filter(|t| matches!(t.object, oxrdf::TermRef::Literal(_)))
+        .map(oxrdf::TripleRef::into_owned)
+        .collect();
+    for triple in occurrences {
+        let Term::Literal(lit) = &triple.object else {
+            continue;
+        };
+        // Named from the *canonical* form, so two lexical forms of one value share a
+        // witness — the point of recognising the datatype at all.
+        let key = canonical_literal(lit, recognized)
+            .map_or_else(|| triple.object.to_string(), |c| c.to_string());
+        let witness = BlankNode::new_unchecked(format!("literal{:x}", fnv(&key)));
+        g.insert(&Triple::new(
+            triple.subject.clone(),
+            triple.predicate.clone(),
+            witness.clone(),
+        ));
+        g.insert(&Triple::new(
+            witness.clone(),
+            ty.clone(),
+            rdfs_literal.clone(),
+        ));
+        // Its datatype, but only where the test says the recogniser knows it: an
+        // unrecognised datatype IRI denotes nothing the graph can claim membership of.
+        let datatype = lit.datatype();
+        if recognized.contains(datatype.as_str()) {
+            g.insert(&Triple::new(witness, ty.clone(), datatype.into_owned()));
+        }
+    }
+}
+
+/// The value space a datatype belongs to, for deciding whether two of them can clash.
+///
+/// A family, not a datatype: `xsd:integer` and `xsd:decimal` name the same values, so a
+/// literal of one is in the other's value space. `xsd:float` and `xsd:double` name different
+/// ones, and neither names a string.
+fn value_space(datatype: &str) -> Option<&'static str> {
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+    // A language-tagged string is a *pair* of a string and a tag, so its value space is
+    // disjoint from `xsd:string` rather than a subset of it. That disjointness is the whole
+    // content of `rdfs-entailment-test002`.
+    if datatype == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString" {
+        return Some("langString");
+    }
+    match datatype.strip_prefix(XSD)? {
+        "integer" | "decimal" | "int" | "long" | "short" | "byte" | "nonNegativeInteger"
+        | "positiveInteger" | "unsignedInt" | "unsignedLong" => Some("decimal"),
+        "float" => Some("float"),
+        "double" => Some("double"),
+        "string" => Some("string"),
+        _ => None,
+    }
+}
+
+/// Whether a literal's lexical form is in its own datatype's lexical space.
+fn well_formed(lit: &oxrdf::Literal) -> bool {
+    let text = lit.value();
+    match value_space(lit.datatype().as_str()) {
+        Some("decimal") => text.parse::<oxsdatatypes::Decimal>().is_ok(),
+        Some("float") => text.parse::<f32>().is_ok(),
+        Some("double") => text.parse::<f64>().is_ok(),
+        // Every string is a well-formed string.
+        Some("string") | None => true,
+        Some(_) => true,
+    }
+}
+
+/// Every literal a term carries, including inside triple terms.
+fn literals_in(term: &Term) -> Vec<oxrdf::Literal> {
+    match term {
+        Term::Literal(lit) => vec![lit.clone()],
+        Term::Triple(inner) => literals_in(&inner.object),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a graph has no model, which for these suites is always a datatype clash.
+///
+/// Two ways to reach one, and both need the datatype to be *recognised*: an unrecognised
+/// datatype IRI denotes nothing in particular, so no literal written with it can be wrong.
+/// That is why `datatypes-non-well-formed-literal-1` and `-2` share a premise and disagree —
+/// the only difference between them is the recogniser.
+///
+/// 1. An ill-formed literal. `"flargh"^^xsd:integer` denotes nothing, and a graph asserting
+///    it asserts something unsatisfiable.
+/// 2. A range clash. `ex:p rdfs:range xsd:string` with `ex:a ex:p "25"^^xsd:integer` says the
+///    same term is both an integer and a string, and those value spaces are disjoint.
+fn inconsistent(g: &Graph, recognized: &std::collections::HashSet<&str>) -> bool {
+    if recognized.is_empty() {
+        return false;
+    }
+    let range = NamedNode::new_unchecked("http://www.w3.org/2000/01/rdf-schema#range");
+    let mut ranges: HashMap<String, Vec<String>> = HashMap::new();
+    for t in g.iter() {
+        // Keyed by the *subject*: `ex:p rdfs:range xsd:string` says what `ex:p`'s objects are.
+        if t.predicate == range.as_ref() {
+            if let (
+                oxrdf::NamedOrBlankNodeRef::NamedNode(property),
+                oxrdf::TermRef::NamedNode(class),
+            ) = (t.subject, t.object)
+            {
+                ranges
+                    .entry(property.as_str().to_owned())
+                    .or_default()
+                    .push(class.as_str().to_owned());
+            }
+        }
+    }
+
+    for t in g.iter() {
+        // Through triple terms as well as at the top level: `malformed-literal` states the
+        // whole claim inside one, and a graph asserting a triple term asserts what it says.
+        if literals_in(&t.object.into_owned())
+            .iter()
+            .any(|lit| recognized.contains(lit.datatype().as_str()) && !well_formed(lit))
+        {
+            return true;
+        }
+        let oxrdf::TermRef::Literal(lit) = t.object else {
+            continue;
+        };
+        let datatype = lit.datatype().as_str().to_owned();
+        for class in ranges.get(t.predicate.as_str()).into_iter().flatten() {
+            if !recognized.contains(class.as_str()) {
+                continue;
+            }
+            // Disjoint value spaces, so nothing can be in both. A datatype outside the
+            // families this understands is not judged: `None` means "no opinion", and an
+            // opinion is what an inconsistency claim is.
+            match (value_space(&datatype), value_space(class)) {
+                (Some(a), Some(b)) if a != b => return true,
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 /// Whether `conclusion` has an instance that is a subgraph of `closure`.

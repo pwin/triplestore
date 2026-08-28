@@ -23,6 +23,7 @@ spargebra.workspace = true
 spareval.workspace = true
 anyhow.workspace = true
 tempfile = { workspace = true, optional = true }
+oxsdatatypes.workspace = true
 
 [features]
 default = []

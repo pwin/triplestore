@@ -146,6 +146,20 @@ impl TermId {
         Self((tag as u64) << TAG_SHIFT)
     }
 
+    /// Whether a term of this kind can stand as a triple's subject.
+    ///
+    /// IRIs and blank nodes can; literals and triple terms cannot. Worth a named predicate
+    /// because "is it a literal" is the wrong question and gets the wrong answer: five tags
+    /// carry literals — `Literal` for the dictionary-backed ones and `Integer`, `Float`,
+    /// `DateTime` and `Small` for the inline codecs — so a check against `Tag::Literal` alone
+    /// passes every inline literal straight through. That mistake let a reasoner write
+    /// `30 rdf:type xsd:integer` into a store, which encodes and does not decode.
+    #[inline]
+    #[must_use]
+    pub const fn can_be_subject(self) -> bool {
+        matches!(self.tag(), Tag::Iri | Tag::BlankNode | Tag::Vocab)
+    }
+
     /// Highest id sharing this id's tag — the end of a tag-wide range scan.
     #[inline]
     #[must_use]

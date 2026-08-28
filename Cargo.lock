@@ -855,6 +855,7 @@ dependencies = [
  "holos-store",
  "oxrdf",
  "oxrdfio",
+ "oxsdatatypes",
  "sparesults",
  "spareval",
  "spargebra",

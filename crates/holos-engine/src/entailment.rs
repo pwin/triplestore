@@ -304,10 +304,20 @@ pub fn materialise(
                     push((s, rdfs.ty, c), &mut known, &mut next);
                 }
             }
-            // rdfs3
-            if let Some(classes) = ranges.get(&p) {
-                for &c in classes {
-                    push((o, rdfs.ty, c), &mut known, &mut next);
+            // rdfs3.
+            //
+            // Not emitted when the object is a literal, which is the common case: `ex:age
+            // rdfs:range xsd:integer` with `ex:alice ex:age 30` entails that 30 is an
+            // integer, and RDF has no way to write that down — a triple needs an IRI or a
+            // blank node as its subject. Emitting it anyway produced a quad the store could
+            // encode and could not decode, so an ordinary schema statement made the store
+            // unreadable. The entailment is true and inexpressible, which is a different
+            // thing from false.
+            if o.can_be_subject() {
+                if let Some(classes) = ranges.get(&p) {
+                    for &c in classes {
+                        push((o, rdfs.ty, c), &mut known, &mut next);
+                    }
                 }
             }
             // rdfs9
@@ -356,12 +366,13 @@ pub fn materialise(
             classes.insert(o);
         }
     }
-    for c in classes {
+    // A literal can be neither, and cannot be a subject in any case.
+    for c in classes.into_iter().filter(|t| t.can_be_subject()) {
         if known.insert((c, rdfs.sub_class_of, c)) {
             fresh.push((c, rdfs.sub_class_of, c));
         }
     }
-    for p in properties {
+    for p in properties.into_iter().filter(|t| t.can_be_subject()) {
         if known.insert((p, rdfs.sub_property_of, p)) {
             fresh.push((p, rdfs.sub_property_of, p));
         }
@@ -375,6 +386,13 @@ pub fn materialise(
     // Written only now, so a closure that overruns its budget leaves the store untouched.
     let mut added = 0usize;
     for (s, p, o) in fresh {
+        // Belt and braces. `insert_encoded` does not validate, so a rule that produced an
+        // unwritable triple would corrupt the store silently rather than fail loudly, and
+        // the guards above are easier to add a rule past than this one.
+        debug_assert!(s.can_be_subject(), "{s:?} cannot be a subject");
+        if !s.can_be_subject() {
+            continue;
+        }
         // An entailed triple that repeats an assertion is not worth storing twice; the
         // interesting content of the entailment graph is what was *not* already said.
         if asserted.contains(&(s, p, o)) {

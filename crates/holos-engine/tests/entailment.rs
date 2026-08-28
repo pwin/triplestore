@@ -457,3 +457,37 @@ fn rdf_reifies_has_range_proposition() {
         vec![format!("x=<{EX}statement>")]
     );
 }
+
+/// rdfs3 over a literal object must not write a triple the store cannot read back.
+///
+/// `ex:age rdfs:range xsd:integer` with `ex:alice ex:age 30` entails that 30 is an integer.
+/// RDF cannot say so — a subject is an IRI or a blank node — and the reasoner used to say it
+/// anyway. `insert_encoded` does not validate, so the quad went in and came out as a decode
+/// error: the most ordinary schema statement there is made a store unreadable.
+///
+/// The entailment is true and inexpressible, which is a different thing from false.
+#[test]
+fn range_over_a_literal_leaves_the_store_readable() {
+    let mut engine = load(&format!(
+        "@prefix ex: <{EX}> .
+         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+         @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+         ex:age rdfs:range xsd:integer .
+         ex:alice ex:age 30 .
+"
+    ));
+    run(&mut engine);
+    for quad in engine.store().iter() {
+        let quad = quad.expect("every quad must decode after entailment");
+        assert!(
+            !matches!(quad.subject, oxrdf::NamedOrBlankNode::NamedNode(_))
+                || quad.subject.to_string().starts_with('<'),
+            "sanity"
+        );
+    }
+    // The inexpressible entailment is absent; the expressible ones are not.
+    assert!(
+        ask(&engine, &format!("SELECT ?x WHERE {{ ?x <{EX}age> ?y }}"))
+            .contains(&format!("x=<{EX}alice>"))
+    );
+}

@@ -24,6 +24,52 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### Datatype entailment, and a reasoner bug it exposed
+
+The RDF suites' remaining skips were all datatype entailment. Two halves, both now decided:
+
+- **Value spaces.** For a datatype the test says the recogniser knows, two literals denoting
+  one value are interchangeable. Both graphs are canonicalised before the instance check, so
+  the search stays a comparison of terms. The integer family and `xsd:decimal` share a value
+  space and canonicalise into it together; `xsd:float` and `xsd:double` are keyed by their
+  IEEE *bits*, which gets three things right that `==` gets wrong — `+0` and `-0` stay
+  distinct, two lexical forms that round to one binary value become identical, and `NaN` is
+  identical to itself.
+- **Consistency**, which is what `mf:result false` asserts. An ill-formed literal of a
+  recognised datatype makes a graph unsatisfiable, and so does a range clash between two
+  disjoint value spaces. Both need the datatype to be *recognised* — that is the only
+  difference between `datatypes-non-well-formed-literal-1` and `-2`, which share a premise
+  and disagree.
+
+| | Before | After |
+|---|---:|---:|
+| RDF 1.1 | 995/1016, 25 skipped | **1019/1040**, 1 skipped |
+| RDF 1.2 | 1349/1372, 34 skipped | **1375/1398**, 8 skipped |
+
+Every failure in both suites is still an RDF/XML parser test. The nine remaining skips are
+`rdf:JSON` and `rdf:XMLLiteral`, whose canonical forms need parsers this does not have —
+declined by name, because leaving them lexical would answer the negative tests right by
+accident and the positive ones wrong.
+
+Two things had to be *stopped* rather than added. `" 3 "^^xsd:int` is ill-formed, not a
+spelling of 3, and trimming it made a well-formed literal equal to a malformed one. And the
+canonicaliser has to reach inside triple terms, because `opaque-literal` and
+`malformed-literal` both state their whole claim in one.
+
+### `holos entail` could make a store unreadable
+
+Running the range clash through the reasoner turned up a shipped bug. rdfs3 says
+`ex:age rdfs:range xsd:integer` with `ex:alice ex:age 30` entails that 30 is an integer —
+and RDF cannot write that down, because a subject is an IRI or a blank node. The reasoner
+wrote it anyway; `insert_encoded` does not validate, so the quad went in and came back out as
+a decode error. The most ordinary schema statement there is made a store unreadable.
+
+The guard is `TermId::can_be_subject`, which is a named predicate for a reason: *"is it a
+literal"* is the wrong question and gets the wrong answer. Five tags carry literals —
+`Literal` for the dictionary-backed ones and `Integer`, `Float`, `DateTime` and `Small` for
+the inline codecs — so the obvious check against `Tag::Literal` passes every inline literal
+straight through, which is exactly what the first version of this fix did.
+
 ### The adapted engine's graph takes a delta
 
 `DESIGN.md` §8 said closing this was bounded work, and the measurement said it was worth
