@@ -56,12 +56,51 @@ to the shapes graph: a triple whose predicate is not SHACL vocabulary, not `rdf:
 `rdf:rest`, and not an `rdf:type` naming a SHACL class or `rdfs:Class`, cannot have defined a
 shape.
 
-**Not done, and worth stating.** Keeping the graph current is half of incremental validation;
-choosing what to re-check is the other half, and `validate` is still a full run. The planner
-that would close it needs the *native* compiled shapes — and fail-closed means those refuse
-to compile for precisely the shapes graphs this engine exists to handle. Resolving that needs
-either a plan-only native compile or a dependency index in the engine, and a planner that
-misses a dependency admits a violation, so it is not worth doing by halves.
+### …and knows what a delta made stale
+
+The other half. `Shapes` in the engine now carries a dependency index — which shapes read
+which predicate, which target which class, which contain which — and `EngineRun::revalidate`
+plans from it. The algorithm is the native evaluator's, mirrored rather than reinvented,
+because a planner that misses a dependency admits a violation.
+
+| quads | prepare + full validate | engine revalidate | native revalidate |
+|---:|---:|---:|---:|
+| 5,018 | 3.55 ms | **0.0072 ms** | 0.0072 ms |
+| 50,018 | 27.0 ms | **0.0210 ms** | 0.0522 ms |
+| 250,018 | 150 ms | **0.0845 ms** | 1.01 ms |
+
+A `sh:sparql` constraint's dependencies live inside query text, so `sparql::predicates` walks
+the parsed algebra for them — the parse already happened at compile time. A query that uses a
+variable as a predicate genuinely reads everything, and such a shape is recorded as
+unconditional and forces a full run rather than being guessed at.
+
+The engine's revalidation is now faster than the native evaluator's at scale, which reverses
+what the two were built for: the engine computes focus nodes from three flat sorted arrays
+where the native one scans the store. The write path no longer trades coverage for speed.
+
+### A soundness gap in the *shipped* incremental validator
+
+Writing the engine's version surfaced a bug in the native evaluator that has been there all
+along. A compound path faults the node whose path runs *through* the change:
+
+```
+sh:path ( ex:knows ex:name )     # ex:alice knows ex:bob
+ex:bob ex:name 7 .               # writes to Bob, faults Alice
+```
+
+`ex:alice` appears in no changed quad. Both planners attributed a change to the endpoints of
+the changed quad and widened a shape to all its focus nodes only when *nothing* survived that
+filter — and here something did, the violation at Bob's own name, so the widening never fired
+and the violation at Alice was never looked for. A full validation reported two violations;
+revalidating the same change reported one. The Boundary would have admitted it.
+
+Fixed in both: a shape whose path is anything other than a single predicate is widened
+whenever it is implicated, not only when it is left with nothing to do.
+
+The existing safety test could not have caught this. It requires every violation a full run
+finds *at a focus node the change touched* to be found incrementally — and the whole point of
+this case is a focus node the change does not touch. Both validators now have a test with no
+touched-node filter to hide behind, and both fail without the fix.
 
 ### Coverage gaps a mutation audit found
 

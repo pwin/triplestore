@@ -197,20 +197,22 @@ immutable, so gating a commit with it meant bridging the whole store again on ev
 Measured with `cargo run -p holos-bench --release --bin shaclinc`, on a shapes graph with
 five constraints and one changed data triple:
 
-| quads | prepare (re-bridge) | `apply` (delta) | full validate | prepare ÷ apply |
-|---:|---:|---:|---:|---:|
-| 5,018 | 2.44 ms | **0.0007 ms** | 0.79 ms | 3,479× |
-| 50,018 | 30.9 ms | **0.0009 ms** | 10.3 ms | 34,388× |
-| 250,018 | 149.3 ms | **0.0009 ms** | 50.4 ms | 165,940× |
+| quads | prepare (re-bridge) | full validate | engine revalidate | native revalidate | speedup |
+|---:|---:|---:|---:|---:|---:|
+| 5,018 | 1.78 ms | 0.66 ms | **0.0072 ms** | 0.0073 ms | 338× |
+| 50,018 | 21.1 ms | 7.04 ms | **0.0200 ms** | 0.0540 ms | 1,409× |
+| 250,018 | 143 ms | 58.7 ms | **0.1095 ms** | 1.69 ms | 1,840× |
 
-The ratio is not the point; the *shape* is. `prepare` grows linearly with the store, and
-`apply` does not move at all between 5,000 quads and 250,000 — it is three binary searches
-and three memmoves whatever the graph holds. A validator whose cost per commit grows with
-total data cannot gate a write path at any speed constant.
+The speedup is `(prepare + full validate) ÷ engine revalidate`: what gating one commit used
+to cost against what it costs now. The *shape* matters more than the ratio — `prepare` grows
+with the store, revalidation grows with the change.
 
-What the table does not claim: `validate` is still a full run. Keeping the graph current is
-one half of incremental validation and choosing what to re-check is the other, and the second
-is not built here.
+The adapted engine's revalidation is faster than the native evaluator's at scale, which is
+the reverse of what the two were built for. The engine computes focus nodes from three flat
+sorted arrays; the native evaluator scans the store for them. The comparison is not
+apples-to-apples — the engine covers `sh:sparql`, SHACL-AF rules and node expressions, which
+the native evaluator refuses — but it does mean the write path no longer trades coverage for
+speed.
 
 ## Reading the results
 

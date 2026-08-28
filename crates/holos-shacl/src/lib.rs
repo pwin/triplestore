@@ -271,10 +271,17 @@ impl CompiledShapes {
         let mut attributed: rustc_hash::FxHashSet<(ShapeIdx, TermId)> =
             rustc_hash::FxHashSet::default();
         let mut implicated: rustc_hash::FxHashSet<ShapeIdx> = rustc_hash::FxHashSet::default();
+        // Shapes whose violation can sit at a node the delta never mentions, so the
+        // endpoint attribution below cannot reach it.
+        let mut widen: rustc_hash::FxHashSet<ShapeIdx> = rustc_hash::FxHashSet::default();
         for (idx, node) in plan.work() {
+            let upstream = self.shapes.focus_may_be_upstream(idx);
             for ancestor in self.shapes.targeted_ancestors(idx) {
                 implicated.insert(ancestor);
                 attributed.insert((ancestor, node));
+                if upstream {
+                    widen.insert(ancestor);
+                }
             }
         }
 
@@ -294,8 +301,13 @@ impl CompiledShapes {
                 .get(idx)
                 .is_some_and(|nodes| nodes.binary_search(focus).is_ok())
         });
+        // Widen a shape that got nothing — and one whose focus node can be upstream of the
+        // change, which the endpoint attribution reaches only by accident. Without the
+        // second case a compound path finds the violation at the node that changed and
+        // misses the one at the node whose path runs through it: a full validation rejects
+        // the graph and the write path admits it.
         for idx in &implicated {
-            if attributed.iter().any(|(i, _)| i == idx) {
+            if !widen.contains(idx) && attributed.iter().any(|(i, _)| i == idx) {
                 continue;
             }
             for focus in focus_cache.get(idx).into_iter().flatten() {

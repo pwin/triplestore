@@ -376,6 +376,35 @@ impl Shapes {
         &self.shapes[idx.0 as usize]
     }
 
+    /// Whether a change this shape reads can imply a violation at a focus node that is not
+    /// an endpoint of the changed quad.
+    ///
+    /// A shape whose path is one predicate has its focus node *at* the quad: writing
+    /// `(s, ex:name, o)` can only fault `s`. A compound path breaks that —
+    /// `sh:path ( ex:knows ex:name )` faults whoever knows the node that changed, which is
+    /// one hop upstream and appears nowhere in the delta. Attributing such a change to the
+    /// endpoints alone finds the violation at the node that changed and misses the one at
+    /// the node that owns the path, which is the violation the shape was written for.
+    ///
+    /// Reported for the shape that *reads* the predicate, so the caller can widen whichever
+    /// targeted ancestor it attributes the change to.
+    #[must_use]
+    pub fn focus_may_be_upstream(&self, idx: ShapeIdx) -> bool {
+        let shape = self.shape(idx);
+        let compound = |p: PathIdx| !matches!(self.path(p), Path::Predicate(_));
+        if shape.path.is_some_and(compound) {
+            return true;
+        }
+        shape.constraints.iter().any(|c| match c {
+            Constraint::Equals(p)
+            | Constraint::Disjoint(p)
+            | Constraint::LessThan(p)
+            | Constraint::LessThanOrEquals(p)
+            | Constraint::SubsetOf(p) => compound(*p),
+            _ => false,
+        })
+    }
+
     /// One path by index.
     #[must_use]
     pub fn path(&self, idx: PathIdx) -> &Path {

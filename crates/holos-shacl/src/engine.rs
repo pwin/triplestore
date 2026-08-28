@@ -28,7 +28,7 @@ use crate::incremental::Change;
 use crate::{Options, ShaclError};
 use holos_shacl_engine::model::Graph as EngineGraph;
 use holos_shacl_engine::report::ValidationReport;
-use holos_shacl_engine::shapes::Shapes as EngineShapes;
+use holos_shacl_engine::shapes::{ShapeId, Shapes as EngineShapes};
 use holos_shacl_engine::{validate as engine_validate, TermId as EngineId};
 use holos_store::Store;
 use oxrdf::Graph as OxGraph;
@@ -249,6 +249,160 @@ impl EngineRun {
             self.bridged.vocab.sh_Warning,
             self.bridged.vocab.sh_Info,
         ]
+    }
+
+    /// Applies a delta and validates only what it made stale.
+    ///
+    /// The other half of `DESIGN.md` §8. [`Self::apply`] keeps the graph current in constant
+    /// time; this decides what to re-check, so the cost of gating a commit stops scaling with
+    /// the store in both halves rather than one.
+    ///
+    /// The algorithm is the native evaluator's, over the engine's own dependency index —
+    /// mirrored rather than reinvented, because the failure mode of getting it wrong is a
+    /// violation admitted rather than a slow answer:
+    ///
+    /// 1. a change to `p` implicates every shape that reads `p`, at both ends of the quad;
+    /// 2. a changed `rdf:type` implicates every shape targeting that class, at the subject;
+    /// 3. the work is attributed *upwards* to targeted ancestors, because a change almost
+    ///    always lands on an anonymous property shape which is never a focus of its own;
+    /// 4. pairs the targets do not actually select are dropped, and any shape left with
+    ///    nothing to do is widened back to all of its focus nodes — a shape reached down a
+    ///    property path has its focus node upstream of the quad that changed.
+    ///
+    /// Steps 3 and 4 are what make it safe. Over-reporting costs time; under-reporting lets
+    /// an invalid graph through.
+    ///
+    /// # Falling back
+    ///
+    /// A shapes graph carrying a constraint whose reads cannot be bounded — a SPARQL
+    /// constraint matching `?s ?p ?o`, a `sh:target` selector, a node expression — has no
+    /// index entry that a change could match, so this runs a full validation instead of
+    /// silently checking less. [`Self::would_revalidate_incrementally`] says which it is
+    /// without running either.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::apply`]: a change to a shape definition is refused rather than absorbed.
+    pub fn revalidate(
+        &mut self,
+        store: &Store,
+        changes: &[Change],
+    ) -> Result<ValidationReport, ShaclError> {
+        self.apply(store, changes)?;
+        if !self.shapes.unconditional().is_empty() {
+            return self.validate();
+        }
+
+        let rdf_type = self.bridged.vocab.rdf_type;
+        let mut work: std::collections::HashSet<(ShapeId, EngineId)> =
+            std::collections::HashSet::new();
+        let mut implicated: std::collections::HashSet<ShapeId> = std::collections::HashSet::new();
+        // Shapes whose violation can sit at a node the delta never mentions.
+        let mut widen: std::collections::HashSet<ShapeId> = std::collections::HashSet::new();
+
+        for change in changes {
+            if !in_graph(change.quad.graph_name, self.options.data_graph) {
+                continue;
+            }
+            let (Some(subject), Some(predicate), Some(object)) = (
+                self.bridged.engine_id(change.quad.subject),
+                self.bridged.engine_id(change.quad.predicate),
+                self.bridged.engine_id(change.quad.object),
+            ) else {
+                // `apply` has just interned every term of every change it kept, so a miss
+                // here means the change was not this run's — nothing refers to it.
+                continue;
+            };
+
+            let shapes = &self.shapes;
+            let implicate =
+                |id: ShapeId,
+                 node: EngineId,
+                 work: &mut std::collections::HashSet<(ShapeId, EngineId)>,
+                 implicated: &mut std::collections::HashSet<ShapeId>,
+                 widen: &mut std::collections::HashSet<ShapeId>| {
+                    let upstream = shapes.focus_may_be_upstream(id);
+                    for ancestor in shapes.targeted_ancestors(id) {
+                        implicated.insert(ancestor);
+                        work.insert((ancestor, node));
+                        if upstream {
+                            widen.insert(ancestor);
+                        }
+                    }
+                };
+
+            for &id in self.shapes.shapes_touching(predicate) {
+                implicate(id, subject, &mut work, &mut implicated, &mut widen);
+                implicate(id, object, &mut work, &mut implicated, &mut widen);
+            }
+            if predicate == rdf_type {
+                for &id in self.shapes.shapes_targeting_class(object) {
+                    implicate(id, subject, &mut work, &mut implicated, &mut widen);
+                }
+                // A node's other types carry their own shapes, and the change may have made
+                // one of those shapes apply where it did not before.
+                let classes: Vec<EngineId> =
+                    self.bridged.graph.objects(subject, rdf_type).collect();
+                for class in classes {
+                    for &id in self.shapes.shapes_targeting_class(class) {
+                        implicate(id, subject, &mut work, &mut implicated, &mut widen);
+                    }
+                }
+            }
+        }
+
+        let mut focus: std::collections::HashMap<ShapeId, Vec<EngineId>> =
+            std::collections::HashMap::new();
+        for &id in &implicated {
+            let mut nodes = engine_validate::focus_nodes_of(
+                id,
+                &self.bridged.graph,
+                &self.shapes,
+                &self.shapes_graph,
+                &mut self.bridged.terms,
+                &self.bridged.vocab,
+            )
+            .map_err(|e| ShaclError::Unsupported(e.to_string()))?;
+            nodes.sort_unstable();
+            nodes.dedup();
+            focus.insert(id, nodes);
+        }
+        work.retain(|(id, node)| {
+            focus
+                .get(id)
+                .is_some_and(|nodes| nodes.binary_search(node).is_ok())
+        });
+        // Widen a shape that got nothing — and one whose focus node can be upstream of the
+        // change, which the endpoint attribution reaches only by accident.
+        for &id in &implicated {
+            if !widen.contains(&id) && work.iter().any(|(i, _)| *i == id) {
+                continue;
+            }
+            for node in focus.get(&id).into_iter().flatten() {
+                work.insert((id, *node));
+            }
+        }
+
+        let mut work: Vec<(ShapeId, EngineId)> = work.into_iter().collect();
+        work.sort_unstable();
+        engine_validate::validate_nodes(
+            &work,
+            &self.bridged.graph,
+            &self.shapes,
+            &self.shapes_graph,
+            &mut self.bridged.terms,
+            &self.bridged.vocab,
+        )
+        .map_err(|e| ShaclError::Unsupported(e.to_string()))
+    }
+
+    /// Whether [`Self::revalidate`] can work from the delta, or must validate everything.
+    ///
+    /// False when some shape reads more than the index can name. Worth asking before a
+    /// commit rather than after, because the answer decides whether the gate is cheap.
+    #[must_use]
+    pub fn would_revalidate_incrementally(&self) -> bool {
+        self.shapes.unconditional().is_empty()
     }
 
     /// Renders a report as RDF.

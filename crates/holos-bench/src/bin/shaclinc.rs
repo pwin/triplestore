@@ -5,12 +5,13 @@
 //! change means bridging the whole store again. Closing that is bounded work — and worth
 //! doing only if the re-bridge is actually what costs, which is what this measures.
 //!
-//! Three numbers per size:
+//! Four numbers per size, for one changed triple:
 //!
-//! * **prepare** — bridging the store and compiling the shapes, paid on every commit today.
-//! * **validate** — the full run that follows it.
-//! * **native revalidate** — what the incremental path costs for the same one-triple change,
-//!   as the target to aim at.
+//! * **prepare** — bridging the store and compiling the shapes, once paid on every commit.
+//! * **full validate** — the run that followed it.
+//! * **engine reval** — `EngineRun::revalidate`: apply the delta, plan from the index, check
+//!   only what it made stale.
+//! * **native reval** — the same for the native evaluator, which covers fewer constraints.
 //!
 //! Run with `cargo run -p holos-bench --release --bin shaclinc`.
 
@@ -73,7 +74,7 @@ fn median(mut samples: Vec<f64>) -> f64 {
 fn main() {
     println!(
         "{:>9}  {:>12}  {:>12}  {:>12}  {:>13}  {:>9}",
-        "quads", "prepare", "apply", "validate", "native reval", "prep/apply"
+        "quads", "prepare", "full validate", "engine reval", "native reval", "speedup"
     );
 
     for n in [1_000usize, 10_000, 50_000] {
@@ -138,22 +139,23 @@ fn main() {
                 .collect(),
         );
 
-        // What `EngineRun::apply` costs for the same one-triple change: the delta path that
-        // replaces the re-bridge.
         let change = vec![Change::added(target)];
-        let apply = median(
+        // The whole gate: delta in, report out, through the engine's own index.
+        let engine_reval = median(
             (0..5)
                 .map(|_| {
                     let t = Instant::now();
-                    run.apply(engine.store(), &change).expect("apply");
-                    t.elapsed().as_secs_f64() * 1e3
+                    let report = run.revalidate(engine.store(), &change).expect("revalidate");
+                    let e = t.elapsed().as_secs_f64() * 1e3;
+                    drop(report);
+                    e
                 })
                 .collect(),
         );
 
         println!(
-            "{quads:>9}  {prepare:>10.3} ms  {apply:>10.4} ms  {validate:>10.3} ms               {reval:>10.4} ms  {:>7.0}x",
-            prepare / apply.max(1e-9)
+            "{quads:>9}  {prepare:>10.3} ms  {validate:>10.3} ms  {engine_reval:>10.4} ms               {reval:>10.4} ms  {:>7.0}x",
+            (prepare + validate) / engine_reval.max(1e-9)
         );
     }
 

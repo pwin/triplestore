@@ -370,6 +370,150 @@ pub struct Shapes {
     by_node: HashMap<TermId, ShapeId>,
     /// Shapes carrying at least one target, i.e. the roots of validation.
     roots: Vec<ShapeId>,
+    /// Shapes that read a predicate — the index incremental revalidation plans from.
+    by_predicate: HashMap<TermId, Vec<ShapeId>>,
+    /// Shapes targeting a class, for `rdf:type` changes.
+    by_target_class: HashMap<TermId, Vec<ShapeId>>,
+    /// Which shapes refer to a shape, so a nested one can be climbed to a targeted root.
+    parents: HashMap<ShapeId, Vec<ShapeId>>,
+    /// Shapes whose dependencies could not be bounded, and which are therefore stale after
+    /// *any* change.
+    ///
+    /// A SPARQL constraint matching `?s ?p ?o` really does read every predicate, and a
+    /// custom component's query is no more analysable than any other. Recording them and
+    /// always re-checking them costs time; leaving them out of the index would lose a
+    /// violation, which is the failure incremental validation cannot have.
+    unconditional: Vec<ShapeId>,
+}
+
+/// Every predicate a shape reads, or `None` when that cannot be bounded.
+///
+/// `None` is the honest answer for a SPARQL or custom constraint whose query uses a variable
+/// predicate, and the caller re-checks such a shape after any change. The alternative — a
+/// guess — loses a violation, and an incremental validator that loses a violation is worse
+/// than none, because it is trusted.
+///
+/// Only the shape's *own* reads. A nested shape is compiled as a shape in its own right and
+/// contributes its own entry; the parent link is what carries a change up to a targeted
+/// ancestor.
+fn dependencies(shape: &Shape, store: &TermStore, v: &Vocab) -> Option<Vec<TermId>> {
+    let mut out = Vec::new();
+    // A `sh:target` SPARQL selector decides the *focus set*, so a change anywhere may add or
+    // remove a node from it. Bounding its own predicates would say what changes the
+    // selection, not what the shape then reads at a node it newly selects, so it is left
+    // unbounded rather than half-bounded.
+    if shape.targets.iter().any(|t| matches!(t, Target::Sparql(_))) {
+        return None;
+    }
+    if let Some(path) = &shape.path {
+        path_predicates(path, &mut out);
+    }
+    for constraint in &shape.constraints {
+        match constraint {
+            // Path-valued comparisons read the sibling path, and its predicates have to be
+            // walked out rather than taken whole: a constraint still evaluated on a full run
+            // and skipped on a partial one is exactly the asymmetry to avoid.
+            Constraint::Equals(p)
+            | Constraint::Disjoint(p)
+            | Constraint::LessThan(p)
+            | Constraint::LessThanOrEquals(p)
+            | Constraint::SubsetOf(p) => path_predicates(p, &mut out),
+            Constraint::UniqueValuesFor(paths) => {
+                for p in paths {
+                    path_predicates(p, &mut out);
+                }
+            }
+            // These read `rdf:type`, so a new type triple has to reach them.
+            Constraint::Class(_) | Constraint::RootClass(_) | Constraint::Closed { .. } => {
+                out.push(v.rdf_type);
+            }
+            // A reifier is reached through `rdf:reifies`.
+            Constraint::ReifierShape { .. } => out.push(v.rdf_reifies),
+            // List constraints walk `rdf:first`/`rdf:rest`.
+            Constraint::MinListLength(_)
+            | Constraint::MaxListLength(_)
+            | Constraint::UniqueMembers
+            | Constraint::MemberShape(_) => {
+                out.push(v.rdf_first);
+                out.push(v.rdf_rest);
+            }
+            Constraint::Sparql(sc) => out.extend(query_predicates(&sc.query, store)?),
+            Constraint::Custom(cc) => out.extend(query_predicates(&cc.query.query, store)?),
+            // A node expression can name anything and is not analysed here.
+            Constraint::Expression(_) | Constraint::NodeByExpression(_) => return None,
+            _ => {}
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    Some(out)
+}
+
+/// The predicates a compiled query reads, interned, or `None` if it reads any of them.
+///
+/// A predicate the interner has never seen cannot appear in a triple, so it cannot trigger
+/// anything and is dropped rather than interned: this runs after the graph is built, and
+/// interning here would leave a shape depending on a term nothing in the data uses.
+fn query_predicates(query: &spargebra::Query, store: &TermStore) -> Option<Vec<TermId>> {
+    Some(
+        crate::sparql::predicates(query)?
+            .into_iter()
+            .filter_map(|n| store.get_named_node(n.as_str()))
+            .collect(),
+    )
+}
+
+/// Every predicate a path can traverse.
+fn path_predicates(path: &Path, out: &mut Vec<TermId>) {
+    match path {
+        Path::Predicate(p) => out.push(*p),
+        Path::Inverse(inner)
+        | Path::ZeroOrMore(inner)
+        | Path::OneOrMore(inner)
+        | Path::ZeroOrOne(inner) => path_predicates(inner, out),
+        Path::Sequence(parts) | Path::Alternative(parts) => {
+            for p in parts {
+                path_predicates(p, out);
+            }
+        }
+    }
+}
+
+/// Every shape a shape refers to, so a change can be climbed to a targeted ancestor.
+///
+/// Targets first: `sh:targetWhere` names a shape whose conforming nodes are this shape's
+/// focus set, so a change that alters what the inner shape selects alters what this shape
+/// validates, even when nothing this shape's own constraints read has changed.
+fn referenced_shapes(shape: &Shape, by_node: &HashMap<TermId, ShapeId>) -> Vec<ShapeId> {
+    let mut out = Vec::new();
+    for target in &shape.targets {
+        if let Target::Where(node) = target {
+            // The engine records `sh:targetWhere` by shape *node*, so this is a lookup
+            // rather than a copy. A node naming no compiled shape selects nothing.
+            out.extend(by_node.get(node).copied());
+        }
+    }
+    for constraint in &shape.constraints {
+        match constraint {
+            Constraint::Not(i)
+            | Constraint::Node(i)
+            | Constraint::Property(i)
+            | Constraint::MemberShape(i)
+            | Constraint::SomeValue(i)
+            | Constraint::ReifierShape { shape: i, .. } => out.push(*i),
+            Constraint::And(vs) | Constraint::Or(vs) | Constraint::Xone(vs) => {
+                out.extend(vs.iter().copied());
+            }
+            Constraint::QualifiedValueShape {
+                shape, siblings, ..
+            } => {
+                out.push(*shape);
+                out.extend(siblings.iter().copied());
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 impl Shapes {
@@ -407,6 +551,78 @@ impl Shapes {
     #[inline]
     pub fn roots(&self) -> &[ShapeId] {
         &self.roots
+    }
+
+    /// Shapes that read `predicate`.
+    #[inline]
+    #[must_use]
+    pub fn shapes_touching(&self, predicate: TermId) -> &[ShapeId] {
+        self.by_predicate.get(&predicate).map_or(&[], Vec::as_slice)
+    }
+
+    /// Shapes whose target is `class`.
+    #[inline]
+    #[must_use]
+    pub fn shapes_targeting_class(&self, class: TermId) -> &[ShapeId] {
+        self.by_target_class.get(&class).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether a change this shape reads can fault a focus node that is not an endpoint of
+    /// the changed quad.
+    ///
+    /// One predicate puts the focus node at the quad. A compound path does not:
+    /// `sh:path ( ex:knows ex:name )` faults whoever knows the node that changed, and that
+    /// node appears nowhere in the delta.
+    #[must_use]
+    pub fn focus_may_be_upstream(&self, id: ShapeId) -> bool {
+        let shape = self.get(id);
+        let compound = |p: &Path| !matches!(p, Path::Predicate(_));
+        if shape.path.as_ref().is_some_and(compound) {
+            return true;
+        }
+        shape.constraints.iter().any(|c| match c {
+            Constraint::Equals(p)
+            | Constraint::Disjoint(p)
+            | Constraint::LessThan(p)
+            | Constraint::LessThanOrEquals(p)
+            | Constraint::SubsetOf(p) => compound(p),
+            Constraint::UniqueValuesFor(ps) => ps.iter().any(compound),
+            _ => false,
+        })
+    }
+
+    /// Shapes that must be re-checked after any change at all.
+    #[inline]
+    #[must_use]
+    pub fn unconditional(&self) -> &[ShapeId] {
+        &self.unconditional
+    }
+
+    /// The targeted shapes a shape sits under, itself included when it is targeted.
+    ///
+    /// A property shape is usually anonymous and has no targets of its own, so a change it
+    /// reads has to be attributed to whichever node shape declares it — validating an
+    /// untargeted shape directly would report against a focus node nothing selected.
+    #[must_use]
+    pub fn targeted_ancestors(&self, id: ShapeId) -> Vec<ShapeId> {
+        let mut out = Vec::new();
+        let mut seen: std::collections::HashSet<ShapeId> = std::collections::HashSet::new();
+        let mut frontier = vec![id];
+        while let Some(current) = frontier.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            if !self.get(current).targets.is_empty() {
+                out.push(current);
+                // Keep climbing: a targeted shape can be nested inside another.
+            }
+            if let Some(parents) = self.parents.get(&current) {
+                frontier.extend(parents.iter().copied());
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     #[inline]
@@ -522,10 +738,50 @@ impl<'a> Compiler<'a> {
             .filter(|id| !self.shapes[id.index()].targets.is_empty())
             .collect();
 
+        let mut by_predicate: HashMap<TermId, Vec<ShapeId>> = HashMap::new();
+        let mut by_target_class: HashMap<TermId, Vec<ShapeId>> = HashMap::new();
+        let mut parents: HashMap<ShapeId, Vec<ShapeId>> = HashMap::new();
+        let mut unconditional: Vec<ShapeId> = Vec::new();
+
+        for (i, shape) in self.shapes.iter().enumerate() {
+            let id = ShapeId(i as u32);
+            match dependencies(shape, self.store, self.vocab) {
+                Some(predicates) => {
+                    for p in predicates {
+                        by_predicate.entry(p).or_default().push(id);
+                    }
+                }
+                None => unconditional.push(id),
+            }
+            for target in &shape.targets {
+                match target {
+                    Target::Class(c) | Target::ImplicitClass(c) => {
+                        by_target_class.entry(*c).or_default().push(id);
+                    }
+                    _ => {}
+                }
+            }
+            for child in referenced_shapes(shape, &self.by_node) {
+                parents.entry(child).or_default().push(id);
+            }
+        }
+        for entry in by_predicate
+            .values_mut()
+            .chain(by_target_class.values_mut())
+            .chain(parents.values_mut())
+        {
+            entry.sort_unstable();
+            entry.dedup();
+        }
+
         Ok(Shapes {
             shapes: self.shapes,
             by_node: self.by_node,
             roots,
+            by_predicate,
+            by_target_class,
+            parents,
+            unconditional,
         })
     }
 

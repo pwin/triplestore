@@ -12,18 +12,14 @@
 //! textual substitution, because `bound(<iri>)` is not even legal syntax.
 //! SEP-0007 substitution, which the evaluator implements natively, has exactly
 //! the semantics SHACL asks for.
-
-use std::cell::RefCell;
-use std::convert::Infallible;
-
-use hashbrown::HashMap;
-use oxrdf::{Term, TermRef, Variable};
-use spareval::{QueryEvaluator, QueryResults, QueryableDataset};
-use spargebra::{Query, SparqlParser};
-
 use crate::error::{Error, Result};
 use crate::model::{Graph, TermId, TermStore, Vocab};
-
+use hashbrown::HashMap;
+use oxrdf::{NamedNode, Term, TermRef, Variable};
+use spareval::{QueryEvaluator, QueryResults, QueryableDataset};
+use spargebra::{Query, SparqlParser};
+use std::cell::RefCell;
+use std::convert::Infallible;
 /// Lets the SPARQL evaluator read the interned graph without materialising it.
 ///
 /// `InternalTerm` is [`TermId`], so pattern matching runs straight against the
@@ -43,7 +39,6 @@ pub struct DataAdapter<'a> {
     /// Terms minted during evaluation, addressed as `store.len() + index`.
     extra: RefCell<Vec<Term>>,
 }
-
 /// The IRI that names the shapes graph inside a SPARQL constraint.
 ///
 /// SHACL says `$shapesGraph` is bound to an IRI standing for the shapes graph
@@ -51,7 +46,6 @@ pub struct DataAdapter<'a> {
 /// same IRI is bound to the variable and used as the graph name, so that
 /// `GRAPH $shapesGraph { … }` finds it.
 pub const SHAPES_GRAPH_IRI: &str = "urn:x-shacl:shapes-graph";
-
 impl<'a> DataAdapter<'a> {
     pub fn new(graph: &'a Graph, store: &'a TermStore) -> Self {
         Self {
@@ -62,7 +56,6 @@ impl<'a> DataAdapter<'a> {
             extra: RefCell::new(Vec::new()),
         }
     }
-
     /// Exposes `shapes` as the named graph [`SHAPES_GRAPH_IRI`].
     pub fn with_shapes(mut self, shapes: &'a Graph) -> Self {
         let name = Term::from(oxrdf::NamedNode::new_unchecked(SHAPES_GRAPH_IRI));
@@ -76,7 +69,6 @@ impl<'a> DataAdapter<'a> {
         self.shapes_name = Some(id);
         self
     }
-
     fn intern_external(&self, term: Term) -> TermId {
         let mut extra = self.extra.borrow_mut();
         if let Some(i) = extra.iter().position(|t| *t == term) {
@@ -86,7 +78,6 @@ impl<'a> DataAdapter<'a> {
         TermId::from_raw(self.store.len() as u32 + extra.len() as u32 - 1)
     }
 }
-
 /// Resolves a triple pattern against one graph.
 ///
 /// Picks the index the bound components can seek on, so a pattern with a known
@@ -121,11 +112,9 @@ fn match_pattern(
         (None, None, None) => graph.iter().collect(),
     }
 }
-
 impl<'a> QueryableDataset<'a> for &'a DataAdapter<'a> {
     type InternalTerm = TermId;
     type Error = Infallible;
-
     fn internal_quads_for_pattern(
         &self,
         subject: Option<&TermId>,
@@ -153,7 +142,6 @@ impl<'a> QueryableDataset<'a> for &'a DataAdapter<'a> {
                 }
             }
         }
-
         let mut rows: Vec<(Option<TermId>, [TermId; 3])> = Vec::new();
         for (name, graph) in sources {
             rows.extend(
@@ -171,7 +159,6 @@ impl<'a> QueryableDataset<'a> for &'a DataAdapter<'a> {
             })
         })
     }
-
     fn internalize_term(&self, term: Term) -> std::result::Result<TermId, Infallible> {
         // Anything the store rendered resolves to the handle it already has —
         // a pre-bound focus node, or a term handed back in a solution. That
@@ -184,7 +171,6 @@ impl<'a> QueryableDataset<'a> for &'a DataAdapter<'a> {
             .resolve_rendered(term.as_ref())
             .unwrap_or_else(|| self.intern_external(term)))
     }
-
     fn externalize_term(&self, term: TermId) -> std::result::Result<Term, Infallible> {
         let raw = term.as_raw() as usize;
         Ok(if raw < self.store.len() {
@@ -194,7 +180,6 @@ impl<'a> QueryableDataset<'a> for &'a DataAdapter<'a> {
         })
     }
 }
-
 /// A compiled SPARQL constraint.
 #[derive(Debug, Clone)]
 pub struct SparqlConstraint {
@@ -206,7 +191,6 @@ pub struct SparqlConstraint {
     pub message: Vec<TermId>,
     pub severity: Option<TermId>,
 }
-
 /// Reads the `sh:prefixes` declarations reachable from `node` into SPARQL
 /// `PREFIX` lines.
 ///
@@ -216,7 +200,6 @@ pub fn prefix_header(node: TermId, shapes: &Graph, store: &TermStore, vocab: &Vo
     let mut header = String::new();
     let mut seen = Vec::new();
     let mut queue: Vec<TermId> = shapes.objects(node, vocab.sh_prefixes).collect();
-
     // With no `sh:prefixes` of its own, fall back to every prefix the shapes
     // graph declares. SHACL says a query's prefixes come from `sh:prefixes`,
     // but a graph that declares them at the top — `ex: a sh:ShapesGraph ;
@@ -226,7 +209,6 @@ pub fn prefix_header(node: TermId, shapes: &Graph, store: &TermStore, vocab: &Vo
     if queue.is_empty() {
         queue.extend(shapes.subjects_of(vocab.sh_declare));
     }
-
     while let Some(owner) = queue.pop() {
         if seen.contains(&owner) {
             continue;
@@ -234,7 +216,6 @@ pub fn prefix_header(node: TermId, shapes: &Graph, store: &TermStore, vocab: &Vo
         seen.push(owner);
         // `owl:imports` chains let one prefix set build on another.
         queue.extend(shapes.objects(owner, vocab.owl_imports));
-
         for decl in shapes.objects(owner, vocab.sh_declare) {
             let prefix = shapes
                 .object(decl, vocab.sh_prefix)
@@ -249,7 +230,6 @@ pub fn prefix_header(node: TermId, shapes: &Graph, store: &TermStore, vocab: &Vo
     }
     header
 }
-
 /// Rejects queries SHACL declares incompatible with pre-binding.
 ///
 /// The spec rules out `VALUES`, `MINUS` and `SERVICE` outright, and forbids
@@ -271,7 +251,103 @@ fn reject_unsupported(query: &Query, bindings: &[(&str, Term)]) -> Result<()> {
     }
     Ok(())
 }
+/// Every IRI a query uses as a predicate, or `None` if it uses a variable as one.
+///
+/// This is what lets a SPARQL constraint take part in incremental revalidation: a shape whose
+/// constraint reads `ex:email` has to be re-checked when `ex:email` is written, and nothing
+/// outside the query text knows that. Parsing it already happened at compile time, so the
+/// answer is a walk rather than a re-parse.
+///
+/// `None` is not a failure. A query matching `?s ?p ?o` genuinely depends on every predicate,
+/// and the caller must treat the shape as unconditionally stale rather than guess — this is
+/// the direction where being wrong loses a violation instead of costing time.
+#[must_use]
+pub fn predicates(query: &Query) -> Option<Vec<NamedNode>> {
+    let pattern = match query {
+        Query::Select { pattern, .. }
+        | Query::Ask { pattern, .. }
+        | Query::Construct { pattern, .. }
+        | Query::Describe { pattern, .. } => pattern,
+    };
+    let mut out = Vec::new();
+    predicates_in(pattern, &mut out).then_some(out)
+}
+/// Walks one pattern. Returns false as soon as a variable predicate appears.
+fn predicates_in(p: &spargebra::algebra::GraphPattern, out: &mut Vec<NamedNode>) -> bool {
+    use spargebra::algebra::GraphPattern as G;
+    match p {
+        G::Bgp { patterns } => {
+            for t in patterns {
+                match &t.predicate {
+                    spargebra::term::NamedNodePattern::NamedNode(n) => out.push(n.clone()),
+                    spargebra::term::NamedNodePattern::Variable(_) => return false,
+                }
+            }
+            true
+        }
+        // A property path can traverse any of the predicates it names, and `!(…)` or a
+        // variable-free negated set can traverse ones it does not. Treated as unbounded,
+        // which is the safe direction and is also rare in a SHACL constraint.
+        G::Path { .. } => false,
+        G::Join { left, right } | G::Union { left, right } | G::LeftJoin { left, right, .. } => {
+            predicates_in(left, out) && predicates_in(right, out)
+        }
+        G::Minus { left, right } => predicates_in(left, out) && predicates_in(right, out),
+        // `FILTER NOT EXISTS { ... }` hides a whole pattern inside the *expression*, which
+        // is where a SHACL constraint most often puts the thing it reads. Recursing only into
+        // `inner` walked straight past it and reported no dependencies at all.
+        G::Filter { inner, expr } => {
+            predicates_in(inner, out) && predicates_in_expression(expr, out)
+        }
+        G::Graph { inner, .. }
+        | G::Extend { inner, .. }
+        | G::OrderBy { inner, .. }
+        | G::Project { inner, .. }
+        | G::Distinct { inner }
+        | G::Reduced { inner }
+        | G::Slice { inner, .. }
+        | G::Group { inner, .. } => predicates_in(inner, out),
+        G::Values { .. } => true,
+        // `SERVICE` reads a graph this engine cannot see, so nothing here can bound it.
+        G::Service { .. } => false,
+    }
+}
 
+/// Walks an expression for the patterns `EXISTS` and `NOT EXISTS` embed in it.
+///
+/// Exhaustive on purpose. `Exists` is the only variant carrying a pattern today, and a
+/// catch-all would silently start losing dependencies the moment another one did — which is
+/// the failure this function exists to prevent, so a new variant should stop the build.
+fn predicates_in_expression(e: &spargebra::algebra::Expression, out: &mut Vec<NamedNode>) -> bool {
+    use spargebra::algebra::Expression as E;
+    fn all(xs: &[E], out: &mut Vec<NamedNode>) -> bool {
+        xs.iter().all(|x| predicates_in_expression(x, out))
+    }
+    match e {
+        E::Exists(pattern) => predicates_in(pattern, out),
+        E::NamedNode(_) | E::Literal(_) | E::Variable(_) | E::Bound(_) => true,
+        E::Not(x) | E::UnaryPlus(x) | E::UnaryMinus(x) => predicates_in_expression(x, out),
+        E::Or(a, b)
+        | E::And(a, b)
+        | E::Equal(a, b)
+        | E::SameTerm(a, b)
+        | E::Greater(a, b)
+        | E::GreaterOrEqual(a, b)
+        | E::Less(a, b)
+        | E::LessOrEqual(a, b)
+        | E::Add(a, b)
+        | E::Subtract(a, b)
+        | E::Multiply(a, b)
+        | E::Divide(a, b) => predicates_in_expression(a, out) && predicates_in_expression(b, out),
+        E::In(x, xs) => predicates_in_expression(x, out) && all(xs, out),
+        E::If(a, b, c) => {
+            predicates_in_expression(a, out)
+                && predicates_in_expression(b, out)
+                && predicates_in_expression(c, out)
+        }
+        E::Coalesce(xs) | E::FunctionCall(_, xs) => all(xs, out),
+    }
+}
 fn unsupported_in(p: &spargebra::algebra::GraphPattern, prebound: &[&str]) -> Option<&'static str> {
     use spargebra::algebra::GraphPattern as G;
     let recurse = |x: &G| unsupported_in(x, prebound);
@@ -301,10 +377,8 @@ fn unsupported_in(p: &spargebra::algebra::GraphPattern, prebound: &[&str]) -> Op
         _ => None,
     }
 }
-
 /// Pre-bound variables and the terms they stand for.
 type Binding<'a> = Vec<(&'a str, Term)>;
-
 /// Whether `name` appears anywhere the substitution would reach.
 ///
 /// Runs the same fold with a probe that rewrites nothing, so the answer cannot
@@ -328,7 +402,6 @@ fn mentions(query: &Query, name: &str) -> bool {
     }
     seen.get()
 }
-
 /// Adds `names` to a `SELECT`'s projection if they are not already there.
 ///
 /// The evaluator will only substitute a variable that its projection produces,
@@ -341,7 +414,6 @@ fn mentions(query: &Query, name: &str) -> bool {
 /// and widening it would change which of its bindings escape.
 fn ensure_projected(query: &Query, names: &[&str]) -> Query {
     use spargebra::algebra::GraphPattern as G;
-
     fn widen(
         p: &spargebra::algebra::GraphPattern,
         names: &[&str],
@@ -385,7 +457,6 @@ fn ensure_projected(query: &Query, names: &[&str]) -> Query {
             other => other.clone(),
         }
     }
-
     match query {
         Query::Select {
             dataset,
@@ -399,7 +470,6 @@ fn ensure_projected(query: &Query, names: &[&str]) -> Query {
         other => other.clone(),
     }
 }
-
 /// Substitutes pre-bound variables into the query algebra.
 ///
 /// Doing this here rather than handing the bindings to the evaluator matters
@@ -468,7 +538,6 @@ fn substitute(query: &Query, bindings: &[(&str, Term)]) -> Query {
         other => other.clone(),
     }
 }
-
 /// Substitutes a term into a triple-pattern position.
 fn fold_term_pattern(
     t: &spargebra::term::TermPattern,
@@ -490,7 +559,6 @@ fn fold_term_pattern(
         other => other.clone(),
     }
 }
-
 /// Substitutes into a predicate position, which only accepts IRIs.
 fn fold_named_node_pattern(
     n: &spargebra::term::NamedNodePattern,
@@ -505,7 +573,6 @@ fn fold_named_node_pattern(
         other => other.clone(),
     }
 }
-
 fn fold_pattern(
     p: &spargebra::algebra::GraphPattern,
     pre: &dyn Fn(&Variable) -> Option<Term>,
@@ -618,7 +685,6 @@ fn fold_pattern(
         other => other.clone(),
     }
 }
-
 fn fold_expr(
     e: &spargebra::algebra::Expression,
     pre: &dyn Fn(&Variable) -> Option<Term>,
@@ -660,7 +726,6 @@ fn fold_expr(
         other => other.clone(),
     }
 }
-
 /// Parses a SPARQL query, prepending `header` and normalising `$var` to `?var`.
 pub fn parse_query(header: &str, text: &str) -> Result<Query> {
     let full = format!("{header}{text}");
@@ -668,7 +733,6 @@ pub fn parse_query(header: &str, text: &str) -> Result<Query> {
         .parse_query(&full)
         .map_err(|e| Error::Sparql(format!("{e}")))
 }
-
 /// Runs `query` with the given pre-bound variables, returning each solution as
 /// a map from variable name to term.
 ///
@@ -682,7 +746,6 @@ pub fn run(
 ) -> Result<Vec<HashMap<String, Term>>> {
     run_in(query, bindings, graph, store, None)
 }
-
 /// As [`run`], with the shapes graph reachable as `GRAPH $shapesGraph`.
 ///
 /// Separate because most callers have no shapes graph to offer — node
@@ -722,7 +785,6 @@ pub fn run_in(
         )),
     }
 }
-
 /// Prepares and runs `query` against `adapter`, applying SHACL pre-binding.
 ///
 /// The adapter is the caller's because the results borrow it: a solution
@@ -733,17 +795,14 @@ fn evaluate<'a>(
     adapter: &'a DataAdapter<'a>,
 ) -> Result<QueryResults<'a>> {
     reject_unsupported(query, bindings)?;
-
     // Blank nodes take the evaluator's own substitution rather than the
     // algebra rewrite; everything else takes the rewrite. See [`substitute`].
     let (blank, ground): (Binding, Binding) = bindings
         .iter()
         .cloned()
         .partition(|(_, t)| matches!(t, Term::BlankNode(_)));
-
     let evaluator = QueryEvaluator::new();
     let substituted = substitute(query, &ground);
-
     // A variable the query never mentions cannot be substituted — the
     // evaluator rejects it rather than ignoring it — and binding it would mean
     // nothing anyway. `$currentShape` is the ordinary case: most constraints
@@ -754,7 +813,6 @@ fn evaluate<'a>(
         .filter(|name| mentions(&substituted, name))
         .collect();
     let substituted = ensure_projected(&substituted, &wanted);
-
     let prepared = wanted
         .iter()
         .fold(evaluator.prepare(&substituted), |q, name| {
@@ -765,12 +823,10 @@ fn evaluate<'a>(
                 .expect("wanted is drawn from blank");
             q.substitute_variable(Variable::new_unchecked(*name), term)
         });
-
     prepared
         .execute(adapter)
         .map_err(|e| Error::Sparql(format!("{e}")))
 }
-
 /// Runs a `CONSTRUCT` query, returning the triples it builds.
 ///
 /// This is what a SHACL-AF `sh:SPARQLRule` is: the constructed triples are the
@@ -792,7 +848,6 @@ pub fn run_construct(
         )),
     }
 }
-
 impl SparqlConstraint {
     /// Compiles the `sh:construct` query of a SHACL-AF SPARQL rule.
     ///
@@ -822,18 +877,15 @@ impl SparqlConstraint {
         })
     }
 }
-
 /// An empty solution, used to stand for the single failure an unsatisfied
 /// `sh:ask` produces.
 pub fn empty_solution() -> HashMap<String, Term> {
     HashMap::new()
 }
-
 /// True if the parsed query is an `ASK`.
 pub fn is_ask(query: &Query) -> bool {
     matches!(query, Query::Ask { .. })
 }
-
 /// Converts an interned term to `oxrdf` for pre-binding.
 ///
 /// A blank node goes in as itself. It must not reach the algebra rewrite —
@@ -843,7 +895,6 @@ pub fn is_ask(query: &Query) -> bool {
 pub fn to_term(t: TermId, store: &TermStore) -> Term {
     store.to_oxrdf(t)
 }
-
 /// Resolves a term produced by SPARQL back into the store, if it is present.
 ///
 /// The stand-in IRI is decoded here as well as on the way in, because a
@@ -858,13 +909,11 @@ pub fn from_term(term: TermRef<'_>, store: &TermStore) -> Option<TermId> {
     // than `get_term` offers, and both have been silently dropped before.
     store.resolve_rendered(term)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{GraphBuilder, Vocab, loader};
     use oxrdfio::RdfFormat;
-
     fn fixture(turtle: &str) -> (TermStore, Vocab, Graph) {
         let mut store = TermStore::new();
         let vocab = Vocab::new(&mut store);
@@ -880,12 +929,10 @@ mod tests {
         .unwrap();
         (store, vocab, b.build())
     }
-
     const DATA: &str = "@prefix ex: <http://ex/> .
         ex:a ex:p ex:b ; ex:q 1 .
         ex:b ex:p ex:c .
         ex:x ex:p ex:y .";
-
     #[test]
     fn evaluates_a_basic_pattern_against_the_interned_graph() {
         let (store, _, g) = fixture(DATA);
@@ -894,18 +941,15 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["o"].to_string(), "<http://ex/b>");
     }
-
     #[test]
     fn substitutes_this_into_the_pattern() {
         let (mut store, _, g) = fixture(DATA);
         let a = store.named_node("http://ex/a");
         let q = parse_query("", "SELECT $this ?o WHERE { $this <http://ex/p> ?o }").unwrap();
-
         let rows = run(&q, &[("this", to_term(a, &store))], &g, &store).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["o"].to_string(), "<http://ex/b>");
     }
-
     #[test]
     fn pre_binding_reaches_inside_a_union() {
         // The property a top-level VALUES join would not provide: both union
@@ -919,11 +963,9 @@ mod tests {
             }",
         )
         .unwrap();
-
         let rows = run(&q, &[("this", to_term(a, &store))], &g, &store).unwrap();
         assert_eq!(rows.len(), 1, "the second branch must match");
     }
-
     #[test]
     fn pre_bound_variables_are_bound_for_bound() {
         // `bound($this)` is why textual substitution cannot work: it would
@@ -931,17 +973,14 @@ mod tests {
         let (mut store, _, g) = fixture(DATA);
         let a = store.named_node("http://ex/a");
         let q = parse_query("", "SELECT $this WHERE { FILTER (bound($this)) }").unwrap();
-
         let rows = run(&q, &[("this", to_term(a, &store))], &g, &store).unwrap();
         assert_eq!(rows.len(), 1);
     }
-
     #[test]
     fn ask_queries_report_as_one_or_zero_solutions() {
         let (mut store, _, g) = fixture(DATA);
         let a = store.named_node("http://ex/a");
         let this = to_term(a, &store);
-
         let yes = parse_query("", "ASK { $this <http://ex/p> ?o }").unwrap();
         assert!(is_ask(&yes));
         assert_eq!(
@@ -950,11 +989,9 @@ mod tests {
                 .len(),
             1
         );
-
         let no = parse_query("", "ASK { $this <http://ex/nope> ?o }").unwrap();
         assert_eq!(run(&no, &[("this", this)], &g, &store).unwrap().len(), 0);
     }
-
     /// The shapes graph is reachable as a named graph, and the data graph is
     /// still the default one — a constraint must not see shapes triples
     /// unless it asks for them by name.
@@ -972,7 +1009,6 @@ mod tests {
         )
         .unwrap();
         let shapes = b.build();
-
         let graph_iri = Term::from(oxrdf::NamedNode::new_unchecked(SHAPES_GRAPH_IRI));
         let q = parse_query(
             "",
@@ -989,7 +1025,6 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["s"].to_string(), "<http://ex/S>");
-
         // The default graph is the data graph, and holds none of that.
         let default_only =
             parse_query("", "SELECT ?s WHERE { ?s <http://ex/property> 42 }").unwrap();
@@ -999,7 +1034,6 @@ mod tests {
                 .is_empty(),
             "shapes triples must not leak into the default graph"
         );
-
         // Without a shapes graph the named graph is simply empty, rather than
         // falling back to the data.
         assert!(
@@ -1008,7 +1042,6 @@ mod tests {
                 .is_empty()
         );
     }
-
     /// `bound($shapesGraph)` and `bound($currentShape)` must both hold, which
     /// is the whole reason pre-binding is substitution rather than a join.
     #[test]
@@ -1026,7 +1059,6 @@ mod tests {
         )
         .unwrap();
         let shapes = b.build();
-
         let q = parse_query(
             "",
             "SELECT $this WHERE {
@@ -1056,7 +1088,6 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 1);
     }
-
     #[test]
     fn builds_prefix_headers_from_sh_declare() {
         let (mut store, vocab, g) = fixture(
@@ -1068,12 +1099,10 @@ mod tests {
         let s = store.named_node("http://ex/S");
         let header = prefix_header(s, &g, &store, &vocab);
         assert_eq!(header, "PREFIX ex: <http://ex/>\n");
-
         // And the header actually makes the prefix usable.
         let q = parse_query(&header, "SELECT ?o WHERE { ex:a ex:p ?o }").unwrap();
         assert_eq!(run(&q, &[], &g, &store).unwrap().len(), 1);
     }
-
     #[test]
     fn computed_terms_survive_the_round_trip() {
         // CONCAT produces a literal that is not in the store; the adapter must

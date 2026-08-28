@@ -51,6 +51,11 @@ ex:carol ex:nickname "Caz" ; ex:alias "Caz" .
 # into a shape's scope without touching anything that shape's own constraints read. Nothing
 # but this filter names `ex:clearance`, so the only route from a write there to
 # `ex:BadgeShape` runs through the target.
+# A compound path reaches a value the focus node does not own. A write to that value
+# faults whoever *owns the path through it*, which is a node the delta never mentions —
+# so attributing a change to the endpoints of the changed quad cannot find it.
+ex:PersonShape sh:property [ sh:path ( ex:knows ex:name ) ; sh:datatype xsd:string ] .
+
 ex:Cleared a sh:NodeShape ;
     sh:class ex:Person ;
     sh:property [ sh:path ex:clearance ; sh:minCount 1 ] .
@@ -330,4 +335,77 @@ fn a_node_newly_selected_by_target_where_is_revalidated() {
            ex:bob ex:clearance "secret" ."#,
         "target-where selection",
     );
+}
+
+/// A violation at a node the change never mentions.
+///
+/// The safety helpers above only require a violation at a focus node the delta *touched*,
+/// which is a real blind spot rather than a simplification: a compound path faults the node
+/// whose path runs through the change, and that node is not an endpoint of any changed quad.
+/// A mutation audit found the shipped evaluator missing exactly this — a full validation
+/// reported two violations and revalidating the same change reported one — so the check here
+/// is against a full run, with no touched-node filter to hide behind.
+#[test]
+fn a_violation_upstream_of_the_change_is_caught() {
+    let mut store = Store::new();
+    load(&mut store, SHAPES_AND_DATA);
+    // Established before the change, not by it: the point is that Alice is faulted by a
+    // write she takes no part in.
+    load(
+        &mut store,
+        "@prefix ex: <http://example.com/> . ex:alice ex:knows ex:bob .",
+    );
+    let options = Options {
+        data_graph: GraphFilter::Default,
+        shapes_graph: GraphFilter::Default,
+    };
+    let shapes = CompiledShapes::compile(&store, options).expect("compile");
+    let before: Vec<_> = shapes
+        .validate(&store)
+        .expect("validate")
+        .results
+        .iter()
+        .map(key)
+        .collect();
+
+    // `ex:alice ex:knows ex:bob` already holds, so giving Bob a non-string name faults
+    // Alice down `( ex:knows ex:name )`. Alice appears in no changed quad.
+    let mut changes = Vec::new();
+    let parser = RdfParser::from_format(RdfFormat::Turtle)
+        .with_base_iri("http://example.com/")
+        .expect("base");
+    for quad in parser.for_reader(
+        b"@prefix ex: <http://example.com/> . ex:bob <http://example.com/name> 7 .".as_ref(),
+    ) {
+        let encoded = store
+            .encode_quad(quad.expect("parse").as_ref())
+            .expect("encode");
+        store.insert_encoded(encoded).expect("insert");
+        changes.push(Change::added(encoded));
+    }
+
+    let after = shapes.validate(&store).expect("validate").results;
+    let incremental: Vec<_> = shapes
+        .revalidate(&store, &changes)
+        .expect("revalidate")
+        .results
+        .iter()
+        .map(key)
+        .collect();
+
+    let introduced: Vec<_> = after
+        .iter()
+        .map(key)
+        .filter(|k| !before.contains(k))
+        .collect();
+    assert!(
+        introduced.len() >= 2,
+        "the change should fault both Bob's own name and Alice's path through it, got          {introduced:?}"
+    );
+    for k in &introduced {
+        assert!(
+            incremental.contains(k),
+            "revalidation missed {k:?}, which a full validation finds after the same change"
+        );
+    }
 }
