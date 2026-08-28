@@ -30,11 +30,22 @@ ex:PersonShape a sh:NodeShape ;
     sh:property [ sh:path ex:age   ; sh:maxCount 1 ; sh:datatype xsd:integer ;
                   sh:minInclusive 0 ; sh:maxInclusive 150 ] ;
     sh:property [ sh:path ex:email ; sh:pattern "^[^@]+@[^@]+$" ] ;
-    sh:property [ sh:path ex:knows ; sh:nodeKind sh:IRI ] .
+    sh:property [ sh:path ex:knows ; sh:nodeKind sh:IRI ] ;
+    # SHACL 1.2 constraints, here because two of them were added without their
+    # dependencies being registered and this test did not notice. It could not: the
+    # property it checks is only checked over the constraints the shapes actually use.
+    sh:property [ sh:path ex:nickname ; sh:subsetOf ex:alias ] ;
+    sh:property [ sh:path ex:tags ; sh:minListLength 1 ; sh:uniqueMembers true ] ;
+    sh:uniqueValuesFor ex:email .
 
 ex:alice a ex:Person ; ex:name "Alice" ; ex:age 30 ; ex:email "alice@example.com" .
 ex:bob   a ex:Person ; ex:name "Bob"   ; ex:age 41 ; ex:email "bob@example.com" .
 ex:carol a ex:Person ; ex:name "Carol" ; ex:age 28 ; ex:email "carol@example.com" .
+
+# `ex:alias` is named by nothing except `sh:subsetOf`, so a write to it can only reach the
+# shape through that constraint's dependency. Removing the alias below leaves the nickname
+# outside the set it must be a subset of.
+ex:carol ex:nickname "Caz" ; ex:alias "Caz" .
 "#;
 
 fn load(store: &mut Store, turtle: &str) {
@@ -54,6 +65,55 @@ fn key(r: &ValidationResult) -> (u64, Option<u64>, Option<u64>, u64, u64) {
         r.source_shape.to_raw(),
         r.component.to_raw(),
     )
+}
+
+/// Applies a *removal* and checks the same safety property.
+///
+/// The inserting harness below cannot reach every case. `sh:subsetOf` is the example:
+/// adding to the superset can never break a subset, so only a removal can turn a valid
+/// graph invalid — and if the constraint's dependency is not registered, the shape is never
+/// revalidated and the violation is missed.
+fn check_removal(turtle_to_remove: &str, label: &str) {
+    let mut store = Store::new();
+    load(&mut store, SHAPES_AND_DATA);
+    let options = Options {
+        data_graph: GraphFilter::Default,
+        shapes_graph: GraphFilter::Default,
+    };
+    let shapes = CompiledShapes::compile(&store, options).expect("compile");
+
+    let mut changes = Vec::new();
+    let parser = RdfParser::from_format(RdfFormat::Turtle)
+        .with_base_iri("http://example.com/")
+        .expect("base");
+    for quad in parser.for_reader(turtle_to_remove.as_bytes()) {
+        let quad = quad.expect("parse");
+        let encoded = store.encode_quad(quad.as_ref()).expect("encode");
+        store.remove_encoded_quad(encoded).expect("remove");
+        changes.push(Change::removed(encoded));
+    }
+
+    let after = shapes.validate(&store).expect("validate after").results;
+    let incremental = shapes
+        .revalidate(&store, &changes)
+        .expect("revalidate")
+        .results;
+    let incremental_keys: Vec<_> = incremental.iter().map(key).collect();
+
+    let touched: Vec<_> = changes
+        .iter()
+        .flat_map(|c| [c.quad.subject, c.quad.object])
+        .collect();
+    for result in &after {
+        if !touched.contains(&result.focus_node) {
+            continue;
+        }
+        assert!(
+            incremental_keys.contains(&key(result)),
+            "{label}: a full validation found a violation at a node the removal touched, \
+             and revalidating the removal alone did not: {result:?}"
+        );
+    }
 }
 
 /// Applies a change and checks the safety property.
@@ -203,4 +263,45 @@ fn reports_are_deterministic() {
     };
     assert_eq!(render(), render(), "two runs must render identically");
     assert!(!render().is_empty());
+}
+
+// ------------------------------------------------- the SHACL 1.2 constraints
+
+#[test]
+fn a_subset_of_violation_survives_a_removal() {
+    // `sh:subsetOf` was compiled without registering its dependency at all, and an inserting
+    // test could not show it: the shape is woken by its own `sh:path ex:nickname` whatever
+    // the constraint declares. It takes a removal from the *other* side to expose it, and
+    // `ex:alias` is named by nothing else in the shapes, so this is the only route to it.
+    check_removal(
+        r#"@prefix ex: <http://example.com/> .
+           ex:carol ex:alias "Caz" ."#,
+        "removing the alias a nickname had to be a subset of",
+    );
+}
+
+#[test]
+fn a_list_constraint_violation_survives_incremental_revalidation() {
+    check_change(
+        r#"@prefix ex: <http://example.com/> .
+           @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+           ex:alice ex:tags ex:taglist .
+           ex:taglist rdf:first "x" ; rdf:rest ex:taglist2 .
+           ex:taglist2 rdf:first "x" ; rdf:rest rdf:nil ."#,
+        "a list whose members repeat",
+    );
+}
+
+#[test]
+fn a_unique_values_for_violation_survives_incremental_revalidation() {
+    // The hard one, and the reason `validate_selected` recovers the whole target set for
+    // shapes carrying this constraint. A global uniqueness property cannot be decided from
+    // a partial working set: the node this change adds collides with `ex:alice`, which the
+    // change never touched and which therefore is not in the working set at all.
+    check_change(
+        r#"@prefix ex: <http://example.com/> .
+           @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+           ex:dave a ex:Person ; ex:name "Dave" ; ex:email "alice@example.com" ."#,
+        "a duplicate email, colliding with a node the change did not touch",
+    );
 }

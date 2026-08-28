@@ -152,6 +152,33 @@ impl<'a> Validator<'a> {
         for (idx, focus) in work {
             self.validate_shape(*idx, *focus, 0, &mut results)?;
         }
+
+        // `sh:uniqueValuesFor` compares focus nodes with each other, so it cannot be decided
+        // from a partial working set: a node added by this change may collide with one the
+        // change never touched. For shapes carrying it, the whole target set is recovered
+        // and the constraint evaluated over all of it.
+        //
+        // That costs the target set for those shapes and nothing for any other, which is the
+        // price of a constraint that is global by nature. Skipping it instead would make
+        // incremental revalidation *unsafe* — it would miss a violation a full run finds,
+        // which is the one thing §8 requires it never to do.
+        let mut done: FxHashSet<usize> = FxHashSet::default();
+        for (idx, _) in work {
+            if !done.insert(idx.0 as usize) {
+                continue;
+            }
+            let shape = self.shapes.shape(*idx);
+            if !shape
+                .constraints
+                .iter()
+                .any(|c| matches!(c, Constraint::UniqueValuesFor(_)))
+            {
+                continue;
+            }
+            let all = self.focus_nodes(*idx)?;
+            self.unique_values_for(*idx, &all, &mut results)?;
+        }
+
         Ok(Report::new(results))
     }
 
