@@ -143,6 +143,7 @@ impl EngineRun {
             &self.bridged.terms,
             &self.bridged.vocab,
             &self.shapes_graph,
+            &self.shapes,
             &self.all_severities(),
         )
     }
@@ -161,6 +162,7 @@ impl EngineRun {
             &self.bridged.terms,
             &self.bridged.vocab,
             &self.shapes_graph,
+            &self.shapes,
             disallowed,
             true,
         )

@@ -24,6 +24,30 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### All four SHACL suites are complete
+
+| Suite | Was | Now |
+|---|---:|---:|
+| SHACL 1.2 Core, native | 103/138 | **138/138** |
+| SHACL 1.2 Core, adapted engine | 127/138 | **138/138** |
+| SHACL 1.0 Core, native | 92/97 (+1 skipped) | **98/98** |
+| SHACL 1.0 Core, adapted engine | 90/98 | **98/98** |
+
+### `sh:resultPath` describes the path that was walked
+
+The last two failures were the `path-strange` pair, where one node is both an `rdf:first` /
+`rdf:rest` sequence and an `sh:inversePath`. SHACL's grammar admits one reading per node, so
+such a shapes graph is ill-formed and a processor has to choose — and then say which it
+chose. Two changes:
+
+- A blank node bearing `rdf:first` is read as a sequence, checked before the keyed forms.
+  Being a list is a property of the node's *structure* rather than a keyword written on it,
+  so it is the stronger signal, and it is the reading the suite settled on.
+- `sh:resultPath` is now **rendered from the compiled path** rather than copied out of the
+  shapes graph. Copying carries whatever else the node happened to say, so a report could
+  describe a path that was never walked. For every well-formed path the two are identical —
+  which is why no other path test moved.
+
 ### The adapted engine reaches 138/138 too
 
 HOLOS runs two validators — the native evaluator on the write path, because it revalidates

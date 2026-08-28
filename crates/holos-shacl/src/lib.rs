@@ -317,6 +317,7 @@ impl CompiledShapes {
         report::to_quads(
             report,
             GraphView::new(store, self.options.shapes_graph),
+            &self.shapes,
             &self.sh,
         )
     }

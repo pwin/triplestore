@@ -1,3 +1,2 @@
 # shacl-core — tests known to fail. Regenerate with HOLOS_UPDATE_CONFORMANCE=1.
-# 96/97 passed, 1 failed, 1 skipped
-path/path-strange-001	14 expected vs 15 actual triples; missing ["_:c14n1 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/shacl#ValidationResult>", "_:c14n1 <http://www.w3.org/ns/shacl#focusNode> <http://example.org/test#j>", "_:c14n1 <http://www.w3.org/ns/shacl#resultPath> _:c14n3"]; unexpected ["_:c14n1 <http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/test#p>", "_:c14n1 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> _:c14n0", "_:c14n1 <http://www.w3.org/ns/shacl#inversePath> <http://example.org/test#p>"]
+# 98/98 passed, 0 failed, 0 skipped

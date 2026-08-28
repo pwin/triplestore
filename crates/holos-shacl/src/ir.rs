@@ -1221,6 +1221,24 @@ impl<'a> Compiler<'a> {
             return Ok(self.push_path(Path::Predicate(node)));
         }
 
+        // A blank node bearing `rdf:first` is a sequence path, and this is checked before
+        // the keyed forms rather than after.
+        //
+        // It only matters for a node that says two things at once — `[ rdf:first ex:p ;
+        // rdf:rest ( ex:q ) ; sh:inversePath ex:p ]` is both a list and an inverse, and
+        // SHACL's grammar admits exactly one reading per node, so such a shapes graph is
+        // ill-formed and a processor has to pick. Being a list is a property of the node's
+        // *structure*, not a SHACL keyword written on it, so it is the stronger signal; and
+        // it is the reading the test suite settled on for this case.
+        if g.object(node, sh.rdf_first)?.is_some() {
+            let members = self.list(node)?;
+            let mut compiled = Vec::with_capacity(members.len());
+            for m in members {
+                compiled.push(self.compile_path(m, depth + 1)?);
+            }
+            return Ok(self.push_path(Path::Sequence(compiled)));
+        }
+
         for (parameter, make) in [
             (sh.inverse_path, 0u8),
             (sh.zero_or_more_path, 1),
@@ -1244,15 +1262,6 @@ impl<'a> Compiler<'a> {
                 compiled.push(self.compile_path(m, depth + 1)?);
             }
             return Ok(self.push_path(Path::Alternative(compiled)));
-        }
-        // Anything else that is a blank node with rdf:first is a sequence path.
-        if g.object(node, sh.rdf_first)?.is_some() {
-            let members = self.list(node)?;
-            let mut compiled = Vec::with_capacity(members.len());
-            for m in members {
-                compiled.push(self.compile_path(m, depth + 1)?);
-            }
-            return Ok(self.push_path(Path::Sequence(compiled)));
         }
         Err(ShaclError::IllFormedShape(
             "sh:path is a blank node with no recognised path expression".to_owned(),

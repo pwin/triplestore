@@ -94,9 +94,10 @@ impl ValidationReport {
         store: &TermStore,
         vocab: &Vocab,
         shapes: &Graph,
+        compiled: &crate::shapes::Shapes,
         disallowed: &[TermId],
     ) -> OxGraph {
-        self.to_oxrdf_declaring(store, vocab, shapes, disallowed, false)
+        self.to_oxrdf_declaring(store, vocab, shapes, compiled, disallowed, false)
     }
 
     /// As [`Self::to_oxrdf`], writing `sh:conformanceDisallows` when `declare` is set.
@@ -110,6 +111,7 @@ impl ValidationReport {
         store: &TermStore,
         vocab: &Vocab,
         shapes: &Graph,
+        compiled: &crate::shapes::Shapes,
         disallowed: &[TermId],
         declare: bool,
     ) -> OxGraph {
@@ -148,6 +150,7 @@ impl ValidationReport {
                 store,
                 vocab,
                 shapes,
+                compiled,
                 &mut g,
                 &mut next_bnode,
             );
@@ -169,6 +172,7 @@ impl ValidationReport {
         store: &TermStore,
         vocab: &Vocab,
         shapes: &Graph,
+        compiled: &crate::shapes::Shapes,
         g: &mut OxGraph,
         next: &mut u64,
     ) -> NamedOrBlankNode {
@@ -229,8 +233,23 @@ impl ValidationReport {
             // graph is not isomorphic to the one the suite expects, and a complex-path test
             // then fails on report structure rather than on the violation it found.
             let tag = blank_tag(&node);
-            let mut next = 0u64;
-            let root = copy_occurrence(p, shapes, store, g, &tag, &mut next, 0);
+            let mut n = 0u64;
+            // Rendered from the *compiled* path where there is one, so `sh:resultPath`
+            // describes the path that was walked. The two differ only for a node that says
+            // more than one thing — `[ rdf:first ex:p ; rdf:rest ( ex:q ) ; sh:inversePath
+            // ex:p ]` is both a sequence and an inverse — where copying would put the
+            // rejected reading in the report as well.
+            //
+            // The fallback copies: `sh:closed` reports the offending predicate, and its
+            // shape has no compiled path to render.
+            let root = match result
+                .source_shape
+                .and_then(|id| compiled.id_of(id))
+                .and_then(|id| compiled.get(id).path.as_ref())
+            {
+                Some(path) => render_path(path, store, vocab, &tag, &mut n, g),
+                None => copy_occurrence(p, shapes, store, g, &tag, &mut n, 0),
+            };
             g.insert(&Triple::new(node.clone(), iri(vocab.sh_resultPath), root));
         }
         for &m in &result.messages {
@@ -248,6 +267,7 @@ impl ValidationReport {
                 store,
                 vocab,
                 shapes,
+                compiled,
                 g,
                 next,
             );
@@ -270,9 +290,13 @@ impl ValidationReport {
         store: &TermStore,
         vocab: &Vocab,
         shapes: &Graph,
+        compiled: &crate::shapes::Shapes,
         disallowed: &[TermId],
     ) -> crate::Result<String> {
-        serialize_graph(&self.to_oxrdf(store, vocab, shapes, disallowed), format)
+        serialize_graph(
+            &self.to_oxrdf(store, vocab, shapes, compiled, disallowed),
+            format,
+        )
     }
 }
 
@@ -422,6 +446,105 @@ fn scoped(term: Term, tag: &str) -> Term {
     }
 }
 
+/// Renders a compiled path into the report as SHACL's RDF form.
+///
+/// Blank nodes are numbered per *occurrence* within the result, so a path that mentions the
+/// same sub-expression twice arrives as two occurrences — which is what the expression says.
+fn render_path(
+    path: &crate::path::Path,
+    store: &TermStore,
+    vocab: &Vocab,
+    tag: &str,
+    next: &mut u64,
+    g: &mut OxGraph,
+) -> Term {
+    use crate::path::Path;
+    let iri =
+        |t: TermId| -> NamedNode { NamedNode::new_unchecked(store.iri(t).unwrap_or_default()) };
+    let fresh = |next: &mut u64| {
+        let b = oxrdf::BlankNode::new_unchecked(format!("{tag}_p{}", *next));
+        *next += 1;
+        b
+    };
+    match path {
+        Path::Predicate(p) => Term::NamedNode(iri(*p)),
+        Path::Inverse(inner) => {
+            let object = render_path(inner, store, vocab, tag, next, g);
+            let here = fresh(next);
+            g.insert(&Triple::new(
+                here.clone(),
+                iri(vocab.sh_inversePath),
+                object,
+            ));
+            here.into()
+        }
+        Path::ZeroOrMore(inner) => {
+            let object = render_path(inner, store, vocab, tag, next, g);
+            let here = fresh(next);
+            g.insert(&Triple::new(
+                here.clone(),
+                iri(vocab.sh_zeroOrMorePath),
+                object,
+            ));
+            here.into()
+        }
+        Path::OneOrMore(inner) => {
+            let object = render_path(inner, store, vocab, tag, next, g);
+            let here = fresh(next);
+            g.insert(&Triple::new(
+                here.clone(),
+                iri(vocab.sh_oneOrMorePath),
+                object,
+            ));
+            here.into()
+        }
+        Path::ZeroOrOne(inner) => {
+            let object = render_path(inner, store, vocab, tag, next, g);
+            let here = fresh(next);
+            g.insert(&Triple::new(
+                here.clone(),
+                iri(vocab.sh_zeroOrOnePath),
+                object,
+            ));
+            here.into()
+        }
+        Path::Sequence(parts) => render_list(parts, store, vocab, tag, next, g),
+        Path::Alternative(parts) => {
+            let object = render_list(parts, store, vocab, tag, next, g);
+            let here = fresh(next);
+            g.insert(&Triple::new(
+                here.clone(),
+                iri(vocab.sh_alternativePath),
+                object,
+            ));
+            here.into()
+        }
+    }
+}
+
+/// Renders a list of paths as an RDF list, built back to front.
+fn render_list(
+    parts: &[crate::path::Path],
+    store: &TermStore,
+    vocab: &Vocab,
+    tag: &str,
+    next: &mut u64,
+    g: &mut OxGraph,
+) -> Term {
+    let iri =
+        |t: TermId| -> NamedNode { NamedNode::new_unchecked(store.iri(t).unwrap_or_default()) };
+    let mut tail = Term::NamedNode(iri(vocab.rdf_nil));
+    for part in parts.iter().rev() {
+        let value = render_path(part, store, vocab, tag, next, g);
+        let cell = oxrdf::BlankNode::new_unchecked(format!("{tag}_p{}", *next));
+        *next += 1;
+        g.insert(&Triple::new(cell.clone(), iri(vocab.rdf_first), value));
+        g.insert(&Triple::new(cell.clone(), iri(vocab.rdf_rest), tail));
+        tail = cell.into();
+    }
+    tail
+}
+
 /// Copies one *occurrence* of a path node into the report, and everything below it.
 ///
 /// Deliberately a tree copy. The source is a path *expression*, and an expression that
@@ -464,7 +587,7 @@ mod tests {
     use oxrdf::dataset::CanonicalizationAlgorithm;
     use oxrdfio::RdfFormat;
 
-    fn fixture(turtle: &str) -> (TermStore, Vocab, Graph) {
+    fn fixture(turtle: &str) -> (TermStore, Vocab, Graph, crate::shapes::Shapes) {
         let mut store = TermStore::new();
         let vocab = Vocab::new(&mut store);
         let mut b = GraphBuilder::new();
@@ -477,7 +600,9 @@ mod tests {
             &mut b,
         )
         .unwrap();
-        (store, vocab, b.build())
+        let graph = b.build();
+        let shapes = crate::shapes::Shapes::compile(&graph, &store, &vocab).unwrap();
+        (store, vocab, graph, shapes)
     }
 
     fn canonical(mut g: OxGraph) -> String {
@@ -489,7 +614,7 @@ mod tests {
 
     #[test]
     fn conformance_depends_on_the_disallowed_severities() {
-        let (mut store, vocab, _) = fixture("");
+        let (mut store, vocab, _, _) = fixture("");
         let focus = store.named_node("http://ex/a");
         let report = ValidationReport {
             results: vec![ValidationResult::new(
@@ -508,9 +633,14 @@ mod tests {
 
     #[test]
     fn empty_report_serialises_as_conforming() {
-        let (store, vocab, shapes) = fixture("");
-        let g =
-            ValidationReport::default().to_oxrdf(&store, &vocab, &shapes, &[vocab.sh_Violation]);
+        let (store, vocab, shapes, compiled) = fixture("");
+        let g = ValidationReport::default().to_oxrdf(
+            &store,
+            &vocab,
+            &shapes,
+            &compiled,
+            &[vocab.sh_Violation],
+        );
         let text = canonical(g);
         assert!(text.contains("#ValidationReport"));
         assert!(text.contains(r#""true"^^<http://www.w3.org/2001/XMLSchema#boolean>"#));
@@ -519,7 +649,7 @@ mod tests {
 
     #[test]
     fn serialises_a_result_with_all_its_fields() {
-        let (mut store, vocab, shapes) = fixture("");
+        let (mut store, vocab, shapes, compiled) = fixture("");
         let focus = store.named_node("http://ex/bob");
         let value = store.literal("x", "http://www.w3.org/2001/XMLSchema#string", None);
         let shape = store.named_node("http://ex/S");
@@ -537,7 +667,8 @@ mod tests {
                 .with_source_shape(shape),
             ],
         };
-        let text = canonical(report.to_oxrdf(&store, &vocab, &shapes, &[vocab.sh_Violation]));
+        let text =
+            canonical(report.to_oxrdf(&store, &vocab, &shapes, &compiled, &[vocab.sh_Violation]));
 
         assert!(text.contains(r#""false"^^<http://www.w3.org/2001/XMLSchema#boolean>"#));
         assert!(text.contains("<http://ex/bob>"));
@@ -550,7 +681,7 @@ mod tests {
     fn complex_result_paths_carry_their_triples_along() {
         // The report must be self-contained: an inverse path is a blank node in
         // the shapes graph, useless in a report without its structure.
-        let (mut store, vocab, shapes) = fixture(
+        let (mut store, vocab, shapes, compiled) = fixture(
             "@prefix sh: <http://www.w3.org/ns/shacl#> . @prefix ex: <http://ex/> .
              ex:S sh:path [ sh:inversePath ex:parent ] .",
         );
@@ -568,7 +699,8 @@ mod tests {
                 .with_path(Some(path)),
             ],
         };
-        let text = canonical(report.to_oxrdf(&store, &vocab, &shapes, &[vocab.sh_Violation]));
+        let text =
+            canonical(report.to_oxrdf(&store, &vocab, &shapes, &compiled, &[vocab.sh_Violation]));
 
         assert!(
             text.contains("#inversePath"),
@@ -579,7 +711,7 @@ mod tests {
 
     #[test]
     fn serialises_a_report_that_parses_back_as_shacl() {
-        let (mut store, vocab, shapes) = fixture("");
+        let (mut store, vocab, shapes, compiled) = fixture("");
         let focus = store.named_node("http://ex/bob");
         let value = store.literal("old", "http://www.w3.org/2001/XMLSchema#string", None);
         let report = ValidationReport {
@@ -599,6 +731,7 @@ mod tests {
                 &store,
                 &vocab,
                 &shapes,
+                &compiled,
                 &[vocab.sh_Violation],
             )
             .expect("serialises");
@@ -643,13 +776,14 @@ mod tests {
 
     #[test]
     fn an_empty_report_still_serialises_as_a_report() {
-        let (store, vocab, shapes) = fixture("");
+        let (store, vocab, shapes, compiled) = fixture("");
         let turtle = ValidationReport::default()
             .serialize(
                 oxrdfio::RdfFormat::Turtle,
                 &store,
                 &vocab,
                 &shapes,
+                &compiled,
                 &[vocab.sh_Violation],
             )
             .unwrap();
@@ -659,7 +793,7 @@ mod tests {
 
     #[test]
     fn nested_details_are_serialised() {
-        let (mut store, vocab, shapes) = fixture("");
+        let (mut store, vocab, shapes, compiled) = fixture("");
         let focus = store.named_node("http://ex/a");
         let inner = ValidationResult::new(
             focus,
@@ -673,7 +807,8 @@ mod tests {
         let report = ValidationReport {
             results: vec![outer],
         };
-        let text = canonical(report.to_oxrdf(&store, &vocab, &shapes, &[vocab.sh_Violation]));
+        let text =
+            canonical(report.to_oxrdf(&store, &vocab, &shapes, &compiled, &[vocab.sh_Violation]));
         assert!(text.contains("#NodeConstraintComponent"));
         assert!(text.contains("#DatatypeConstraintComponent"));
     }
@@ -685,7 +820,7 @@ mod tests {
     /// the thing that was wrong, so it has to be asserted directly.
     #[test]
     fn a_nested_result_is_linked_by_sh_detail() {
-        let (mut store, vocab, shapes) = fixture("");
+        let (mut store, vocab, shapes, compiled) = fixture("");
         let focus = store.named_node("http://ex/a");
         let inner = ValidationResult::new(
             focus,
@@ -699,7 +834,7 @@ mod tests {
             results: vec![outer],
         };
 
-        let g = report.to_oxrdf(&store, &vocab, &shapes, &[vocab.sh_Violation]);
+        let g = report.to_oxrdf(&store, &vocab, &shapes, &compiled, &[vocab.sh_Violation]);
         let p = |t: TermId| NamedNode::new_unchecked(store.iri(t).unwrap_or_default());
 
         // Exactly one sh:result — from the report to the outer result — and
@@ -725,7 +860,7 @@ mod tests {
     /// nothing and was silently lost.
     #[test]
     fn nested_details_survive_a_round_trip() {
-        let (mut store, vocab, shapes) = fixture("");
+        let (mut store, vocab, shapes, compiled) = fixture("");
         let focus = store.named_node("http://ex/a");
         let inner = ValidationResult::new(
             focus,
@@ -745,6 +880,7 @@ mod tests {
                 &store,
                 &vocab,
                 &shapes,
+                &compiled,
                 &[vocab.sh_Violation],
             )
             .expect("the report should serialise");

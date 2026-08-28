@@ -9,6 +9,7 @@
 //! that order. Same store, same shapes, same bytes.
 
 use crate::access::GraphView;
+use crate::ir::{Path, PathIdx, Shapes};
 use crate::vocab::Sh;
 use crate::{Report, ShaclError, ValidationResult};
 use holos_core::TermId;
@@ -18,6 +19,7 @@ use oxrdf::{BlankNode, GraphName, Literal, NamedNode, Quad, Term};
 pub fn to_quads(
     report: &Report,
     shapes_graph: GraphView<'_>,
+    shapes: &Shapes,
     sh: &Sh,
 ) -> Result<Vec<Quad>, ShaclError> {
     let mut out = Vec::new();
@@ -88,6 +90,7 @@ pub fn to_quads(
             sh.result,
             &format!("result{i}"),
             shapes_graph,
+            shapes,
             sh,
             &mut out,
         )?;
@@ -111,6 +114,7 @@ fn write_result(
     link: TermId,
     label: &str,
     shapes_graph: GraphView<'_>,
+    shapes: &Shapes,
     sh: &Sh,
     out: &mut Vec<Quad>,
 ) -> Result<(), ShaclError> {
@@ -174,15 +178,35 @@ fn write_result(
         }
     }
     if let Some(path) = result.path {
-        if let Some(term) = shapes_graph.term(path)? {
-            // A compound path is a blank-node structure in the shapes graph. It is copied
-            // into the report — naming it without its triples would leave the reader unable
-            // to resolve it — and copied *per result*, under labels unique to this result.
-            // Sharing one copy between two results makes a graph that is not isomorphic to
-            // the one SHACL specifies, because the two results would then share a node
-            // rather than each having their own.
-            let renamed = copy_path(shapes_graph, path, &term, label, out)?;
-            triple(node.clone().into(), iri(sh.result_path)?, renamed, out);
+        // The path is *rendered from what was compiled*, not copied from the shapes graph.
+        //
+        // Those differ when a path node carries triples that are not part of the path it was
+        // read as — `[ rdf:first ex:p ; rdf:rest ( ex:q ) ; sh:inversePath ex:p ]` is both a
+        // sequence and an inverse, and the compiler picks one. Copying the node would put
+        // the rejected reading in the report too, describing a path that was never walked.
+        //
+        // Rendered per result, under blank-node labels unique to this one. Sharing a copy
+        // between two results makes them share a node, and the graph is then not isomorphic
+        // to the one SHACL specifies.
+        let compiled = shapes
+            .by_node(result.source_shape)
+            .and_then(|idx| shapes.shape(idx).path);
+        let rendered = match compiled {
+            Some(compiled) => Some(render_path(
+                shapes,
+                compiled,
+                shapes_graph,
+                sh,
+                label,
+                &mut 0,
+                out,
+            )?),
+            // No compiled path: `sh:closed` reports the offending predicate, which is an
+            // IRI and stands for itself.
+            None => shapes_graph.term(path)?,
+        };
+        if let Some(rendered) = rendered {
+            triple(node.clone().into(), iri(sh.result_path)?, rendered, out);
         }
     }
     for message in &result.messages {
@@ -200,6 +224,7 @@ fn write_result(
             sh.detail,
             &format!("{label}d{j}"),
             shapes_graph,
+            shapes,
             sh,
             out,
         )?;
@@ -212,67 +237,130 @@ fn sort_key(r: &ValidationResult) -> (TermId, Option<TermId>, Option<TermId>, Te
     (r.focus_node, r.path, r.value, r.source_shape, r.component)
 }
 
-/// Copies everything reachable from a blank node into the report, under labels unique to
-/// one result.
-fn copy_path(
-    graph: GraphView<'_>,
-    root: TermId,
-    root_term: &Term,
-    label: &str,
-    out: &mut Vec<Quad>,
-) -> Result<Term, ShaclError> {
-    if holos_core::Tag::BlankNode != root.tag() {
-        return Ok(root_term.clone());
-    }
-    let mut next = 0u64;
-    copy_occurrence(graph, root, label, &mut next, 0, out)
-}
-
-/// Copies one *occurrence* of a path node, and everything below it.
+/// Renders a compiled path into the report as SHACL's RDF form.
 ///
-/// Deliberately a tree rather than a graph copy. A shapes graph may reach the same blank
-/// node twice — `sh:path ( _:p _:p )` with `_:p sh:inversePath ex:p` is legal and says
-/// "inverse p, then inverse p" — and the report is expected to carry the path *expression*,
-/// in which those are two occurrences. Copying node-by-node instead of occurrence-by-
-/// occurrence writes the shared node once, and the result is a graph the reader cannot read
-/// back as the path it came from.
+/// Rendering rather than copying is what makes `sh:resultPath` describe the path that was
+/// actually walked. The two coincide for every well-formed path — the render of a compiled
+/// sequence is the same list the shapes graph held — and diverge exactly where a path node
+/// says more than one thing, which is where copying is wrong.
 ///
-/// `depth` is a cycle guard. A well-formed path expression is finite and acyclic, but a
-/// shapes graph is data and can say otherwise; a copier that trusted it would not return.
-fn copy_occurrence(
-    graph: GraphView<'_>,
-    node: TermId,
+/// `next` numbers this result's blank nodes, so each occurrence gets its own. A path that
+/// mentions the same sub-expression twice has two occurrences of it, and writing one shared
+/// node would leave the reader unable to recover the expression.
+fn render_path(
+    shapes: &Shapes,
+    path: PathIdx,
+    shapes_graph: GraphView<'_>,
+    sh: &Sh,
     label: &str,
     next: &mut u64,
-    depth: u32,
     out: &mut Vec<Quad>,
 ) -> Result<Term, ShaclError> {
-    const MAX_DEPTH: u32 = 64;
-    let Some(term) = graph.term(node)? else {
-        return Ok(Term::BlankNode(BlankNode::new_unchecked(format!(
-            "p{label}_missing"
-        ))));
+    let iri = |id: TermId| -> Result<NamedNode, ShaclError> {
+        match shapes_graph.term(id)? {
+            Some(Term::NamedNode(n)) => Ok(n),
+            _ => Err(ShaclError::IllFormedShape(format!(
+                "{id:?} should be an IRI"
+            ))),
+        }
     };
-    if holos_core::Tag::BlankNode != node.tag() || depth >= MAX_DEPTH {
-        return Ok(term);
-    }
-
-    let here = BlankNode::new_unchecked(format!("p{label}_{}", *next));
-    *next += 1;
-
-    for quad in graph
-        .store()
-        .quads_for_pattern(Some(node), None, None, graph.graph())
-    {
-        let quad = quad?;
-        let decoded = graph.store().decode_quad(quad)?;
-        let object = copy_occurrence(graph, quad.object, label, next, depth + 1, out)?;
+    let fresh = |next: &mut u64| {
+        let b = BlankNode::new_unchecked(format!("p{label}_{}", *next));
+        *next += 1;
+        b
+    };
+    // One blank node carrying one predicate: `[ sh:inversePath <inner> ]` and its siblings.
+    let wrap = |predicate: TermId,
+                inner: PathIdx,
+                next: &mut u64,
+                out: &mut Vec<Quad>|
+     -> Result<Term, ShaclError> {
+        let object = render_path(shapes, inner, shapes_graph, sh, label, next, out)?;
+        let here = BlankNode::new_unchecked(format!("p{label}_{}", *next));
+        *next += 1;
         out.push(Quad {
             subject: here.clone().into(),
-            predicate: decoded.predicate,
+            predicate: iri(predicate)?,
             object,
             graph_name: GraphName::DefaultGraph,
         });
+        Ok(here.into())
+    };
+
+    Ok(match shapes.path(path) {
+        Path::Predicate(p) => Term::NamedNode(iri(*p)?),
+        Path::Inverse(inner) => wrap(sh.inverse_path, *inner, next, out)?,
+        Path::ZeroOrMore(inner) => wrap(sh.zero_or_more_path, *inner, next, out)?,
+        Path::OneOrMore(inner) => wrap(sh.one_or_more_path, *inner, next, out)?,
+        Path::ZeroOrOne(inner) => wrap(sh.zero_or_one_path, *inner, next, out)?,
+        Path::Sequence(parts) => render_list(parts, shapes, shapes_graph, sh, label, next, out)?,
+        Path::Alternative(parts) => {
+            let object = render_list(parts, shapes, shapes_graph, sh, label, next, out)?;
+            let here = fresh(next);
+            out.push(Quad {
+                subject: here.clone().into(),
+                predicate: iri(sh.alternative_path)?,
+                object,
+                graph_name: GraphName::DefaultGraph,
+            });
+            here.into()
+        }
+    })
+}
+
+/// Renders a list of paths as an RDF list.
+fn render_list(
+    parts: &[PathIdx],
+    shapes: &Shapes,
+    shapes_graph: GraphView<'_>,
+    sh: &Sh,
+    label: &str,
+    next: &mut u64,
+    out: &mut Vec<Quad>,
+) -> Result<Term, ShaclError> {
+    let nil = match shapes_graph.term(sh.rdf_nil)? {
+        Some(Term::NamedNode(n)) => n,
+        _ => {
+            return Err(ShaclError::IllFormedShape(
+                "rdf:nil should be an IRI".into(),
+            ))
+        }
+    };
+    let first = match shapes_graph.term(sh.rdf_first)? {
+        Some(Term::NamedNode(n)) => n,
+        _ => {
+            return Err(ShaclError::IllFormedShape(
+                "rdf:first should be an IRI".into(),
+            ))
+        }
+    };
+    let rest = match shapes_graph.term(sh.rdf_rest)? {
+        Some(Term::NamedNode(n)) => n,
+        _ => {
+            return Err(ShaclError::IllFormedShape(
+                "rdf:rest should be an IRI".into(),
+            ))
+        }
+    };
+    // Built back to front, so each cell knows the tail it points at.
+    let mut tail = Term::NamedNode(nil);
+    for part in parts.iter().rev() {
+        let value = render_path(shapes, *part, shapes_graph, sh, label, next, out)?;
+        let cell = BlankNode::new_unchecked(format!("p{label}_{}", *next));
+        *next += 1;
+        out.push(Quad {
+            subject: cell.clone().into(),
+            predicate: first.clone(),
+            object: value,
+            graph_name: GraphName::DefaultGraph,
+        });
+        out.push(Quad {
+            subject: cell.clone().into(),
+            predicate: rest.clone(),
+            object: tail,
+            graph_name: GraphName::DefaultGraph,
+        });
+        tail = cell.into();
     }
-    Ok(here.into())
+    Ok(tail)
 }
