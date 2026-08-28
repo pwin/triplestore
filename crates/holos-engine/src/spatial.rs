@@ -117,29 +117,6 @@ struct Inner {
 /// construction and none of the parsing.
 const REPACK_AFTER: usize = 10_000;
 
-/// A cheap description of a store's contents, for staleness detection.
-///
-/// Not a hash of the data — that would cost a full scan to check, which is the thing being
-/// avoided. Quad count and dictionary size together move on any insert or delete of anything
-/// new, which covers every way a geometry can enter or leave. A delete-then-insert that
-/// restored both counts *and* changed a geometry would defeat it; that is why the server
-/// rebuilds after every write rather than relying on this, and why this is the second line of
-/// defence rather than the first.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct StoreShape {
-    quads: usize,
-    terms: usize,
-}
-
-impl StoreShape {
-    fn of(store: &Store) -> Self {
-        Self {
-            quads: store.len(),
-            terms: store.dictionary_len(),
-        }
-    }
-}
-
 impl SpatialIndex {
     /// Builds the index by scanning the store for geometry literals.
     ///
@@ -433,11 +410,11 @@ pub struct PurgeReport {
 /// One probe of the object-first index rather than a scan — which is what makes a purge
 /// proportional to what is indexed rather than to the store.
 fn referenced(store: &Store, term: TermId) -> Result<bool, holos_store::StorageError> {
-    for quad in store.quads_for_pattern(None, None, Some(term), holos_store::GraphFilter::Any) {
-        quad?;
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(store
+        .quads_for_pattern(None, None, Some(term), holos_store::GraphFilter::Any)
+        .next()
+        .transpose()?
+        .is_some())
 }
 
 /// The index entry for a geometry, if it has a bounding box.

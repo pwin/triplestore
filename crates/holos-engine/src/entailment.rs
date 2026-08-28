@@ -165,9 +165,9 @@ pub fn materialise(
     close_transitively(&mut super_classes);
 
     let mut fresh: Vec<(TermId, TermId, TermId)> = Vec::new();
-    let mut push = |triple: (TermId, TermId, TermId),
-                    known: &mut FxHashSet<(TermId, TermId, TermId)>,
-                    fresh: &mut Vec<(TermId, TermId, TermId)>| {
+    let push = |triple: (TermId, TermId, TermId),
+                known: &mut FxHashSet<(TermId, TermId, TermId)>,
+                fresh: &mut Vec<(TermId, TermId, TermId)>| {
         if known.insert(triple) {
             fresh.push(triple);
         }
