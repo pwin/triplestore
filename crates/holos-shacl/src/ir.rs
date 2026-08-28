@@ -77,8 +77,13 @@ pub struct NodeKindSpec {
 pub enum Constraint {
     /// `sh:class`
     Class(TermId),
-    /// `sh:datatype`
-    Datatype(TermId),
+    /// `sh:datatype` — one datatype, or a list of them.
+    ///
+    /// SHACL 1.2 allows `sh:datatype ( xsd:string rdf:langString )`, satisfied by any of
+    /// them. Read as a single IRI the list's blank node matches nothing, so every value
+    /// violates — which is how this surfaced: thirty triples reported where nine were
+    /// expected.
+    Datatype(Vec<TermId>),
     /// `sh:nodeKind`
     NodeKind(NodeKindSpec),
     /// `sh:minCount`
@@ -653,7 +658,14 @@ impl<'a> Compiler<'a> {
             out.push(Constraint::Class(c));
         }
         for d in g.objects(node, sh.datatype)? {
-            out.push(Constraint::Datatype(d));
+            let datatypes = if g.object(d, sh.rdf_first)?.is_some() {
+                self.list(d)?
+            } else {
+                vec![d]
+            };
+            if !datatypes.is_empty() {
+                out.push(Constraint::Datatype(datatypes));
+            }
         }
         for k in g.objects(node, sh.node_kind)? {
             // SHACL 1.2 allows a *list* of kinds — `sh:nodeKind ( sh:BlankNode sh:IRI )` —

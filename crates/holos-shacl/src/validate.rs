@@ -272,13 +272,14 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
-            Constraint::Datatype(datatype) => {
+            Constraint::Datatype(datatypes) => {
                 for &v in values {
                     // The datatype has to match *and* the lexical form has to be valid for
                     // it. `"aldi"^^xsd:integer` is a perfectly well-formed RDF term and
                     // not an integer; SHACL calls that a violation, so a datatype IRI
                     // comparison alone is not enough.
-                    if self.datatype_of(v)? != Some(*datatype) || !self.well_formed(v)? {
+                    let matches = self.datatype_of(v)?.is_some_and(|d| datatypes.contains(&d));
+                    if !matches || !self.well_formed(v)? {
                         violate_value(v, results);
                     }
                 }
@@ -793,9 +794,19 @@ impl<'a> Validator<'a> {
         Ok(Some(members))
     }
 
+    /// A literal's language, *including its base direction*.
+    ///
+    /// `sh:uniqueLang` asks whether two values share a language, and RDF 1.2's
+    /// `rdf:dirLangString` makes that a question with a third component. The suite settles
+    /// it: `"A"@ar`, `"A"@ar--ltr` and `"A"@ar--rtl` are valid together, so the direction is
+    /// part of the identity. Returning the bare language tag reports them as three
+    /// duplicates of one — sixteen triples where nine were expected.
     fn language_of(&self, id: TermId) -> Result<Option<String>, ShaclError> {
         Ok(match self.data.term(id)? {
-            Some(Term::Literal(l)) => l.language().map(str::to_owned),
+            Some(Term::Literal(l)) => l.language().map(|lang| match l.direction() {
+                Some(direction) => format!("{lang}--{direction}"),
+                None => lang.to_owned(),
+            }),
             _ => None,
         })
     }
