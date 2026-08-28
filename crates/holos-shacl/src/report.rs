@@ -13,7 +13,6 @@ use crate::vocab::Sh;
 use crate::{Report, ShaclError, ValidationResult};
 use holos_core::TermId;
 use oxrdf::{BlankNode, GraphName, Literal, NamedNode, Quad, Term};
-use rustc_hash::FxHashSet;
 
 /// Renders a report as RDF quads in the default graph.
 pub fn to_quads(
@@ -164,9 +163,8 @@ fn write_result(
             // Sharing one copy between two results makes a graph that is not isomorphic to
             // the one SHACL specifies, because the two results would then share a node
             // rather than each having their own.
-            let renamed = rename(&term, label);
+            let renamed = copy_path(shapes_graph, path, &term, label, out)?;
             triple(node.clone().into(), iri(sh.result_path)?, renamed, out);
-            copy_subgraph(shapes_graph, path, label, out)?;
         }
     }
     for message in &result.messages {
@@ -196,52 +194,67 @@ fn sort_key(r: &ValidationResult) -> (TermId, Option<TermId>, Option<TermId>, Te
     (r.focus_node, r.path, r.value, r.source_shape, r.component)
 }
 
-/// Relabels a blank node so one result's copy of a path cannot collide with another's.
-fn rename(term: &Term, label: &str) -> Term {
-    match term {
-        Term::BlankNode(b) => BlankNode::new_unchecked(format!("p{label}_{}", b.as_str())).into(),
-        other => other.clone(),
-    }
-}
-
 /// Copies everything reachable from a blank node into the report, under labels unique to
 /// one result.
-fn copy_subgraph(
+fn copy_path(
     graph: GraphView<'_>,
     root: TermId,
+    root_term: &Term,
     label: &str,
     out: &mut Vec<Quad>,
-) -> Result<(), ShaclError> {
+) -> Result<Term, ShaclError> {
     if holos_core::Tag::BlankNode != root.tag() {
-        return Ok(());
+        return Ok(root_term.clone());
     }
-    let mut seen: FxHashSet<TermId> = FxHashSet::default();
-    let mut frontier = vec![root];
-    while let Some(node) = frontier.pop() {
-        if !seen.insert(node) {
-            continue;
-        }
-        for quad in graph
-            .store()
-            .quads_for_pattern(Some(node), None, None, graph.graph())
-        {
-            let quad = quad?;
-            let decoded = graph.store().decode_quad(quad)?;
-            let subject = match rename(&Term::from(decoded.subject.clone()), label) {
-                Term::NamedNode(n) => n.into(),
-                Term::BlankNode(b) => b.into(),
-                _ => continue,
-            };
-            out.push(Quad {
-                subject,
-                predicate: decoded.predicate,
-                object: rename(&decoded.object, label),
-                graph_name: GraphName::DefaultGraph,
-            });
-            if quad.object.tag() == holos_core::Tag::BlankNode {
-                frontier.push(quad.object);
-            }
-        }
+    let mut next = 0u64;
+    copy_occurrence(graph, root, label, &mut next, 0, out)
+}
+
+/// Copies one *occurrence* of a path node, and everything below it.
+///
+/// Deliberately a tree rather than a graph copy. A shapes graph may reach the same blank
+/// node twice — `sh:path ( _:p _:p )` with `_:p sh:inversePath ex:p` is legal and says
+/// "inverse p, then inverse p" — and the report is expected to carry the path *expression*,
+/// in which those are two occurrences. Copying node-by-node instead of occurrence-by-
+/// occurrence writes the shared node once, and the result is a graph the reader cannot read
+/// back as the path it came from.
+///
+/// `depth` is a cycle guard. A well-formed path expression is finite and acyclic, but a
+/// shapes graph is data and can say otherwise; a copier that trusted it would not return.
+fn copy_occurrence(
+    graph: GraphView<'_>,
+    node: TermId,
+    label: &str,
+    next: &mut u64,
+    depth: u32,
+    out: &mut Vec<Quad>,
+) -> Result<Term, ShaclError> {
+    const MAX_DEPTH: u32 = 64;
+    let Some(term) = graph.term(node)? else {
+        return Ok(Term::BlankNode(BlankNode::new_unchecked(format!(
+            "p{label}_missing"
+        ))));
+    };
+    if holos_core::Tag::BlankNode != node.tag() || depth >= MAX_DEPTH {
+        return Ok(term);
     }
-    Ok(())
+
+    let here = BlankNode::new_unchecked(format!("p{label}_{}", *next));
+    *next += 1;
+
+    for quad in graph
+        .store()
+        .quads_for_pattern(Some(node), None, None, graph.graph())
+    {
+        let quad = quad?;
+        let decoded = graph.store().decode_quad(quad)?;
+        let object = copy_occurrence(graph, quad.object, label, next, depth + 1, out)?;
+        out.push(Quad {
+            subject: here.clone().into(),
+            predicate: decoded.predicate,
+            object,
+            graph_name: GraphName::DefaultGraph,
+        });
+    }
+    Ok(here.into())
 }
