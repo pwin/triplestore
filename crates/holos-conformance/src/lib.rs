@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
+pub mod entailment;
 pub mod manifest;
 pub mod protocol;
 pub mod resultset;
@@ -150,6 +151,13 @@ pub fn run_rdf_test(test: &TestEntry) -> Outcome {
 /// Runs one entry from an RDF syntax or evaluation suite against a chosen tier.
 #[must_use]
 pub fn run_rdf_test_on(test: &TestEntry, tier: Tier) -> Outcome {
+    // An entailment test asks whether a premise entails a conclusion. Running it through
+    // the round-trip below compares a premise against a conclusion as though the second were
+    // the expected parse of the first, which is a different question with a predictable
+    // answer, and reports the mismatch as an upstream parser fault.
+    if entailment::handles(test) {
+        return entailment::run(test);
+    }
     let kind = local_name(&test.kind);
     let Some(action) = test.action.as_ref() else {
         return Outcome::skip("no mf:action");
@@ -939,7 +947,7 @@ fn solutions_as_dataset(solutions: &[QuerySolution]) -> Dataset {
     dataset
 }
 
-fn local_name(iri: &str) -> &str {
+pub(crate) fn local_name(iri: &str) -> &str {
     iri.rsplit(['#', '/']).next().unwrap_or(iri)
 }
 

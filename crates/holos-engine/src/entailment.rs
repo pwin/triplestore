@@ -43,6 +43,7 @@
 //! | rdfs11 | `c rdfs:subClassOf d`, `d … e` | `c rdfs:subClassOf e` |
 //! | rdfs6 | `p` is a property | `p rdfs:subPropertyOf p` |
 //! | rdfs10 | `c` is a class | `c rdfs:subClassOf c` |
+//! | rdfs12 | `rdf:_n` occurs | `rdf:_n rdfs:subPropertyOf rdfs:member` |
 //!
 //! rdfs4 — `x rdf:type rdfs:Resource` for every term in the graph — is left out. It is
 //! bounded by the size of the *data*, so it roughly doubles a graph, and no query is
@@ -55,6 +56,11 @@
 //! entailment suite turn on exactly that. What counts as a class or a property follows from
 //! the RDF/RDFS axiomatic `rdfs:domain` and `rdfs:range` declarations, so those positions
 //! are read directly rather than materialising the axioms to re-derive them.
+//!
+//! rdfs12 is stated in RDFS as one axiom per `n`, of which there are infinitely many. Only
+//! the ones for an `rdf:_n` the graph actually mentions are produced: an axiom about a
+//! container position nothing refers to entails nothing about anything in the graph, and
+//! materialising the rest is not possible in any case.
 //!
 //! The reflexive statements are emitted as facts and are deliberately *not* fed back into
 //! the inference maps: `c rdfs:subClassOf c` entails nothing that `c` did not already
@@ -93,6 +99,9 @@ pub struct Entailed {
     pub rounds: usize,
 }
 
+/// The prefix of a container membership property: `rdf:_1`, `rdf:_2`, and so on.
+const CONTAINER_MEMBERSHIP_PREFIX: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#_";
+
 /// The vocabulary terms the rules turn on.
 struct Rdfs {
     ty: TermId,
@@ -100,10 +109,14 @@ struct Rdfs {
     sub_property_of: TermId,
     domain: TermId,
     range: TermId,
+    member: TermId,
+    container_membership_property: TermId,
+    reifies: TermId,
+    proposition: TermId,
 }
 
 impl Rdfs {
-    /// All five are in the well-known table, so this cannot fail in practice; it returns an
+    /// All of them are in the well-known table, so this cannot fail in practice; it returns an
     /// `Option` rather than panicking because a table edit is the sort of thing that should
     /// surface as an error and not as a crash in a maintenance command.
     fn new() -> Option<Self> {
@@ -115,6 +128,12 @@ impl Rdfs {
             )?,
             domain: vocab::encode_iri("http://www.w3.org/2000/01/rdf-schema#domain")?,
             range: vocab::encode_iri("http://www.w3.org/2000/01/rdf-schema#range")?,
+            member: vocab::encode_iri("http://www.w3.org/2000/01/rdf-schema#member")?,
+            container_membership_property: vocab::encode_iri(
+                "http://www.w3.org/2000/01/rdf-schema#ContainerMembershipProperty",
+            )?,
+            reifies: vocab::encode_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies")?,
+            proposition: vocab::encode_iri("http://www.w3.org/2000/01/rdf-schema#Proposition")?,
         })
     }
 }
@@ -160,6 +179,8 @@ pub fn materialise(
     }
     let asserted = known.clone();
 
+    let mut fresh_axioms: Vec<(TermId, TermId, TermId)> = Vec::new();
+
     // The schema, read once. It is tiny next to the data and consulted on every triple, so
     // walking the store for it per round would dominate the whole operation.
     let mut super_properties: FxHashMap<TermId, FxHashSet<TermId>> = FxHashMap::default();
@@ -178,12 +199,68 @@ pub fn materialise(
         }
     }
 
+    // rdfs12, before the hierarchies are closed so rdfs5 and rdfs7 can build on it.
+    //
+    // Every `rdf:_n` is a container membership property and a sub-property of `rdfs:member`,
+    // which is how `<a> rdf:_1 <b>` comes to entail `<a> rdfs:member <b>`. RDFS states this
+    // as an axiom per `n`, of which there are infinitely many; the ones for an `n` the graph
+    // never mentions entail nothing about it, so only those actually used are produced.
+    let mut container_axioms: Vec<(TermId, TermId, TermId)> = Vec::new();
+    let mut examined: FxHashSet<TermId> = FxHashSet::default();
+    for &(s, p, o) in &known {
+        for term in [s, p, o] {
+            if !examined.insert(term) {
+                continue;
+            }
+            let Some(iri) = engine.store().decode_term(term)?.and_then(|t| match t {
+                oxrdf::Term::NamedNode(n) => Some(n.into_string()),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let Some(index) = iri.strip_prefix(CONTAINER_MEMBERSHIP_PREFIX) else {
+                continue;
+            };
+            if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            container_axioms.push((term, rdfs.ty, rdfs.container_membership_property));
+            container_axioms.push((term, rdfs.sub_property_of, rdfs.member));
+        }
+    }
+    for triple in container_axioms {
+        if known.insert(triple) {
+            fresh_axioms.push(triple);
+        }
+        if triple.1 == rdfs.sub_property_of {
+            super_properties
+                .entry(triple.0)
+                .or_default()
+                .insert(triple.2);
+        }
+    }
+
+    // RDF 1.2 semantics: `rdf:reifies` has range `rdfs:Proposition`. An axiomatic triple, so
+    // it goes into the range map for rdfs3 to act on rather than being emitted — what a
+    // reader wants is the `rdf:type` statements it produces, not the schema line behind them.
+    //
+    // Its companion — that a *triple term* denotes a proposition — is deliberately not
+    // materialised. Saying so takes a triple whose subject is the triple term, and RDF
+    // admits a triple term only in object position, so there is no well-formed triple to
+    // write. The entailment is real and is `s p _:b . _:b rdf:type rdfs:Proposition` for a
+    // fresh `_:b`; introducing blank nodes into a store to record it would trade a fact
+    // nobody asserted for a graph nobody can read back.
+    ranges
+        .entry(rdfs.reifies)
+        .or_default()
+        .insert(rdfs.proposition);
+
     // rdfs5 and rdfs11: transitive closure of the two hierarchies, computed on the maps
     // before touching the data, because every later rule consults them.
     close_transitively(&mut super_properties);
     close_transitively(&mut super_classes);
 
-    let mut fresh: Vec<(TermId, TermId, TermId)> = Vec::new();
+    let mut fresh: Vec<(TermId, TermId, TermId)> = fresh_axioms;
     let push = |triple: (TermId, TermId, TermId),
                 known: &mut FxHashSet<(TermId, TermId, TermId)>,
                 fresh: &mut Vec<(TermId, TermId, TermId)>| {

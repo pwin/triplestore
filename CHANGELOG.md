@@ -24,6 +24,50 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### The RDF entailment suites are run as entailment
+
+All 134 failures in the RDF 1.1 and 1.2 suites were labelled `upstream:`. 92 of them were
+not: the `rdf-mt` and `rdf-semantics` directories are `mf:PositiveEntailmentTest` and
+`mf:NegativeEntailmentTest`, where `mf:action` is a *premise* and `mf:result` is a
+*conclusion*. The generic runner parsed the premise, round-tripped it through the store, and
+compared it against the conclusion as though that were the expected parse — a comparison
+that was never going to hold, whose failure was then attributed to a parser for answering a
+question nobody asked it.
+
+`holos_conformance::entailment` decides them properly. `G ⊨ E` holds when some instance of
+`E` is a subgraph of the closure of `G`, so the check is a subgraph homomorphism with blank
+nodes as the variables, run over the closure. Generalisation falls out of the same search:
+`ex:a ex:b "10"` entails `ex:a ex:b _:x` because a blank node in the conclusion is already
+free to match any term. The RDFS closure is computed by `holos_engine::entailment` rather
+than by a second reasoner written to pass the suite.
+
+| | Before | After |
+|---|---:|---:|
+| RDF 1.1 | 987/1041, 54 failed | **995/1016**, 21 failed |
+| RDF 1.2 | 1326/1406, 80 failed | **1349/1372**, 23 failed |
+
+**Every remaining failure in both suites is an RDF/XML parser test** — genuinely upstream,
+and now the only thing wearing that label. What is skipped is named: datatype entailment,
+which decides both `"010"^^xsd:integer` = `"10"^^xsd:integer` and whether an ill-formed
+literal makes a graph inconsistent, is not implemented and is not half-implemented.
+
+Four gaps surfaced along the way:
+
+- The instance check compared triple terms whole, so `<<( :a :b :c )>>` did not match
+  `<<( _:x :b :c )>>`. RDF 1.2 lets a blank node stand for a term *inside* a triple term, so
+  the match has to recurse — which also keeps one blank node consistent across the two
+  places it can appear. Eight tests.
+- **rdfs12** was missing: every `rdf:_n` is a sub-property of `rdfs:member`, which is how
+  `<a> rdf:_1 <b>` comes to entail `<a> rdfs:member <b>`. RDFS states this as one axiom per
+  `n`, infinitely many; only those for an `rdf:_n` the graph mentions are produced, since the
+  rest entail nothing about anything in it.
+- `rdf:reifies` has range `rdfs:Proposition`, an RDF 1.2 axiom rdfs3 then acts on.
+- A triple term denotes a proposition — but that cannot be *written*, because RDF admits a
+  triple term only in object position and the triple saying it has one as its subject. The
+  entailment is `s p _:b . _:b rdf:type rdfs:Proposition`, so it is a construction on the
+  graph under test rather than a rule in the reasoner: materialising it would put blank nodes
+  nobody asserted into a store.
+
 ### The write path fails closed
 
 `DESIGN.md` §9 makes the native evaluator the validator that gates a commit, and §8 records

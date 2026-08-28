@@ -283,6 +283,10 @@ vocab_table![
     "http://www.w3.org/ns/prov#startedAtTime",
     "http://www.w3.org/ns/prov#endedAtTime",
     "http://www.w3.org/ns/prov#generatedAtTime",
+    // --- rdfs, appended: rdfs12 needs to name what it produces.
+    "http://www.w3.org/2000/01/rdf-schema#ContainerMembershipProperty",
+    // RDF 1.2: what a triple term denotes, and the range of `rdf:reifies`.
+    "http://www.w3.org/2000/01/rdf-schema#Proposition",
 ];
 
 fn lookup() -> &'static HashMap<&'static str, u64> {

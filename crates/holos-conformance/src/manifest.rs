@@ -86,6 +86,19 @@ pub struct TestEntry {
     pub result_data: Option<PathBuf>,
     /// The base IRI test content must be parsed against. See the module note.
     pub base: String,
+    /// `mf:entailmentRegime` — the RDF semantics suites name a regime as a plain string
+    /// (`"simple"`, `"RDF"`, `"RDFS"`) rather than as the IRI the SPARQL suite uses.
+    pub mf_entailment_regime: Option<String>,
+    /// `mf:recognizedDatatypes` — the datatypes a D-entailment test says the recogniser
+    /// knows. An empty list is meaningful and different from an absent one.
+    pub recognized_datatypes: Vec<String>,
+    /// `mf:unrecognizedDatatypes` — datatypes the test says are *not* recognised, so an
+    /// ill-formed literal of one of them is not an inconsistency.
+    pub unrecognized_datatypes: Vec<String>,
+    /// `mf:result false` — the entailment tests use a boolean where other suites name a
+    /// file. For a positive test it asserts the premise is inconsistent; for a negative
+    /// one, that it is consistent.
+    pub result_is_false: bool,
     /// The `sd:entailmentRegime` IRIs the test declares, if any.
     ///
     /// A list rather than a flag, because *which* regime it asks for decides whether this
@@ -206,6 +219,10 @@ fn load_into(manifest: &Path, out: &mut Vec<TestEntry>, seen: &mut HashSet<PathB
             result_graph_data: Vec::new(),
             result_data: None,
             base: assumed_base.clone(),
+            mf_entailment_regime: None,
+            recognized_datatypes: Vec::new(),
+            unrecognized_datatypes: Vec::new(),
+            result_is_false: false,
             entailment_regimes: Vec::new(),
         };
 
@@ -259,9 +276,33 @@ fn load_into(manifest: &Path, out: &mut Vec<TestEntry>, seen: &mut HashSet<PathB
         // rather than an argument to any one request.
         collect_graph_data(&graph, subject, &assumed_base, &mut test.graph_data);
 
+        test.mf_entailment_regime =
+            object(&graph, subject, &mf("entailmentRegime")).map(|t| literal_value(&t));
+        for (predicate, into) in [
+            ("recognizedDatatypes", 0usize),
+            ("unrecognizedDatatypes", 1),
+        ] {
+            let Some(head) = object(&graph, subject, &mf(predicate)) else {
+                continue;
+            };
+            let list: Vec<String> = collection(&graph, head)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(term_as_iri)
+                .collect();
+            if into == 0 {
+                test.recognized_datatypes = list;
+            } else {
+                test.unrecognized_datatypes = list;
+            }
+        }
+
         match object(&graph, subject, &mf("result")) {
             // A plain file: a result set or a graph.
             Some(Term::NamedNode(n)) => test.result = file_url_to_path(n.as_str()),
+            // `mf:result false`: the entailment suites assert consistency this way rather
+            // than by naming a conclusion graph.
+            Some(Term::Literal(l)) if l.value() == "false" => test.result_is_false = true,
             // A blank node: the expected *dataset* of an update test.
             Some(Term::BlankNode(b)) => {
                 let result = NamedOrBlankNodeRef::from(b.as_ref());
