@@ -24,6 +24,7 @@
 //! `Graph` a merge-in-place, which is a bounded change and is not made here on spec.
 
 use crate::bridge::{self, Bridged};
+use crate::incremental::Change;
 use crate::{Options, ShaclError};
 use holos_shacl_engine::model::Graph as EngineGraph;
 use holos_shacl_engine::report::ValidationReport;
@@ -32,11 +33,73 @@ use holos_shacl_engine::{validate as engine_validate, TermId as EngineId};
 use holos_store::Store;
 use oxrdf::Graph as OxGraph;
 
+/// Whether a quad could change what the shapes compile to.
+///
+/// The blunt question — did anything in the shapes *graph* change — is useless in the
+/// commonest configuration, where shapes and data share one graph and every data write is
+/// therefore a write to the shapes graph. The useful question is narrower: shapes are built
+/// out of SHACL vocabulary, so a triple that uses none of it cannot have defined one.
+///
+/// Conservative in the direction that costs time rather than correctness. Three cases count:
+///
+/// * a predicate in the SHACL namespace — every constraint, target and path parameter;
+/// * `rdf:type` naming a SHACL class or `rdfs:Class`, which is how a node *becomes* a shape,
+///   including SHACL 1.2's `sh:ShapeClass` and the implicit class target;
+/// * `rdf:first` and `rdf:rest`, because `sh:path ( ex:a ex:b )` and `sh:in ( 1 2 3 )` are
+///   built from list cells whose predicates are RDF rather than SHACL.
+///
+/// Anything else is data. A change to a value a `sh:hasValue` names does not change the
+/// shape — it changes whether the data satisfies it, which is what validation is for.
+fn affects_shapes(store: &Store, quad: holos_store::EncodedQuad) -> Result<bool, ShaclError> {
+    const SH: &str = "http://www.w3.org/ns/shacl#";
+    const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+    const RDFS_CLASS: &str = "http://www.w3.org/2000/01/rdf-schema#Class";
+
+    let iri = |id: holos_core::TermId| -> Result<Option<String>, ShaclError> {
+        Ok(match store.decode_term(id)? {
+            Some(oxrdf::Term::NamedNode(n)) => Some(n.into_string()),
+            _ => None,
+        })
+    };
+
+    let Some(predicate) = iri(quad.predicate)? else {
+        return Ok(false);
+    };
+    if predicate.starts_with(SH) {
+        return Ok(true);
+    }
+    if predicate == format!("{RDF}first") || predicate == format!("{RDF}rest") {
+        return Ok(true);
+    }
+    if predicate == format!("{RDF}type") {
+        if let Some(object) = iri(quad.object)? {
+            return Ok(object.starts_with(SH) || object == RDFS_CLASS);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether a quad's graph is the one a filter selects.
+///
+/// The same four cases the store's own scan uses. Written out rather than borrowed because
+/// a delta is matched one quad at a time, and the store's version is a scan predicate.
+fn in_graph(graph_name: Option<holos_core::TermId>, filter: holos_store::GraphFilter) -> bool {
+    match filter {
+        holos_store::GraphFilter::Default => graph_name.is_none(),
+        holos_store::GraphFilter::Named(g) => graph_name == Some(g),
+        holos_store::GraphFilter::AnyNamed => graph_name.is_some(),
+        holos_store::GraphFilter::Any => true,
+    }
+}
+
 /// A bridged store with its shapes compiled, ready to validate.
 pub struct EngineRun {
     bridged: Bridged,
     shapes_graph: EngineGraph,
     shapes: EngineShapes,
+    /// Kept so [`Self::apply`] can tell which graph a changed quad belongs to. A delta is
+    /// reported over the whole store; only what lands in the data graph is this run's.
+    options: Options,
 }
 
 impl std::fmt::Debug for EngineRun {
@@ -63,7 +126,59 @@ impl EngineRun {
             bridged,
             shapes_graph,
             shapes,
+            options,
         })
+    }
+
+    /// Brings the bridged graph up to date with a store delta, instead of bridging again.
+    ///
+    /// This is what `DESIGN.md` §8 called for. The engine covers more constraint components
+    /// than the native evaluator, but its graph could not change, so gating a commit with it
+    /// meant re-bridging the whole store every time: 198 ms at 250,000 quads against 0.4 µs
+    /// for a validator that can be told what changed, and growing with the store rather than
+    /// with the change.
+    ///
+    /// Changes outside the data graph are ignored — a delta is reported over the whole store
+    /// and most of it is not this run's business.
+    ///
+    /// # Errors
+    ///
+    /// [`ShaclError::Unsupported`] when a change lands in the *shapes* graph. Those cannot be
+    /// applied incrementally at all: the shapes are compiled into a flat IR at `prepare`
+    /// time, and a changed shape invalidates that wholesale. Saying so is the point — the
+    /// alternative is validating new data against shapes that no longer exist.
+    pub fn apply(&mut self, store: &Store, changes: &[Change]) -> Result<(), ShaclError> {
+        for change in changes {
+            if in_graph(change.quad.graph_name, self.options.shapes_graph)
+                && affects_shapes(store, change.quad)?
+            {
+                return Err(ShaclError::Unsupported(
+                    "a shape definition changed; the compiled shapes must be rebuilt with \
+                     EngineRun::prepare rather than updated in place"
+                        .to_owned(),
+                ));
+            }
+        }
+
+        let mut added = Vec::new();
+        let mut removed = Vec::new();
+        for change in changes {
+            if !in_graph(change.quad.graph_name, self.options.data_graph) {
+                continue;
+            }
+            let row = [
+                self.bridged.intern_id(store, change.quad.subject)?,
+                self.bridged.intern_id(store, change.quad.predicate)?,
+                self.bridged.intern_id(store, change.quad.object)?,
+            ];
+            if change.added {
+                added.push(row);
+            } else {
+                removed.push(row);
+            }
+        }
+        self.bridged.graph.apply(&added, &removed);
+        Ok(())
     }
 
     /// How many triples were bridged.

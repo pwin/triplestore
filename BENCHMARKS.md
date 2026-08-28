@@ -188,6 +188,30 @@ A scene of 60,000 quads, a four-constraint boundary, 200 commits.
 
 ---
 
+## SHACL validation on a write path
+
+`DESIGN.md` §8 runs two validators: the native evaluator, which revalidates a delta, and the
+adapted engine, which covers more constraint components. The engine's graph used to be
+immutable, so gating a commit with it meant bridging the whole store again on every write.
+
+Measured with `cargo run -p holos-bench --release --bin shaclinc`, on a shapes graph with
+five constraints and one changed data triple:
+
+| quads | prepare (re-bridge) | `apply` (delta) | full validate | prepare ÷ apply |
+|---:|---:|---:|---:|---:|
+| 5,018 | 2.44 ms | **0.0007 ms** | 0.79 ms | 3,479× |
+| 50,018 | 30.9 ms | **0.0009 ms** | 10.3 ms | 34,388× |
+| 250,018 | 149.3 ms | **0.0009 ms** | 50.4 ms | 165,940× |
+
+The ratio is not the point; the *shape* is. `prepare` grows linearly with the store, and
+`apply` does not move at all between 5,000 quads and 250,000 — it is three binary searches
+and three memmoves whatever the graph holds. A validator whose cost per commit grows with
+total data cannot gate a write path at any speed constant.
+
+What the table does not claim: `validate` is still a full run. Keeping the graph current is
+one half of incremental validation and choosing what to re-check is the other, and the second
+is not built here.
+
 ## Reading the results
 
 Four things in these tables matter more than the rest. Two of them were not what this

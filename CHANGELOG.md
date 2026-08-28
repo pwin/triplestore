@@ -24,6 +24,45 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### The adapted engine's graph takes a delta
+
+`DESIGN.md` §8 said closing this was bounded work, and the measurement said it was worth
+doing: re-bridging the store cost **149 ms at 250,000 quads**, on every commit, growing with
+the store rather than with the change.
+
+`Graph::apply` merges into the three sorted permutations in place — a binary search and a
+memmove per row per index, or a rebuild past a threshold, because a two-triple tick and a
+bulk load do not want the same strategy. `EngineRun::apply` translates a store delta into it,
+interning terms the bridge has not seen.
+
+| quads | prepare (re-bridge) | `apply` (delta) |
+|---:|---:|---:|
+| 5,018 | 2.44 ms | **0.0007 ms** |
+| 50,018 | 30.9 ms | **0.0009 ms** |
+| 250,018 | 149.3 ms | **0.0009 ms** |
+
+The constant is the result, not the ratio: `apply` does not move between 5,000 quads and
+250,000.
+
+Correctness is checked by equality with the thing it replaces — after any delta the updated
+run must report exactly what a freshly bridged one reports, up to blank-node isomorphism,
+including across a run of twenty-five interleaved additions and removals. A validator that is
+fast and slightly stale is worse than a slow one, because its answer is trusted.
+
+A change that alters a *shape definition* is refused rather than absorbed, since shapes are
+compiled once at `prepare`. The test for that is narrower than "did the shapes graph change",
+which is useless when shapes and data share a graph and every data write is therefore a write
+to the shapes graph: a triple whose predicate is not SHACL vocabulary, not `rdf:first`,
+`rdf:rest`, and not an `rdf:type` naming a SHACL class or `rdfs:Class`, cannot have defined a
+shape.
+
+**Not done, and worth stating.** Keeping the graph current is half of incremental validation;
+choosing what to re-check is the other half, and `validate` is still a full run. The planner
+that would close it needs the *native* compiled shapes — and fail-closed means those refuse
+to compile for precisely the shapes graphs this engine exists to handle. Resolving that needs
+either a plan-only native compile or a dependency index in the engine, and a planner that
+misses a dependency admits a violation, so it is not worth doing by halves.
+
 ### Coverage gaps a mutation audit found
 
 Passing tests are not evidence that a rule is checked. Breaking each rule deliberately and

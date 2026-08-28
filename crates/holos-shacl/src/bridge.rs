@@ -61,6 +61,16 @@ impl Bridged {
         self.forward.get(&id).copied()
     }
 
+    /// Translates a HOLOS id, interning it if the bridge has not seen it.
+    ///
+    /// The read-only [`Self::engine_id`] answers `None` for an unknown term, which is right
+    /// for planning — nothing in the engine's world refers to it. Applying a delta is the
+    /// other case: a newly written triple names terms the bridge could not have seen, and
+    /// refusing them would silently drop the change.
+    pub fn intern_id(&mut self, store: &Store, id: HolosId) -> Result<EngineId, ShaclError> {
+        intern(store, &mut self.terms, &mut self.forward, id)
+    }
+
     /// How many triples were bridged.
     #[must_use]
     pub fn len(&self) -> usize {
