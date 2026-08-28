@@ -258,6 +258,7 @@ vocab_table![
     "http://www.w3.org/ns/shacl#someValue",
     "http://www.w3.org/ns/shacl#SomeValueConstraintComponent",
     "http://www.w3.org/ns/shacl#ByTypes",
+    "http://www.w3.org/ns/shacl#shape",
     // --- prov: (the holon Event graph is PROV-O shaped, DESIGN.md §9)
     "http://www.w3.org/ns/prov#Entity",
     "http://www.w3.org/ns/prov#Activity",

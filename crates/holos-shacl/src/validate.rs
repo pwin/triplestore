@@ -69,7 +69,36 @@ impl<'a> Validator<'a> {
             // whole target set in hand.
             self.unique_values_for(*idx, &focus_nodes, &mut results)?;
         }
+        self.data_declared_targets(&mut results)?;
         Ok(Report::new(results))
+    }
+
+    /// `sh:shape` — targets the *data* declares for itself.
+    ///
+    /// Every other target is written on the shape, and so is known when the shapes graph is
+    /// compiled. This one is written on the node: `ex:Thing sh:shape ex:SomeShape` says
+    /// "validate me against that", which the compiler cannot see because it only reads the
+    /// shapes graph.
+    ///
+    /// So it runs as its own pass rather than as a `Target` variant. Making every shape
+    /// carry an implicit data-declared target would work, but it would also make every shape
+    /// *targeted*, and `targeted` is what incremental revalidation and `targeted_ancestors`
+    /// are built on — a change with a much wider blast radius than the feature deserves.
+    fn data_declared_targets(&self, results: &mut Vec<ValidationResult>) -> Result<(), ShaclError> {
+        for quad in
+            self.data
+                .store()
+                .quads_for_pattern(None, Some(self.sh.shape), None, self.data.graph())
+        {
+            let quad = quad?;
+            let Some(idx) = self.shapes.by_node(quad.object) else {
+                // A node naming something that is not a shape is not an error: the shapes
+                // graph simply has nothing to say about it.
+                continue;
+            };
+            self.validate_shape(idx, quad.subject, 0, results)?;
+        }
+        Ok(())
     }
 
     /// `sh:uniqueValuesFor`, across a shape's whole target set.
@@ -963,7 +992,19 @@ impl<'a> Validator<'a> {
                 return Ok(na.partial_cmp(&nb));
             }
         }
+        // Date and time types have an order relation of their own, and it is not the
+        // lexical one. `"2002-10-10T12:00:00-05:00"` and `"2002-10-10T12:00:00"` differ only
+        // by a timezone the second does not have, and XSD calls that pair *indeterminate*
+        // rather than ordered: a value without a timezone could stand for any instant in a
+        // 28-hour window. Comparing the strings puts them in an order and reports the
+        // constraint satisfied, which is the quiet kind of wrong.
+        //
+        // `compare` returning `None` is already read as "not satisfied" by `range`, so an
+        // indeterminate comparison becomes a violation, which is what the suite expects.
         if la.datatype() == lb.datatype() {
+            if let Some(ordering) = temporal_cmp(la.datatype().as_str(), la.value(), lb.value()) {
+                return Ok(ordering);
+            }
             return Ok(Some(la.value().cmp(lb.value())));
         }
         Ok(None)
@@ -1123,4 +1164,39 @@ fn language_matches(tag: &str, range: &str) -> bool {
     let tag = tag.to_ascii_lowercase();
     let range = range.to_ascii_lowercase();
     tag == range || tag.starts_with(&format!("{range}-"))
+}
+
+/// Compares two lexical forms of a date or time type by XSD's order relation.
+///
+/// The outer `Option` says whether this function handled the datatype at all; the inner one
+/// is the comparison, where `None` means *indeterminate* — a real XSD outcome for values
+/// whose timezones leave their order undecided.
+fn temporal_cmp(datatype: &str, a: &str, b: &str) -> Option<Option<Ordering>> {
+    use std::str::FromStr;
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+    let local = datatype.strip_prefix(XSD)?;
+    match local {
+        "dateTime" => {
+            let (a, b) = (
+                oxsdatatypes::DateTime::from_str(a).ok()?,
+                oxsdatatypes::DateTime::from_str(b).ok()?,
+            );
+            Some(a.partial_cmp(&b))
+        }
+        "date" => {
+            let (a, b) = (
+                oxsdatatypes::Date::from_str(a).ok()?,
+                oxsdatatypes::Date::from_str(b).ok()?,
+            );
+            Some(a.partial_cmp(&b))
+        }
+        "time" => {
+            let (a, b) = (
+                oxsdatatypes::Time::from_str(a).ok()?,
+                oxsdatatypes::Time::from_str(b).ok()?,
+            );
+            Some(a.partial_cmp(&b))
+        }
+        _ => None,
+    }
 }
