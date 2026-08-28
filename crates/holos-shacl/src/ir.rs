@@ -684,6 +684,123 @@ impl<'a> Compiler<'a> {
         idx
     }
 
+    /// Every SHACL-namespace property this compiler understands on a shape.
+    ///
+    /// The list is an allowlist and the check around it refuses everything else, which is
+    /// the whole point: a blocklist of constructs to reject goes stale the moment SHACL
+    /// grows one, and the failure of a stale blocklist is *silence* — the constraint is
+    /// dropped and the shape reports conformance it did not check.
+    ///
+    /// Two kinds of entry. Most are parameters this compiler reads. The rest —
+    /// `sh:name`, `sh:description`, `sh:order`, `sh:group`, `sh:defaultValue` — are
+    /// presentation properties with no effect on whether data conforms, so ignoring them
+    /// ignores nothing.
+    const KNOWN: &'static [&'static str] = &[
+        // Targets and shape structure.
+        "targetClass",
+        "targetNode",
+        "targetSubjectsOf",
+        "targetObjectsOf",
+        "targetWhere",
+        "path",
+        "property",
+        "node",
+        "deactivated",
+        "severity",
+        "message",
+        // Path expressions, which appear on path nodes rather than shapes but share a graph.
+        "inversePath",
+        "alternativePath",
+        "zeroOrMorePath",
+        "oneOrMorePath",
+        "zeroOrOnePath",
+        // Core constraint parameters.
+        "class",
+        "datatype",
+        "nodeKind",
+        "minCount",
+        "maxCount",
+        "minInclusive",
+        "maxInclusive",
+        "minExclusive",
+        "maxExclusive",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "flags",
+        "languageIn",
+        "uniqueLang",
+        "equals",
+        "disjoint",
+        "lessThan",
+        "lessThanOrEquals",
+        "not",
+        "and",
+        "or",
+        "xone",
+        "closed",
+        "ignoredProperties",
+        "hasValue",
+        "in",
+        "qualifiedValueShape",
+        "qualifiedMinCount",
+        "qualifiedMaxCount",
+        "qualifiedValueShapesDisjoint",
+        // SHACL 1.2 additions.
+        "minListLength",
+        "maxListLength",
+        "uniqueMembers",
+        "memberShape",
+        "singleLine",
+        "subsetOf",
+        "uniqueValuesFor",
+        "someValue",
+        "rootClass",
+        "nodeByExpression",
+        "reifierShape",
+        "reificationRequired",
+        // Presentation only.
+        "name",
+        "description",
+        "order",
+        "group",
+        "defaultValue",
+    ];
+
+    /// Refuses a shape carrying a SHACL construct this validator cannot evaluate.
+    ///
+    /// `DESIGN.md` §8 records that the native evaluator covers SHACL Core while the adapted
+    /// engine covers more, and §9 makes this evaluator the one that gates a commit. Silently
+    /// dropping what it cannot check turns that gate into a gate that opens: the write path
+    /// answers *conforms* for data a full run rejects, with no error anywhere. A shapes
+    /// graph carrying `sh:sparql` did exactly that.
+    ///
+    /// So it fails closed. A caller that needs these constraints has
+    /// [`EngineRun`](crate::engine::EngineRun), which implements them; what it does not have
+    /// is incremental revalidation, and that trade is now visible instead of silent.
+    ///
+    /// The check is by namespace, so it cannot see a *custom* constraint component, whose
+    /// parameter lives in the shapes author's own namespace. Detecting those means reading
+    /// the `sh:parameter` declarations, and `sh:parameter` itself is refused here — a shapes
+    /// graph that declares a custom component is rejected before one can be used.
+    fn refuse_unsupported(&self, node: TermId) -> Result<(), ShaclError> {
+        const SH: &str = "http://www.w3.org/ns/shacl#";
+        for predicate in self.graph.predicates_of(node)? {
+            let Some(Term::NamedNode(n)) = self.graph.term(predicate)? else {
+                continue;
+            };
+            let Some(local) = n.as_str().strip_prefix(SH) else {
+                continue;
+            };
+            if !Self::KNOWN.contains(&local) {
+                return Err(ShaclError::Unsupported(format!(
+                    "sh:{local} is not implemented by the incremental evaluator; validate                      through holos_shacl::engine::EngineRun instead"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn build(&mut self, node: TermId, _idx: ShapeIdx) -> Result<Shape, ShaclError> {
         let g = self.graph;
         let sh = self.sh;
@@ -726,6 +843,7 @@ impl<'a> Compiler<'a> {
         let messages = g.objects(node, sh.message)?;
         let deactivated = matches!(g.object(node, sh.deactivated)?, Some(v) if self.is_true(v));
 
+        self.refuse_unsupported(node)?;
         let constraints = self.compile_constraints(node)?;
         let annotations = self.annotations_for(node, &constraints)?;
 

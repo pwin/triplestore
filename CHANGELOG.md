@@ -24,6 +24,33 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### The write path fails closed
+
+`DESIGN.md` §9 makes the native evaluator the validator that gates a commit, and §8 records
+that it covers SHACL Core while the adapted engine covers more. The dangerous reading of that
+was "it checks less". The true one was "it checks less and says nothing":
+
+```
+NATIVE  conforms=true   results=0      # the validator that gates a commit
+ENGINE  conforms=false  results=1      # a full run, same store, same shapes
+```
+
+A shapes graph carrying `sh:sparql` compiled without complaint, the constraint was dropped,
+and the Boundary would have admitted data a full validation rejects. A gate that fails open
+is worse than no gate, because it is trusted.
+
+The compiler now refuses a shape carrying a SHACL construct it cannot evaluate, naming the
+construct and pointing at `engine::EngineRun`, which implements it. The check is an
+**allowlist** of the properties this evaluator understands, not a blocklist of ones to
+reject — a blocklist goes stale the moment SHACL grows a construct, and the failure of a
+stale blocklist is exactly the silence this fixes. Presentation properties (`sh:name`,
+`sh:description`, `sh:order`, `sh:group`, `sh:defaultValue`) are on the list because ignoring
+them ignores nothing.
+
+The trade this leaves — `EngineRun` for coverage, the native evaluator for incremental
+revalidation — is unchanged, but it is now visible rather than silent. Closing it properly
+means giving the engine's graph a merge-in-place, which §8 already describes.
+
 ### RDFS entailment runs against the W3C suite, and it found two missing rules
 
 `SPARQL 1.1: 476/477` was resting on **148 skipped tests**, 70 of them skipped as "needs an
