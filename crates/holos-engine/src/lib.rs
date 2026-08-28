@@ -20,6 +20,7 @@
 #![allow(clippy::many_single_char_names)]
 
 pub mod bindjoin;
+pub mod entailment;
 pub mod functions;
 pub mod geo_ext;
 pub mod options;

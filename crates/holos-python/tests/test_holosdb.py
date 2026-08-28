@@ -329,8 +329,10 @@ def test_geosparql_functions_include_the_ones_this_project_adds():
         assert geof + name in fns, f"geof:{name} is missing"
 
     # And the ones that come from spargeo, so a wiring mistake that dropped the whole
-    # upstream set would be caught rather than looking like a shorter list.
-    for name in ["sfWithin", "sfIntersects", "envelope", "asWKT"]:
+    # upstream set would be caught rather than looking like a shorter list. Taken from the
+    # registry rather than from memory: geo:asWKT is a *property*, not a function, and
+    # asserting it here failed in CI for exactly that reason.
+    for name in ["sfWithin", "sfIntersects", "envelope", "asGeoJSON", "relate"]:
         assert geof + name in fns, f"geof:{name} is missing"
 
     assert len(fns) == len(holosdb.geosparql_functions()), "the list contains duplicates"
