@@ -17,7 +17,7 @@ use crate::{Report, ShaclError, ValidationResult};
 use holos_core::{Tag, TermId};
 use oxrdf::vocab::xsd;
 use oxrdf::Term;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::cmp::Ordering;
 
 /// How deep shape references may nest before the validator gives up.
@@ -60,11 +60,87 @@ impl<'a> Validator<'a> {
     pub fn validate_all(&self) -> Result<Report, ShaclError> {
         let mut results = Vec::new();
         for idx in self.shapes.targeted() {
-            for focus in self.focus_nodes(*idx)? {
-                self.validate_shape(*idx, focus, 0, &mut results)?;
+            let focus_nodes = self.focus_nodes(*idx)?;
+            for focus in &focus_nodes {
+                self.validate_shape(*idx, *focus, 0, &mut results)?;
             }
+            // `sh:uniqueValuesFor` compares focus nodes with each other, so it cannot be
+            // answered while looking at one of them. It runs here, once per shape, with the
+            // whole target set in hand.
+            self.unique_values_for(*idx, &focus_nodes, &mut results)?;
         }
         Ok(Report::new(results))
+    }
+
+    /// `sh:uniqueValuesFor`, across a shape's whole target set.
+    ///
+    /// The key is a *tuple* of values, one per named property, and a node claims every
+    /// combination its values allow: two notations and one scheme is two keys. Two focus
+    /// nodes clash when they claim the same key, and both are reported — neither is more at
+    /// fault than the other.
+    ///
+    /// Only targets count. A node outside the target set may hold the same value without
+    /// anything being wrong, which the suite checks with a deliberately named
+    /// `ex:UnrelatedNodeThatIsNotInTarget`.
+    fn unique_values_for(
+        &self,
+        idx: ShapeIdx,
+        focus_nodes: &[TermId],
+        results: &mut Vec<ValidationResult>,
+    ) -> Result<(), ShaclError> {
+        let shape = self.shapes.shape(idx);
+        for constraint in &shape.constraints {
+            let Constraint::UniqueValuesFor(properties) = constraint else {
+                continue;
+            };
+            let component = constraint.component(self.sh);
+            let mut claimants: FxHashMap<Vec<TermId>, Vec<TermId>> = FxHashMap::default();
+            for &focus in focus_nodes {
+                for key in self.keys_of(focus, properties)? {
+                    claimants.entry(key).or_default().push(focus);
+                }
+            }
+            // Sorted so a report is a function of the data rather than of hash order.
+            let mut offenders: Vec<TermId> = claimants
+                .into_values()
+                .filter(|nodes| nodes.len() > 1)
+                .flatten()
+                .collect();
+            offenders.sort_unstable();
+            offenders.dedup();
+            for focus in offenders {
+                results.push(self.result(shape, focus, None, component));
+            }
+        }
+        Ok(())
+    }
+
+    /// Every key tuple a focus node claims, as the cross product of its values.
+    ///
+    /// A node missing a value for any key property claims no key at all, and so cannot
+    /// collide with anything — which is right: a partial key is not a key.
+    fn keys_of(
+        &self,
+        focus: TermId,
+        properties: &[TermId],
+    ) -> Result<Vec<Vec<TermId>>, ShaclError> {
+        let mut keys: Vec<Vec<TermId>> = vec![Vec::new()];
+        for &property in properties {
+            let values = self.data.objects(focus, property)?;
+            if values.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut extended = Vec::with_capacity(keys.len() * values.len());
+            for key in &keys {
+                for &value in &values {
+                    let mut next = key.clone();
+                    next.push(value);
+                    extended.push(next);
+                }
+            }
+            keys = extended;
+        }
+        Ok(keys)
     }
 
     /// Validates a chosen set of focus nodes against a chosen set of shapes.
@@ -476,6 +552,9 @@ impl<'a> Validator<'a> {
             }
             // `sh:subsetOf` is `sh:equals` in one direction only: every value node has to
             // be among the other property's values, and the other property may have more.
+            // Evaluated once per shape in `validate_all`, not here: it is a statement
+            // about the target set rather than about this focus node.
+            Constraint::UniqueValuesFor(_) => {}
             Constraint::SubsetOf(path) => {
                 let others = self.eval_path(*path, focus)?;
                 for &v in values {

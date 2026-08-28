@@ -145,6 +145,16 @@ pub enum Constraint {
     /// node. A path rather than a predicate: SHACL 1.2 allows
     /// `sh:subsetOf ( ex:a ex:b )`, and reading it as an IRI makes every value violate.
     SubsetOf(PathIdx),
+    /// `sh:uniqueValuesFor` — no two focus nodes of this shape share a key.
+    ///
+    /// The properties are a **composite key**, not a sequence path: `( skos:notation
+    /// skos:inScheme )` means the *pair* must be unique, not that one is reached through the
+    /// other. `sh:subsetOf` takes a list and means the opposite thing, which is why these
+    /// are compiled apart rather than sharing a helper.
+    ///
+    /// Unlike every other constraint here, it is not a statement about one focus node, so it
+    /// is evaluated once per shape rather than once per node — see `Validator::validate_all`.
+    UniqueValuesFor(Vec<TermId>),
 }
 
 /// A compiled `sh:pattern`.
@@ -196,6 +206,7 @@ impl Constraint {
             Self::MemberShape(_) => sh.member_shape_component,
             Self::SingleLine => sh.single_line_component,
             Self::SubsetOf(_) => sh.subset_of_component,
+            Self::UniqueValuesFor(_) => sh.unique_values_for_component,
             Self::Equals(_) => sh.equals_component,
             Self::Disjoint(_) => sh.disjoint_component,
             Self::LessThan(_) => sh.less_than_component,
@@ -732,6 +743,20 @@ impl<'a> Compiler<'a> {
         for p in g.objects(node, sh.subset_of)? {
             let path = self.compile_path(p, 0)?;
             out.push(Constraint::SubsetOf(path));
+        }
+        for k in g.objects(node, sh.unique_values_for)? {
+            // A list is a composite key; a bare IRI is a key of one. Detected by looking for
+            // `rdf:first` rather than by trying to read a list and seeing what happens,
+            // because a property IRI that happens to have an `rdf:first` in the shapes graph
+            // is not a thing that occurs and a silent empty key would be.
+            let properties = if g.object(k, sh.rdf_first)?.is_some() {
+                self.list(k)?
+            } else {
+                vec![k]
+            };
+            if !properties.is_empty() {
+                out.push(Constraint::UniqueValuesFor(properties));
+            }
         }
 
         // Logical constraints and nested shapes.
