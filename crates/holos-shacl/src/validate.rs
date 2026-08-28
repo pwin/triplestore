@@ -547,6 +547,38 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
+            // The one constraint whose subject is a *triple* rather than a node. RDF 1.2
+            // lets a statement be annotated — `ex:s ex:p "v" {| ex:note true |}` asserts the
+            // triple and, separately, a reifier saying something about it — and this
+            // constrains those reifiers.
+            //
+            // It needs the triple, so it needs the path to *be* a predicate: a compound path
+            // reaches a value through several triples and there is no single one to reify.
+            // Such a shape is skipped rather than guessed at.
+            Constraint::ReifierShape {
+                shape: inner,
+                required,
+            } => {
+                let Some(predicate) = shape.path.and_then(|p| match self.shapes.path(p) {
+                    Path::Predicate(id) => Some(*id),
+                    _ => None,
+                }) else {
+                    return Ok(());
+                };
+                for &v in values {
+                    let reifiers = self.reifiers_of(focus, predicate, v)?;
+                    if *required && reifiers.is_empty() {
+                        violate_value(v, results);
+                        continue;
+                    }
+                    for reifier in reifiers {
+                        if !self.holds(*inner, reifier, depth)? {
+                            violate_value(v, results);
+                            break;
+                        }
+                    }
+                }
+            }
             // `sh:someValue` is existential where `sh:node` is universal, so the result
             // is about the focus node rather than about any one value: no single value is at
             // fault for the absence of a conforming one.
@@ -930,6 +962,35 @@ impl<'a> Validator<'a> {
             Some(Term::NamedNode(n)) => Some(n.into_string()),
             _ => None,
         })
+    }
+
+    /// The reifiers of the triple `(subject, predicate, object)`.
+    ///
+    /// A reifier is a node joined to a triple term by `rdf:reifies`, which is what the
+    /// `{| ... |}` syntax produces. Finding them means looking the triple term up: if it was
+    /// never interned then nothing reifies it, and the answer is empty rather than an error.
+    fn reifiers_of(
+        &self,
+        subject: TermId,
+        predicate: TermId,
+        object: TermId,
+    ) -> Result<Vec<TermId>, ShaclError> {
+        let store = self.data.store();
+        let (Some(s), Some(p), Some(o)) = (
+            store.decode_term(subject)?,
+            store.decode_term(predicate)?,
+            store.decode_term(object)?,
+        ) else {
+            return Ok(Vec::new());
+        };
+        let (Ok(s), Term::NamedNode(p)) = (oxrdf::NamedOrBlankNode::try_from(s), p) else {
+            return Ok(Vec::new());
+        };
+        let triple = Term::Triple(Box::new(oxrdf::Triple::new(s, p, o)));
+        let Some(id) = store.lookup_term(triple.as_ref())? else {
+            return Ok(Vec::new());
+        };
+        Ok(self.data.subjects(self.sh.rdf_reifies, id)?)
     }
 
     /// The members of a well-formed RDF list, or `None` if `head` is not one.

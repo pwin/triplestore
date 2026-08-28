@@ -175,6 +175,20 @@ pub enum Constraint {
     /// node. A path rather than a predicate: SHACL 1.2 allows
     /// `sh:subsetOf ( ex:a ex:b )`, and reading it as an IRI makes every value violate.
     SubsetOf(PathIdx),
+    /// `sh:reifierShape` — every reifier of the triple that produced a value conforms.
+    ///
+    /// RDF 1.2 lets a statement be annotated: `ex:s ex:p "v" {| ex:note true |}` asserts the
+    /// triple and, separately, a reifier that says something *about* it. This constrains
+    /// those reifiers, so it is the one constraint whose subject is a triple rather than a
+    /// node.
+    ReifierShape {
+        /// The shape every reifier must conform to.
+        shape: ShapeIdx,
+        /// `sh:reificationRequired` — a triple with no reifier at all violates.
+        ///
+        /// Without it, an unannotated triple passes vacuously: there is nothing to check.
+        required: bool,
+    },
     /// `sh:someValue` — at least one value node conforms to this shape.
     ///
     /// The existential counterpart of `sh:node`, which requires *every* value to conform.
@@ -242,6 +256,7 @@ impl Constraint {
             Self::SingleLine => sh.single_line_component,
             Self::SubsetOf(_) => sh.subset_of_component,
             Self::SomeValue(_) => sh.some_value_component,
+            Self::ReifierShape { .. } => sh.reifier_shape_component,
             Self::UniqueValuesFor(_) => sh.unique_values_for_component,
             Self::Equals(_) => sh.equals_component,
             Self::Disjoint(_) => sh.disjoint_component,
@@ -415,7 +430,9 @@ fn referenced_shapes(shape: &Shape) -> Vec<ShapeIdx> {
             | Constraint::Node(i)
             | Constraint::Property(i)
             | Constraint::MemberShape(i)
+            | Constraint::SomeValue(i)
             | Constraint::SomeValue(i) => out.push(*i),
+            Constraint::ReifierShape { shape, .. } => out.push(*shape),
             Constraint::And(v) | Constraint::Or(v) | Constraint::Xone(v) => {
                 out.extend(v.iter().copied());
             }
@@ -995,6 +1012,12 @@ impl<'a> Compiler<'a> {
         for n in g.objects(node, sh.some_value)? {
             let idx = self.shape_for(n)?;
             out.push(Constraint::SomeValue(idx));
+        }
+        for n in g.objects(node, sh.reifier_shape)? {
+            let shape = self.shape_for(n)?;
+            let required =
+                matches!(g.object(node, sh.reification_required)?, Some(v) if self.is_true(v));
+            out.push(Constraint::ReifierShape { shape, required });
         }
         for (parameter, make) in [
             (sh.and, Constraint::And as fn(Vec<ShapeIdx>) -> Constraint),
