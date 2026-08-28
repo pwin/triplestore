@@ -678,6 +678,11 @@ impl<'a> Validator<'a> {
             Constraint::LessThan(path) | Constraint::LessThanOrEquals(path) => {
                 let inclusive = matches!(constraint, Constraint::LessThanOrEquals(_));
                 let others = self.eval_path(*path, focus)?;
+                // One result per failing *pair*, not per failing value. `ex:first` holding
+                // 1 and 2 against `ex:second` holding "a" and "b" is four incomparable
+                // pairs and the suite expects four results — two of them identical, because
+                // the value that failed is all a result records. Stopping at the first
+                // failure for a value reports two.
                 for &v in values {
                     for &o in &others {
                         let ok = match self.compare(v, o)? {
@@ -687,7 +692,6 @@ impl<'a> Validator<'a> {
                         };
                         if !ok {
                             violate_value(v, results);
-                            break;
                         }
                     }
                 }
@@ -1104,8 +1108,12 @@ fn lexical_is_valid(value: &str, datatype: &str) -> bool {
     use oxsdatatypes as xs;
     let xsd = |n: &str| format!("http://www.w3.org/2001/XMLSchema#{n}");
     match datatype {
-        d if d == xsd("integer")
-            || d == xsd("long")
+        // `xsd:integer` is unbounded; every type derived from it is not, and a lexical
+        // form alone does not say which. `"300"^^xsd:byte` parses as an integer perfectly
+        // well and is still not a byte — SHACL calls that ill-formed, and checking only the
+        // lexical form reports the value as valid.
+        d if d == xsd("integer") => value.parse::<xs::Integer>().is_ok(),
+        d if d == xsd("long")
             || d == xsd("int")
             || d == xsd("short")
             || d == xsd("byte")
@@ -1118,7 +1126,25 @@ fn lexical_is_valid(value: &str, datatype: &str) -> bool {
             || d == xsd("unsignedShort")
             || d == xsd("unsignedByte") =>
         {
-            value.parse::<xs::Integer>().is_ok()
+            let Ok(n) = value.parse::<i128>() else {
+                return false;
+            };
+            let (low, high): (i128, i128) = match () {
+                () if d == xsd("byte") => (-128, 127),
+                () if d == xsd("short") => (-32_768, 32_767),
+                () if d == xsd("int") => (i128::from(i32::MIN), i128::from(i32::MAX)),
+                () if d == xsd("long") => (i128::from(i64::MIN), i128::from(i64::MAX)),
+                () if d == xsd("unsignedByte") => (0, 255),
+                () if d == xsd("unsignedShort") => (0, 65_535),
+                () if d == xsd("unsignedInt") => (0, i128::from(u32::MAX)),
+                () if d == xsd("unsignedLong") => (0, i128::from(u64::MAX)),
+                () if d == xsd("nonNegativeInteger") => (0, i128::MAX),
+                () if d == xsd("positiveInteger") => (1, i128::MAX),
+                () if d == xsd("nonPositiveInteger") => (i128::MIN, 0),
+                () if d == xsd("negativeInteger") => (i128::MIN, -1),
+                () => (i128::MIN, i128::MAX),
+            };
+            (low..=high).contains(&n)
         }
         d if d == xsd("decimal") => value.parse::<xs::Decimal>().is_ok(),
         d if d == xsd("double") => value.parse::<xs::Double>().is_ok(),
