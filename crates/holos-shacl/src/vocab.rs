@@ -117,6 +117,7 @@ sh_vocab! {
     some_value => sh!("someValue"),
     by_types => sh!("ByTypes"),
     shape => sh!("shape"),
+    shape_class => sh!("ShapeClass"),
     rdf_reifies => rdf!("reifies"),
     equals => sh!("equals"),
     disjoint => sh!("disjoint"),

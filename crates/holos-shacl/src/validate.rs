@@ -340,9 +340,16 @@ impl<'a> Validator<'a> {
 
         match constraint {
             // --- per value node -------------------------------------------------------
-            Constraint::Class(class) => {
+            Constraint::Class(classes) => {
                 for &v in values {
-                    if !self.is_instance_of(v, *class)? {
+                    let mut ok = false;
+                    for &class in classes {
+                        if self.is_instance_of(v, class)? {
+                            ok = true;
+                            break;
+                        }
+                    }
+                    if !ok {
                         violate_value(v, results);
                     }
                 }

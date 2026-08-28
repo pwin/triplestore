@@ -86,8 +86,11 @@ pub struct NodeKindSpec {
 /// One compiled constraint.
 #[derive(Debug, Clone)]
 pub enum Constraint {
-    /// `sh:class`
-    Class(TermId),
+    /// `sh:class` — one class, or a list of them, satisfied by any.
+    ///
+    /// SHACL 1.2 allows `sh:class ( ex:A ex:B )`. Read as a single IRI the list's blank node
+    /// is a class nothing instantiates, so every value violates.
+    Class(Vec<TermId>),
     /// `sh:datatype` — one datatype, or a list of them.
     ///
     /// SHACL 1.2 allows `sh:datatype ( xsd:string rdf:langString )`, satisfied by any of
@@ -560,7 +563,14 @@ impl<'a> Compiler<'a> {
     /// shape, anything carrying a target, and anything with a `sh:path`.
     fn root_shape_nodes(&self) -> Result<Vec<TermId>, ShaclError> {
         let mut nodes = Vec::new();
-        for class in [self.sh.node_shape, self.sh.property_shape] {
+        // `sh:ShapeClass` declares a node to be a class *and* a shape at once, so it is a
+        // root in its own right — without it here, such a shape is never compiled and its
+        // implicit class target never fires.
+        for class in [
+            self.sh.node_shape,
+            self.sh.property_shape,
+            self.sh.shape_class,
+        ] {
             nodes.extend(self.graph.subjects(self.sh.rdf_type, class)?);
         }
         for parameter in [
@@ -639,10 +649,13 @@ impl<'a> Compiler<'a> {
             targets.push(Target::ObjectsOf(p));
         }
         // Implicit class target: a shape that is also an rdfs:Class targets its instances.
-        if g.has(node, sh.rdf_type, sh.rdfs_class)?
-            && (g.has(node, sh.rdf_type, sh.node_shape)?
-                || g.has(node, sh.rdf_type, sh.property_shape)?)
-        {
+        //
+        // `sh:ShapeClass` is SHACL 1.2's shorthand for being both at once, so it satisfies
+        // the pair on its own rather than needing `rdfs:Class` stated as well.
+        let is_class = g.has(node, sh.rdf_type, sh.rdfs_class)?;
+        let is_shape = g.has(node, sh.rdf_type, sh.node_shape)?
+            || g.has(node, sh.rdf_type, sh.property_shape)?;
+        if (is_class && is_shape) || g.has(node, sh.rdf_type, sh.shape_class)? {
             targets.push(Target::Class(node));
         }
 
@@ -761,7 +774,7 @@ impl<'a> Compiler<'a> {
         let sh = self.sh;
         match constraint {
             Constraint::Datatype(_) => parameter == sh.datatype,
-            Constraint::Class(c) => parameter == sh.class && value == Some(*c),
+            Constraint::Class(_) => parameter == sh.class,
             Constraint::NodeKind(_) => parameter == sh.node_kind,
             Constraint::MinCount(_) => parameter == sh.min_count,
             Constraint::MaxCount(_) => parameter == sh.max_count,
@@ -805,7 +818,14 @@ impl<'a> Compiler<'a> {
         let mut out = Vec::new();
 
         for c in g.objects(node, sh.class)? {
-            out.push(Constraint::Class(c));
+            let classes = if g.object(c, sh.rdf_first)?.is_some() {
+                self.list(c)?
+            } else {
+                vec![c]
+            };
+            if !classes.is_empty() {
+                out.push(Constraint::Class(classes));
+            }
         }
         for d in g.objects(node, sh.datatype)? {
             let datatypes = if g.object(d, sh.rdf_first)?.is_some() {
