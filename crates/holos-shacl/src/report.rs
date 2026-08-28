@@ -70,68 +70,125 @@ pub fn to_quads(
     results.sort_by_key(sort_key);
 
     for (i, result) in results.iter().enumerate() {
-        let node = BlankNode::new_unchecked(format!("result{i}"));
-        triple(
-            report_node.clone().into(),
-            iri(sh.result)?,
-            node.clone().into(),
+        write_result(
+            result,
+            &Term::from(report_node.clone()),
+            sh.result,
+            &format!("result{i}"),
+            shapes_graph,
+            sh,
             &mut out,
-        );
-        triple(
-            node.clone().into(),
-            iri(sh.rdf_type)?,
-            iri(sh.validation_result)?.into(),
-            &mut out,
-        );
-        let Some(focus) = shapes_graph.term(result.focus_node)? else {
-            continue;
-        };
-        triple(node.clone().into(), iri(sh.focus_node)?, focus, &mut out);
-        triple(
-            node.clone().into(),
-            iri(sh.result_severity)?,
-            iri(result.severity)?.into(),
-            &mut out,
-        );
-        triple(
-            node.clone().into(),
-            iri(sh.source_constraint_component)?,
-            iri(result.component)?.into(),
-            &mut out,
-        );
-        if let Some(shape) = shapes_graph.term(result.source_shape)? {
-            triple(node.clone().into(), iri(sh.source_shape)?, shape, &mut out);
-        }
-        if let Some(value) = result.value {
-            if let Some(term) = shapes_graph.term(value)? {
-                triple(node.clone().into(), iri(sh.value)?, term, &mut out);
-            }
-        }
-        if let Some(path) = result.path {
-            if let Some(term) = shapes_graph.term(path)? {
-                // A compound path is a blank-node structure in the shapes graph. It is
-                // copied into the report — naming it without its triples would leave the
-                // reader unable to resolve it — and copied *per result*, under labels
-                // unique to this result. Sharing one copy between two results makes a
-                // graph that is not isomorphic to the one SHACL specifies, because the
-                // two results would then share a node rather than each having their own.
-                let renamed = rename(&term, i);
-                triple(
-                    node.clone().into(),
-                    iri(sh.result_path)?,
-                    renamed.clone(),
-                    &mut out,
-                );
-                copy_subgraph(shapes_graph, path, i, &mut out)?;
-            }
-        }
-        for message in &result.messages {
-            if let Some(term) = shapes_graph.term(*message)? {
-                triple(node.clone().into(), iri(sh.result_message)?, term, &mut out);
-            }
-        }
+        )?;
     }
     Ok(out)
+}
+
+/// Writes one result, and any results nested underneath it.
+///
+/// `link` is the predicate joining `parent` to this result: `sh:result` from the report
+/// itself, `sh:detail` from an enclosing result. They are not interchangeable — a result is
+/// not a report, so hanging a nested one off `sh:result` would claim the validator produced
+/// it directly rather than as an explanation of something else.
+///
+/// `label` names this result's blank node and is derived from its position, so two runs over
+/// the same data still produce byte-identical output.
+#[allow(clippy::too_many_arguments)]
+fn write_result(
+    result: &ValidationResult,
+    parent: &Term,
+    link: TermId,
+    label: &str,
+    shapes_graph: GraphView<'_>,
+    sh: &Sh,
+    out: &mut Vec<Quad>,
+) -> Result<(), ShaclError> {
+    let iri = |id: TermId| -> Result<NamedNode, ShaclError> {
+        match shapes_graph.term(id)? {
+            Some(Term::NamedNode(n)) => Ok(n),
+            _ => Err(ShaclError::IllFormedShape(format!(
+                "{id:?} should be an IRI"
+            ))),
+        }
+    };
+    let triple = |s: Term, p: NamedNode, o: Term, out: &mut Vec<Quad>| {
+        let subject = match s {
+            Term::NamedNode(n) => n.into(),
+            Term::BlankNode(b) => b.into(),
+            _ => return,
+        };
+        out.push(Quad {
+            subject,
+            predicate: p,
+            object: o,
+            graph_name: GraphName::DefaultGraph,
+        });
+    };
+
+    let node = BlankNode::new_unchecked(label.to_owned());
+    triple(parent.clone(), iri(link)?, node.clone().into(), out);
+    triple(
+        node.clone().into(),
+        iri(sh.rdf_type)?,
+        iri(sh.validation_result)?.into(),
+        out,
+    );
+    let Some(focus) = shapes_graph.term(result.focus_node)? else {
+        return Ok(());
+    };
+    triple(node.clone().into(), iri(sh.focus_node)?, focus, out);
+    triple(
+        node.clone().into(),
+        iri(sh.result_severity)?,
+        iri(result.severity)?.into(),
+        out,
+    );
+    triple(
+        node.clone().into(),
+        iri(sh.source_constraint_component)?,
+        iri(result.component)?.into(),
+        out,
+    );
+    if let Some(shape) = shapes_graph.term(result.source_shape)? {
+        triple(node.clone().into(), iri(sh.source_shape)?, shape, out);
+    }
+    if let Some(value) = result.value {
+        if let Some(term) = shapes_graph.term(value)? {
+            triple(node.clone().into(), iri(sh.value)?, term, out);
+        }
+    }
+    if let Some(path) = result.path {
+        if let Some(term) = shapes_graph.term(path)? {
+            // A compound path is a blank-node structure in the shapes graph. It is copied
+            // into the report — naming it without its triples would leave the reader unable
+            // to resolve it — and copied *per result*, under labels unique to this result.
+            // Sharing one copy between two results makes a graph that is not isomorphic to
+            // the one SHACL specifies, because the two results would then share a node
+            // rather than each having their own.
+            let renamed = rename(&term, label);
+            triple(node.clone().into(), iri(sh.result_path)?, renamed, out);
+            copy_subgraph(shapes_graph, path, label, out)?;
+        }
+    }
+    for message in &result.messages {
+        if let Some(term) = shapes_graph.term(*message)? {
+            triple(node.clone().into(), iri(sh.result_message)?, term, out);
+        }
+    }
+
+    let mut details = result.details.clone();
+    details.sort_by_key(sort_key);
+    for (j, detail) in details.iter().enumerate() {
+        write_result(
+            detail,
+            &Term::from(node.clone()),
+            sh.detail,
+            &format!("{label}d{j}"),
+            shapes_graph,
+            sh,
+            out,
+        )?;
+    }
+    Ok(())
 }
 
 /// A total order over results, so report rendering is deterministic.
@@ -140,9 +197,9 @@ fn sort_key(r: &ValidationResult) -> (TermId, Option<TermId>, Option<TermId>, Te
 }
 
 /// Relabels a blank node so one result's copy of a path cannot collide with another's.
-fn rename(term: &Term, result: usize) -> Term {
+fn rename(term: &Term, label: &str) -> Term {
     match term {
-        Term::BlankNode(b) => BlankNode::new_unchecked(format!("p{result}_{}", b.as_str())).into(),
+        Term::BlankNode(b) => BlankNode::new_unchecked(format!("p{label}_{}", b.as_str())).into(),
         other => other.clone(),
     }
 }
@@ -152,7 +209,7 @@ fn rename(term: &Term, result: usize) -> Term {
 fn copy_subgraph(
     graph: GraphView<'_>,
     root: TermId,
-    result: usize,
+    label: &str,
     out: &mut Vec<Quad>,
 ) -> Result<(), ShaclError> {
     if holos_core::Tag::BlankNode != root.tag() {
@@ -170,7 +227,7 @@ fn copy_subgraph(
         {
             let quad = quad?;
             let decoded = graph.store().decode_quad(quad)?;
-            let subject = match rename(&Term::from(decoded.subject.clone()), result) {
+            let subject = match rename(&Term::from(decoded.subject.clone()), label) {
                 Term::NamedNode(n) => n.into(),
                 Term::BlankNode(b) => b.into(),
                 _ => continue,
@@ -178,7 +235,7 @@ fn copy_subgraph(
             out.push(Quad {
                 subject,
                 predicate: decoded.predicate,
-                object: rename(&decoded.object, result),
+                object: rename(&decoded.object, label),
                 graph_name: GraphName::DefaultGraph,
             });
             if quad.object.tag() == holos_core::Tag::BlankNode {

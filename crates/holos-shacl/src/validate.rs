@@ -315,10 +315,27 @@ impl<'a> Validator<'a> {
                         violate_value(v, results);
                         continue;
                     };
+                    // The outer result names the *list*, because that is what the shape was
+                    // checking; each repeated member is reported underneath it as a
+                    // `sh:detail`. One detail per distinct repeated value, not one per
+                    // repetition — a member appearing three times is one thing wrong, said
+                    // once.
                     let mut seen = FxHashSet::default();
-                    if !members.iter().all(|m| seen.insert(*m)) {
-                        violate_value(v, results);
+                    let mut repeated = Vec::new();
+                    for &m in &members {
+                        if !seen.insert(m) && !repeated.contains(&m) {
+                            repeated.push(m);
+                        }
                     }
+                    if repeated.is_empty() {
+                        continue;
+                    }
+                    let mut outer = self.result(shape, focus, Some(v), component);
+                    outer.details = repeated
+                        .into_iter()
+                        .map(|m| self.result(shape, focus, Some(m), component))
+                        .collect();
+                    results.push(outer);
                 }
             }
             Constraint::MemberShape(inner) => {
@@ -327,11 +344,21 @@ impl<'a> Validator<'a> {
                         violate_value(v, results);
                         continue;
                     };
+                    // As with `sh:uniqueMembers`: the list is what failed, and the members
+                    // that failed are the explanation. The details here are the *inner
+                    // shape's own results* rather than restatements of this constraint —
+                    // they name the constraint that actually rejected the member, which is
+                    // the only form that tells a reader why.
+                    let mut details = Vec::new();
                     for member in members {
-                        if !self.holds(*inner, member, depth)? {
-                            violate_value(member, results);
-                        }
+                        self.validate_shape(*inner, member, depth + 1, &mut details)?;
                     }
+                    if details.is_empty() {
+                        continue;
+                    }
+                    let mut outer = self.result(shape, focus, Some(v), component);
+                    outer.details = details;
+                    results.push(outer);
                 }
             }
             Constraint::SingleLine => {
@@ -535,6 +562,7 @@ impl<'a> Validator<'a> {
                             component,
                             severity: shape.severity,
                             messages: shape.messages.clone(),
+                            details: Vec::new(),
                         });
                     }
                 }
@@ -593,6 +621,7 @@ impl<'a> Validator<'a> {
             component,
             severity: shape.severity,
             messages: shape.messages.clone(),
+            details: Vec::new(),
         }
     }
 

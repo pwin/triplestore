@@ -78,6 +78,13 @@ pub struct ValidationResult {
     pub severity: TermId,
     /// `sh:resultMessage`, in shapes-graph order.
     pub messages: Vec<TermId>,
+    /// `sh:detail` — results that explain this one.
+    ///
+    /// A constraint whose violation is about a *structure* rather than a value reports the
+    /// structure and then, underneath, what was wrong inside it: `sh:uniqueMembers` names
+    /// the list and details the members that repeated. Nesting is what keeps the outer
+    /// result about the thing the shape was checking.
+    pub details: Vec<ValidationResult>,
 }
 
 /// The outcome of a validation.
