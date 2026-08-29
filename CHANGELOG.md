@@ -24,6 +24,30 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### The last two mislabelled results
+
+`service5` was the only test in any suite the differential rig blamed on HOLOS rather than
+upstream. It is `SERVICE ?service` — a variable endpoint — and both HOLOS and the reference
+evaluator raise the same error on it: *"the variable encoding the service name is unbound"*.
+The rig collected one side, propagated its error, and reported a divergence between two runs
+that had done the identical thing.
+
+Failing the same way is the most important form of agreement a differential rig can observe,
+and it was the one case it could not see. Both sides are collected before either is
+inspected now, and identical errors count as agreement. **SPARQL 1.1 reaches 512/512** with
+no failures, and the shared limitation is filed where it belongs.
+
+Forty-seven protocol tests were skipped as *"not implemented yet"*. They are implemented, and
+passing: the SPARQL Protocol suite is 34/34 and Graph Store Protocol 13/13, and the counts
+match the skips exactly, because `manifest-all.ttl` includes the sub-manifests those suites
+run directly. The skip now says where they ran rather than claiming they did not. Only
+`ServiceDescriptionTest` and `CSVResultFormatTest` — three each — are genuinely unimplemented.
+
+With that, every remaining line in every suite is accounted for and says something true:
+44 RDF/XML parser failures and 33 evaluator differences upstream in `oxrdf` and `spargebra`,
+five parser bugs likewise, 34 OWL and RIF entailment tests out of scope, two `rdf:XMLLiteral`
+canonicalisations declined by name, and six protocol features not built.
+
 ### `rdf:JSON` canonicalisation
 
 RDF 1.2 gives `rdf:JSON` a value space of JSON *values* rather than of the text spelling them,

@@ -1,3 +1,2 @@
 # sparql11 — tests known to fail. Regenerate with HOLOS_UPDATE_CONFORMANCE=1.
-# 512/513 passed, 1 failed, 112 skipped
-http://www.w3.org/2009/sparql/docs/tests/data-sparql11/service/manifest#service5	HOLOS differs from the reference dataset: The variable encoding the service name is unbound (vs expected: reading solutions: The variable encoding the service name is unbound);              result file C:/repos/new_triplestore_sparql_engine/testsuites/rdf-tests/sparql/sparql11/service/service05.srx
+# 512/512 passed, 0 failed, 113 skipped
