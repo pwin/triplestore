@@ -19,6 +19,7 @@
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
 pub mod entailment;
+pub mod json;
 pub mod manifest;
 pub mod protocol;
 pub mod resultset;

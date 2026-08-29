@@ -282,6 +282,7 @@ const CANONICALISABLE: &[&str] = &[
     "http://www.w3.org/2001/XMLSchema#double",
     "http://www.w3.org/2001/XMLSchema#string",
     "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString",
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON",
 ];
 
 /// A literal rewritten so that equal values are equal terms, or `None` to leave it alone.
@@ -302,6 +303,16 @@ fn canonical_literal(
         // An unrecognised datatype is opaque: two lexical forms of it are two values, which
         // is exactly what `mf:unrecognizedDatatypes` asserts.
         return None;
+    }
+    // `rdf:JSON`'s value space is JSON values, so its canonical form is a whole document
+    // rewritten rather than a number reformatted. See [`crate::json`].
+    if datatype == "http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON" {
+        return crate::json::canonical_text(lit.value()).map(|text| {
+            oxrdf::Literal::new_typed_literal(
+                text,
+                oxrdf::NamedNode::new_unchecked(datatype.clone()),
+            )
+        });
     }
     const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
     let local = datatype.strip_prefix(XSD)?;
@@ -452,6 +463,9 @@ fn value_space(datatype: &str) -> Option<&'static str> {
     if datatype == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString" {
         return Some("langString");
     }
+    if datatype == "http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON" {
+        return Some("json");
+    }
     match datatype.strip_prefix(XSD)? {
         "integer" | "decimal" | "int" | "long" | "short" | "byte" | "nonNegativeInteger"
         | "positiveInteger" | "unsignedInt" | "unsignedLong" => Some("decimal"),
@@ -466,6 +480,7 @@ fn value_space(datatype: &str) -> Option<&'static str> {
 fn well_formed(lit: &oxrdf::Literal) -> bool {
     let text = lit.value();
     match value_space(lit.datatype().as_str()) {
+        Some("json") => crate::json::parse(text).is_some(),
         Some("decimal") => text.parse::<oxsdatatypes::Decimal>().is_ok(),
         Some("float") => text.parse::<f32>().is_ok(),
         Some("double") => text.parse::<f64>().is_ok(),

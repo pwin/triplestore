@@ -24,6 +24,24 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### `rdf:JSON` canonicalisation
+
+RDF 1.2 gives `rdf:JSON` a value space of JSON *values* rather than of the text spelling them,
+so `{ "a":0, "b":1 }` and `{ "b":1, "a":0 }` are one literal and `[ -0, 0 ]` and `[ 0, -0 ]`
+are two. `holos_conformance::json` parses and re-emits in a form where equal values are equal
+strings, and the seven `rdf:JSON` tests move from skipped to passing.
+
+Hand-rolled rather than a dependency, for one reason that outweighs the hundred lines: the
+number rule is not the usual one. JSON numbers denote IEEE 754 doubles, and this has to keep
+`-0` apart from `0` while making `1E400` and `1E401` identical — both are `+Infinity` — and
+`9007199254740992.5` identical to `9007199254740991.5`, which round to one double. A
+serialiser that prints numbers back as decimal gets all four wrong. Keying on the *bits* gets
+all four right, and it is the same trick already used for `xsd:double`.
+
+**RDF 1.2 reaches 1382/1405.** The single remaining skip in each RDF suite is
+`rdf:XMLLiteral`, whose canonical form is XML C14N — a much larger job than this one, and
+declined by name rather than approximated.
+
 ### The SPARQL suites' `upstream:` labels, audited
 
 Forty-five skips read *"HOLOS agrees with the reference dataset, so the evaluator differs"*.
