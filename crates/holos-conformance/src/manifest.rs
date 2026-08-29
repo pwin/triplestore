@@ -86,6 +86,13 @@ pub struct TestEntry {
     pub result_data: Option<PathBuf>,
     /// The base IRI test content must be parsed against. See the module note.
     pub base: String,
+    /// `mf:resultCardinality mf:LaxCardinality` — the result's *cardinality* is not part of
+    /// what the test asserts.
+    ///
+    /// Declared by the `REDUCED` tests, where the specification permits any cardinality
+    /// between one per distinct solution and the full multiset. A fixture can only show one
+    /// permitted answer, so comparing multiplicities against it fails a conformant engine.
+    pub lax_cardinality: bool,
     /// `mf:entailmentRegime` — the RDF semantics suites name a regime as a plain string
     /// (`"simple"`, `"RDF"`, `"RDFS"`) rather than as the IRI the SPARQL suite uses.
     pub mf_entailment_regime: Option<String>,
@@ -219,6 +226,7 @@ fn load_into(manifest: &Path, out: &mut Vec<TestEntry>, seen: &mut HashSet<PathB
             result_graph_data: Vec::new(),
             result_data: None,
             base: assumed_base.clone(),
+            lax_cardinality: false,
             mf_entailment_regime: None,
             recognized_datatypes: Vec::new(),
             unrecognized_datatypes: Vec::new(),
@@ -276,6 +284,10 @@ fn load_into(manifest: &Path, out: &mut Vec<TestEntry>, seen: &mut HashSet<PathB
         // rather than an argument to any one request.
         collect_graph_data(&graph, subject, &assumed_base, &mut test.graph_data);
 
+        test.lax_cardinality = matches!(
+            object(&graph, subject, &mf("resultCardinality")),
+            Some(Term::NamedNode(n)) if n.as_str().ends_with("#LaxCardinality")
+        );
         test.mf_entailment_regime =
             object(&graph, subject, &mf("entailmentRegime")).map(|t| literal_value(&t));
         for (predicate, into) in [

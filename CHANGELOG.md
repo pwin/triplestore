@@ -24,6 +24,54 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### The SPARQL suites' `upstream:` labels, audited
+
+Forty-five skips read *"HOLOS agrees with the reference dataset, so the evaluator differs"*.
+Three groups of them were the harness's own gaps, and one of those hid a real defect.
+
+**`mf:resultCardinality mf:LaxCardinality`** was read zero times. `REDUCED` may return any
+cardinality between one per distinct solution and the whole multiset; a fixture can only show
+one permitted answer, and comparing multiplicities against it failed a conformant engine. Two
+tests, and the manifest said so in as many words.
+
+**`FROM` and `FROM NAMED` were never loaded.** In the dataset suite the action carries a
+query and nothing else — the clauses name files beside it. Without loading them the query ran
+against an empty dataset, and the differential rig then filed the result as upstream because
+the reference evaluator, given the same nothing, agreed. The engine's own `FROM` handling
+turned out to be correct in all four cases once it had data.
+
+**Update results were compared by blank-node label**, which the skip text admitted rather than
+fixed. `compare_datasets` already does isomorphism; the update path now uses it.
+
+| | Before | After |
+|---|---:|---:|
+| SPARQL 1.0 | 262/263, 20 skipped | **275/276**, 7 skipped |
+| SPARQL 1.2 | 262/266, 3 skipped | **265/269**, 0 skipped |
+
+What the audit did *not* find: the remaining sparql11 group is honestly upstream. Almost all
+of it is numeric lexical form — `"1.0"^^xsd:decimal` against `"1"^^xsd:decimal`, `"3.0E4"`
+against `"30000"` — and the suite compares RDF terms, so those really are evaluator
+differences rather than comparison bugs.
+
+### Blank nodes were shared between documents
+
+Loading the dataset suite's files exposed this. `bulk_load` kept the blank node labels the
+parser produced, so `_:a` in two documents became **one** node:
+
+```
+distinct subjects across the two documents: 1
+```
+
+RDF scopes a blank node label to the file it is written in. Merging them asserts an identity
+neither document stated, out of nothing but a coincidence of spelling — and `_:a`, `_:b0` and
+`_:genid1` are what every serialiser reaches for first, so the coincidence is the common case.
+`holos load a.ttl && holos load b.ttl` was enough to hit it.
+
+Renamed on the way in now, for both loaders. The W3C suite tests it directly: `dataset-09b`
+joins a default graph against a named one over two files of blank-node subjects, and the
+answer is no rows *because* those subjects are different nodes. It had been passing
+vacuously, against data the harness never loaded.
+
 ### Datatype entailment, and a reasoner bug it exposed
 
 The RDF suites' remaining skips were all datatype entailment. Two halves, both now decided:

@@ -112,13 +112,20 @@ impl Engine {
     ///
     /// This is the bootstrap path — populating a store from trusted files at start-up.
     /// Anything reachable by a principal must go through [`Engine::insert`] instead.
+    ///
+    /// Blank nodes are renamed as they arrive. RDF scopes a blank node label to the document
+    /// it appears in, so `_:a` in two files denotes two different things — and without
+    /// renaming, loading both merges them into one node and asserts an identity neither
+    /// document stated. The cost is that loading the same file twice produces two sets of
+    /// blank nodes, which is also what RDF says: the second load asserts a second existential
+    /// rather than repeating the first.
     pub fn bulk_load(
         &mut self,
         reader: impl Read,
         format: RdfFormat,
         base_iri: Option<&str>,
     ) -> Result<usize, EngineError> {
-        let mut parser = RdfParser::from_format(format);
+        let mut parser = RdfParser::from_format(format).rename_blank_nodes();
         if let Some(base) = base_iri {
             parser = parser
                 .with_base_iri(base)
@@ -138,6 +145,8 @@ impl Engine {
     /// Triples in the input land in `graph`; quads that already name a graph keep it.
     /// Needed by the Graph Store Protocol (L6) and by the conformance harness, where a
     /// suite's `qt:graphData` has to arrive under the IRI the expected results use.
+    ///
+    /// Blank nodes are renamed, for the reason [`Engine::bulk_load`] gives.
     pub fn bulk_load_into_graph(
         &mut self,
         reader: impl Read,
@@ -145,7 +154,7 @@ impl Engine {
         base_iri: Option<&str>,
         graph: &oxrdf::GraphName,
     ) -> Result<usize, EngineError> {
-        let mut parser = RdfParser::from_format(format);
+        let mut parser = RdfParser::from_format(format).rename_blank_nodes();
         if let Some(base) = base_iri {
             parser = parser
                 .with_base_iri(base)

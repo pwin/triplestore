@@ -365,6 +365,48 @@ fn run_update_evaluation(test: &TestEntry) -> Outcome {
     compare_stores(&engine, &expected)
 }
 
+/// An engine's whole contents as a dataset, for comparison up to isomorphism.
+fn as_dataset(engine: &holos_engine::Engine) -> Result<Dataset> {
+    let store = engine.store();
+    let mut out = Dataset::new();
+    for quad in store.quads_for_pattern(None, None, None, holos_store::GraphFilter::Any) {
+        out.insert(&store.decode_quad(quad?)?);
+    }
+    Ok(out)
+}
+
+/// Loads the graphs a query's `FROM` and `FROM NAMED` clauses name.
+///
+/// Both go in as *named* graphs under their own IRI, which lets the evaluator's own dataset
+/// handling do the rest: `FROM` merges them into the active default graph and `FROM NAMED`
+/// leaves them addressable, and neither is this harness's decision to make.
+///
+/// A clause naming something that is not a readable file is left alone rather than failing.
+/// A query may name a graph the store already holds, and the federated tests name endpoints.
+fn load_dataset_clauses(engine: &mut holos_engine::Engine, query: &spargebra::Query) -> Result<()> {
+    let dataset = match query {
+        spargebra::Query::Select { dataset, .. }
+        | spargebra::Query::Construct { dataset, .. }
+        | spargebra::Query::Describe { dataset, .. }
+        | spargebra::Query::Ask { dataset, .. } => dataset.as_ref(),
+    };
+    let Some(dataset) = dataset else {
+        return Ok(());
+    };
+    let named = dataset.named.iter().flatten();
+    for iri in dataset.default.iter().chain(named) {
+        let Some(path) = manifest::file_url_to_path(iri.as_str()) else {
+            continue;
+        };
+        if !path.is_file() {
+            continue;
+        }
+        let graph = GraphName::from(iri.clone());
+        load(engine, &path, iri.as_str(), Some(graph))?;
+    }
+    Ok(())
+}
+
 /// Loads a default graph and a set of named graphs into an engine.
 fn load_dataset(
     engine: &mut holos_engine::Engine,
@@ -411,13 +453,23 @@ fn compare_stores(actual: &holos_engine::Engine, expected: &holos_engine::Engine
         Ok(out)
     };
 
-    let (actual, expected) = match (dump(actual), dump(expected)) {
+    let (actual_engine, expected_engine) = (actual, expected);
+    let (actual, expected) = match (dump(actual_engine), dump(expected_engine)) {
         (Ok(a), Ok(e)) => (a, e),
         (Err(e), _) | (_, Err(e)) => return Outcome::fail(format!("reading a dataset: {e}")),
     };
 
     if actual == expected {
         return Outcome::Passed;
+    }
+
+    // Then up to blank-node isomorphism. An update that creates a blank node gets whichever
+    // label the store hands out, so comparing labels makes a correct result look wrong — a
+    // limitation this harness used to admit in its skip text rather than fix.
+    if let (Ok(a), Ok(e)) = (as_dataset(actual_engine), as_dataset(expected_engine)) {
+        if compare_datasets(&e, &a).is_ok() {
+            return Outcome::Passed;
+        }
     }
 
     // The examples quoted have to be the *sorted* prefix, not whichever the set reached
@@ -495,6 +547,14 @@ fn run_query_evaluation(test: &TestEntry) -> Outcome {
             return Outcome::fail(format!("loading graph data: {e}"));
         }
     }
+    // `FROM <g>` and `FROM NAMED <g>` name graphs the *query* asks for, and in the dataset
+    // suite that is all the test supplies — the action carries a query and nothing else, and
+    // the IRIs resolve to files beside it. Without loading them the query runs against an
+    // empty dataset and returns nothing, which the differential rig then files as an
+    // upstream fault because the reference evaluator, given the same nothing, agrees.
+    if let Err(e) = load_dataset_clauses(&mut engine, &query) {
+        return Outcome::fail(format!("loading a FROM clause: {e}"));
+    }
 
     // The federated suite names each endpoint with `qt:serviceData` and supplies a local
     // file for it, so `SERVICE` is exercised without a live endpoint anywhere.
@@ -539,7 +599,11 @@ fn run_query_evaluation(test: &TestEntry) -> Outcome {
     };
 
     let ordered = query.to_string().to_uppercase().contains("ORDER BY");
-    match compare_results(actual, result_path, ordered, &view) {
+    let shape = Shape {
+        ordered,
+        lax_cardinality: test.lax_cardinality,
+    };
+    match compare_results(actual, result_path, shape, &view) {
         Ok(()) => Outcome::Passed,
         Err(e) if e == UNREADABLE_RESULT_FORMAT => Outcome::Skipped(e),
         Err(e) => attribute(test, &query, result_path, ordered, e),
@@ -654,7 +718,16 @@ fn compare_two(
             let ys: Vec<_> = y
                 .collect::<std::result::Result<_, _>>()
                 .map_err(|e| e.to_string())?;
-            compare_solutions(&ys, &xs, ordered)
+            compare_solutions(
+                &ys,
+                &xs,
+                Shape {
+                    ordered,
+                    // The rig compares two live results, so a difference in multiplicity
+                    // between them is a real difference whatever the test asserts.
+                    lax_cardinality: false,
+                },
+            )
         }
         (QueryResults::Graph(x), QueryResults::Graph(y)) => {
             let mut gx = Dataset::new();
@@ -694,10 +767,23 @@ fn load(engine: &mut Engine, path: &Path, base: &str, graph: Option<GraphName>) 
     Ok(())
 }
 
+/// How strictly a result is to be compared.
+///
+/// Two independent axes, and both come from the test rather than from the query. `ordered`
+/// is whether the sequence is part of the answer; `lax_cardinality` is whether the
+/// *multiplicities* are, which `mf:resultCardinality mf:LaxCardinality` says they are not.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Shape {
+    /// The query has an `ORDER BY`, so the sequence is part of the answer.
+    pub ordered: bool,
+    /// `mf:LaxCardinality`: how many times a solution appears is not asserted.
+    pub lax_cardinality: bool,
+}
+
 fn compare_results(
     actual: QueryResults<'_>,
     expected_path: &Path,
-    ordered: bool,
+    shape: Shape,
     view: &DatasetView<'_>,
 ) -> std::result::Result<(), String> {
     match actual {
@@ -714,7 +800,7 @@ fn compare_results(
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| format!("reading solutions: {e}"))?;
             let expected = read_expected_solutions(expected_path)?;
-            compare_solutions(&expected, &actual, ordered)
+            compare_solutions(&expected, &actual, shape)
         }
         QueryResults::Graph(triples) => {
             let mut got = Dataset::new();
@@ -876,8 +962,28 @@ fn read_expected_solutions(path: &Path) -> std::result::Result<Vec<QuerySolution
 fn compare_solutions(
     expected: &[QuerySolution],
     actual: &[QuerySolution],
-    ordered: bool,
+    shape: Shape,
 ) -> std::result::Result<(), String> {
+    // Under lax cardinality the answer is the *set*, so both sides are deduplicated before
+    // anything is counted. `REDUCED` may return any number of copies between one per
+    // distinct solution and the whole multiset, and a fixture can only show one of those —
+    // so comparing multiplicities against it fails an engine that chose differently and was
+    // right to.
+    if shape.lax_cardinality {
+        let expected = distinct(expected);
+        let actual = distinct(actual);
+        if expected.len() != actual.len() {
+            return Err(format!(
+                "expected {} distinct solutions, got {}",
+                expected.len(),
+                actual.len()
+            ));
+        }
+        return compare_datasets(
+            &solutions_as_dataset(expected),
+            &solutions_as_dataset(actual),
+        );
+    }
     if expected.len() != actual.len() {
         return Err(format!(
             "expected {} solutions, got {}",
@@ -885,7 +991,7 @@ fn compare_solutions(
             actual.len()
         ));
     }
-    if ordered && !has_blank_nodes(expected) && !has_blank_nodes(actual) {
+    if shape.ordered && !has_blank_nodes(expected) && !has_blank_nodes(actual) {
         for (i, (e, a)) in expected.iter().zip(actual).enumerate() {
             if bindings(e) != bindings(a) {
                 return Err(format!(
@@ -901,6 +1007,19 @@ fn compare_solutions(
         &solutions_as_dataset(expected),
         &solutions_as_dataset(actual),
     )
+}
+
+/// The distinct solutions, keeping the first of each.
+///
+/// Keyed on the rendered bindings rather than on `QuerySolution`, which is not `Hash`. Two
+/// solutions binding the same variables to the same terms render identically, which is what
+/// "distinct" means here.
+fn distinct(solutions: &[QuerySolution]) -> Vec<&QuerySolution> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    solutions
+        .iter()
+        .filter(|s| seen.insert(format!("{:?}", render(s))))
+        .collect()
 }
 
 fn has_blank_nodes(solutions: &[QuerySolution]) -> bool {
@@ -923,7 +1042,7 @@ fn render(solution: &QuerySolution) -> Vec<String> {
         .collect()
 }
 
-fn solutions_as_dataset(solutions: &[QuerySolution]) -> Dataset {
+fn solutions_as_dataset<'a>(solutions: impl IntoIterator<Item = &'a QuerySolution>) -> Dataset {
     let root = NamedNode::new_unchecked("urn:holos:conformance:results");
     let has_solution = NamedNode::new_unchecked("urn:holos:conformance:solution");
     let mut dataset = Dataset::new();
