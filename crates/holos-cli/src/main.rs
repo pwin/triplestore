@@ -45,8 +45,10 @@ DATA
                              faster; a load interrupted part-way must be discarded.
 
 MAINTENANCE
-    --entail-graph <IRI>     Where `entail` writes. Default holos:entailed. Its own graph so
-                             it can be dropped again and told apart from what was asserted.
+    --entail-graph <IRI>     Where `entail` writes. Its own graph so it can be dropped again
+                             and told apart from what was asserted. Default
+                             <https://holos.dev/ns#entailed> -- an absolute IRI, because
+                             `DROP GRAPH` needs the name the store actually holds.
     --entail-budget <N>      Refuse a closure larger than N new triples. Default 10,000,000.
     --to <DIR>               Destination for `backup` and `compact`. Must not exist.
                              `backup` writes a RocksDB checkpoint: near-instant, hard-linked,
@@ -106,8 +108,12 @@ VALIDATE
                              Without it the shapes are expected in the data itself.
     --report                 Print the validation report as N-Triples.
     --engine <NAME>          native (default) or adapted. 'native' reads the live store and
-                             supports incremental revalidation; 'adapted' bridges the store
-                             into the adapted SHACL_Engine, which covers far more of SHACL.
+                             revalidates a delta; 'adapted' bridges the store into the
+                             adapted SHACL_Engine, which covers far more of SHACL.
+                             'native' refuses a shapes graph using anything it cannot check
+                             -- sh:sparql, SHACL-AF rules, node expressions -- rather than
+                             dropping the constraint and reporting conformance. Use
+                             'adapted' for those.
 
 OPTIONS
     -h, --help               This text.
