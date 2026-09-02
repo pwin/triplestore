@@ -283,13 +283,27 @@ An index nested-loop join closes it: **0.535 ms on the query path, about 82×**.
 10× to hand-written is generality — per-step re-estimation, hashed bindings, dictionary
 decoding — not a missing operator.
 
-**The fragment is deliberately small.** `SELECT` in the default graph over basic graph
-patterns, `JOIN`, `UNION`, `VALUES` and `FILTER`, with `DISTINCT`, `LIMIT`, `OFFSET` and a
-projection. Everything else is refused and falls back, so the fragment can grow without the
-growth risking what already works. It has grown twice: `FILTER` bought **72×** on a selective
-filtered star, because the predicate prunes branches before the remaining patterns are
-scanned at all; `JOIN`, `UNION` and `VALUES` bought **2,408×** on a spatial query, for the
-reason below.
+**The fragment started deliberately small and has grown.** `SELECT` over basic graph
+patterns, `JOIN`, `UNION`, `VALUES`, `FILTER`, `OPTIONAL`, `GRAPH`, `MINUS`, subqueries that
+hide nothing, blank nodes, and sequence, inverse and alternative property paths — with
+`DISTINCT`, `LIMIT`, `OFFSET` and a projection. Everything else is refused and falls back,
+which is what let it grow without the growth risking what already works.
+
+Each step is measured. `FILTER` bought **72×** on a selective filtered star, because the
+predicate prunes branches before the remaining patterns are scanned. `JOIN`, `UNION` and
+`VALUES` bought **2,408×** on a spatial query, for the reason below. `OPTIONAL` bought **41×**
+at 820,000 quads and `GRAPH ?g` **9×**, both flat where the evaluator grows with the store.
+
+Two constructs are refused on principle rather than pending work. **`ORDER BY`** needs a term
+comparator, and SPARQL leaves the relative order of incomparable terms to the implementation —
+so matching the evaluator's sequence means matching its tie-breaking, which is duplicating
+code rather than reusing it and creating two implementations that must agree exactly forever.
+**Aggregation** is the same argument over a larger surface. A fallback costs time; a second
+implementation that drifts costs answers.
+
+The refusals that are pending work rather than principle: closure paths (`*`, `+`, `?`) need a
+fixpoint traversal; a subquery hiding a variable needs that variable renamed before splicing;
+a nested `GRAPH` needs the inner-overrides-outer rule.
 
 **Filters are borrowed, not reimplemented.** The predicate is evaluated by `spareval`'s own
 expression evaluator through this engine's function registry, so `FILTER` semantics here are
@@ -383,17 +397,25 @@ be a write in the middle of a read.
 > | | Adapted engine | Native evaluator |
 > |---|---|---|
 > | Coverage | SHACL Core, SPARQL constraints, node expressions, SHACL-AF rules, inference | SHACL Core |
-> | W3C SHACL 1.2 Core | **127/138** | 94/138 |
-> | W3C SHACL 1.0 Core | 90/98 | **92/97** |
-> | Reads | a bridged snapshot | the live store |
-> | Incremental revalidation | no | **yes, 161×** |
+> | W3C SHACL 1.2 Core | **138/138** | **138/138** |
+> | W3C SHACL 1.0 Core | **98/98** | **98/98** |
+> | Reads | a bridged graph, kept current by delta | the live store |
+> | Incremental revalidation | **yes** | **yes** |
 >
-> The split is forced by one fact: the adapted engine's `Graph` is immutable, so a delta
-> cannot be pushed into it cheaply and a validator that re-bridges on every commit is not
-> incremental however good its coverage. Hence **the engine for coverage, the native
-> evaluator for the write path** — and a named gap, since the write path then checks fewer
-> constraint components than a full run. Closing it means giving the engine's `Graph` a
-> merge-in-place, which is bounded work and is not done on spec.
+> **The split the first version of this section described is gone.** It rested on one fact —
+> the adapted engine's `Graph` was immutable, so a delta could not be pushed into it and a
+> validator that re-bridged on every commit was not incremental however good its coverage.
+> `Graph::apply` merges into the three sorted permutations in place, and `EngineRun::apply`
+> translates a store delta into it: **0.0009 ms at 250,000 quads, and flat** where re-bridging
+> cost 149 ms and grew with the store. `EngineRun::revalidate` then plans from the engine's own
+> dependency index, so both validators now take a delta.
+>
+> Two things remain true. The native evaluator **refuses** a shapes graph using anything it
+> cannot check — `sh:sparql`, SHACL-AF rules, node expressions — rather than dropping the
+> constraint and reporting conformance, which is what it used to do; that made the Boundary a
+> gate that failed open. And a SPARQL constraint whose query uses a variable predicate cannot
+> be indexed, so a shapes graph containing one falls back to a full run rather than being
+> guessed at.
 >
 > What follows is the design both were built to.
 
@@ -564,10 +586,10 @@ the measurement.
 |---|---|---|
 | **P0** ✅ | Oxigraph crates + store + evaluator | *Done, in-memory.* SPARQL 1.2 and RDF 1.2 triple terms evaluate end to end, and the W3C suites pass with no HOLOS-attributable failure (§15). Still owes the RocksDB substrate. |
 | **P1** ◐ | Dense `TermId` dictionary, order-preserving encodings, SST-ingest bulk loader | *Encoding and the RocksDB tier done.* Measured **41k quads/s** persistent, **208k/s** in memory (§16). Owes `SstFileWriter` ingestion and range filters compiled into index scans. **The original 500k/s exit criterion was written before any measurement and is withdrawn** — see §16 for what replaces it. |
-| **P2** ◐ | Characteristic-set statistics, cost-based optimizer, vectorized binary joins | *Statistics built and measured.* Characteristic sets estimate 6 of 7 query shapes exactly — mean q-error **1.1** against the reused optimiser's **2×10⁸** — and bad estimates cost a measured **3×** (§16). Owes the optimiser itself: the reused one has no injection point, so consuming these statistics means owning the planner. |
+| **P2** ◐ | Characteristic-set statistics, cost-based optimizer, vectorized binary joins | *Statistics built and measured, and consumed.* Characteristic sets estimate 6 of 7 query shapes exactly — mean q-error **1.1** against the reused optimiser's **2×10⁸** — and bad estimates cost a measured **3×** (§16). `bindjoin` is an owned planner over them for the fragment it accepts, re-estimating at each step. Owes the rest of the language: `ORDER BY` and aggregation are refused on principle (§7), the remainder for want of the work. |
 | **P3** | Hypertrie hot tier + WCO multi-join + hybrid planner | Wins on cyclic and join-heavy queries without regressing star and chain queries; memory overhead measured and within budget. **Gated on P2's planner**, not just its statistics — §13 Q2 compares against a *well-planned* binary join, which does not exist yet. |
-| **P4** ◐ | SHACL subsystem on native indexes + incremental revalidation | *Core built.* 92/97 W3C SHACL Core (§15). Revalidation measured at **161×** a full pass, so the cost does track the delta (§16). Owes SPARQL-based constraints, SHACL-AF rules, and the SHACL 1.2 additions. |
-| **P5** ◐ | Holon layer: versioned partitions, event log, IVM projections, time travel | *Walking skeleton built.* Scene, boundary, event log and the tick all work, validated incrementally at 41× a full pass (§16). Owes: atomicity (needs §6.1's MVCC), boundary rules to fixpoint, incrementally maintained projections, and time travel. |
+| **P4** ✅ | SHACL subsystem on native indexes + incremental revalidation | *Done.* **98/98** W3C SHACL 1.0 Core and **138/138** SHACL 1.2 Core, through both validators (§15). Both revalidate a delta: the native one at **161×** a full pass, the adapted one at **0.08 ms against 150 ms** to prepare and validate at 250,000 quads. SPARQL constraints, SHACL-AF rules and node expressions are the adapted engine's; the native evaluator refuses them rather than dropping them. |
+| **P5** ◐ | Holon layer: versioned partitions, event log, IVM projections, time travel | *Walking skeleton built.* Scene, boundary, event log and the tick all work, validated incrementally at 41× a full pass (§16). Owes: atomicity (needs §6.1's MVCC), boundary rules to fixpoint, incrementally maintained projections, and time travel. Boundary rules were blocked on the adapted engine re-bridging per tick; P4 removed that, so they are now unblocked work rather than a dependency. |
 | **P6** ◐ | HTTP protocol server, PyO3/WASM bindings, text + vector module | *Server built* — SPARQL 1.2 Protocol (**34/34**), Graph Store Protocol (**13/13**), SPARQL Update, YASGUI console, PyO3 bindings, policy enforced per request (§10). Owes WASM and the text/vector module. |
 
 P0–P2 is a conventional, low-risk, well-understood engine. P3–P5 is the research content. Structure
@@ -1224,14 +1246,18 @@ available.
 
 It settles the **precondition** for §13 Q2: accurate estimates over RDF are cheap and
 available, and inaccurate ones cost real time. It does not yet answer Q2 itself, which asks
-whether the hypertrie beats a *well-planned* binary join. Answering that needs a planner that
-consumes these statistics — and there is no injection point:
-`Optimizer::optimize_graph_pattern` is a free function called internally by the evaluator, so
-using these numbers means owning the planner rather than configuring one.
+whether the hypertrie beats a *well-planned* binary join.
 
-That is now a decision with numbers attached rather than a preference, which is what P2 was
-for. It also moves §17's R-tree from "blocked on the optimiser" to "blocked on the same
-planner", and it is the same seam in both cases.
+The injection point this section said did not exist now does, for part of the language.
+`Optimizer::optimize_graph_pattern` is still a free function called inside the evaluator, so
+there is still no way to configure the reused planner — but `bindjoin` does not configure it,
+it replaces it for the fragment it accepts, and it consumes these statistics directly:
+`estimate_todo` reads the characteristic-set counts and re-estimates at every step, so a
+pattern whose subject an earlier step bound is costed as a lookup rather than a scan.
+
+So P2's "owning the planner" is done for a fragment and not for the language. What is still
+owed is the rest of it — and §17's R-tree, which was "blocked on the optimiser", is now
+blocked on the same fragment growing to reach it rather than on a seam that does not exist.
 
 **What is deliberately not claimed:** this measures estimation quality and one plan-order
 penalty. It is not an end-to-end query benchmark, and no claim about query throughput is made
