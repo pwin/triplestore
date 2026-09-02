@@ -794,6 +794,14 @@ impl<'a> Compiler<'a> {
         "order",
         "group",
         "defaultValue",
+        // Not a constraint. SHACL-AF states that executing rules is a *separate operation*
+        // from validation, so a validator that ignores `sh:rule` is not skipping a check —
+        // it is doing what the specification says validation does. Refusing it here was too
+        // wide, and the cost showed up as soon as something needed it: a boundary carrying
+        // rules could not be validated at all, which made rules and the incremental write
+        // path mutually exclusive. Firing them is `holos_holon::Rules`'s job, and whether a
+        // pipeline that should have inferred did so is the pipeline's business.
+        "rule",
     ];
 
     /// Refuses a shape carrying a SHACL construct this validator cannot evaluate.
@@ -812,6 +820,10 @@ impl<'a> Compiler<'a> {
     /// parameter lives in the shapes author's own namespace. Detecting those means reading
     /// the `sh:parameter` declarations, and `sh:parameter` itself is refused here — a shapes
     /// graph that declares a custom component is rejected before one can be used.
+    ///
+    /// What belongs on the list is anything whose absence changes an *answer*: a constraint
+    /// that would be silently dropped, or a target that would select different focus nodes.
+    /// `sh:rule` is on the allowlist for neither reason — see its entry.
     fn refuse_unsupported(&self, node: TermId) -> Result<(), ShaclError> {
         const SH: &str = "http://www.w3.org/ns/shacl#";
         for predicate in self.graph.predicates_of(node)? {

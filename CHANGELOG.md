@@ -24,6 +24,38 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### Boundary rules fire in a tick
+
+Step 2 of the holon tick was switched off, and the code said why: SHACL-AF fixpoint evaluation
+exists in the adapted engine but needed a fresh bridge per commit. That was the gap §8 named,
+and closing §8 is what removed it — so this is the payoff from that work rather than a new
+capability bolted on.
+
+`holos_holon::Rules` holds one bridged graph across ticks and keeps it current by delta;
+`EngineRun::infer` runs the rules to a fixpoint and returns *what they added*, leaving where
+those triples belong to the caller. `tick_with_rules` puts them in the scene.
+
+The order is the point. Rules run **before** validation, so what they infer is judged by the
+boundary: a rule writing something the shapes forbid **rejects the commit** rather than
+persisting quietly. The inferences are ordinary additions in the event, and a refused tick
+takes them out with everything else — a reader asking what changed should not have to know
+which triples a rule wrote. And a rule is not a way around §14: it runs inside the session, so
+what it writes meets the same policy as what the caller writes.
+
+### A refusal that was too wide
+
+Wiring this up ran straight into the fail-closed check added earlier, which refused any shapes
+graph containing `sh:rule` — making rules and the incremental write path mutually exclusive.
+
+The refusal was wrong. SHACL-AF states that executing rules is a *separate operation* from
+validation, so a validator ignoring `sh:rule` is doing what the specification says validation
+does, not silently dropping a check. The reasoning behind the original refusal — that a rule
+changes what the data is, so ignoring it validates a graph nobody has yet — is about a
+pipeline, not about validation. What belongs on that list is what would change an *answer*: a
+constraint that would be dropped, or a target that would select different focus nodes.
+
+Corrected, and the test that asserted the old behaviour now records why it was wrong.
+
 ### `MINUS`, blank nodes and property paths — and two constructs that stay out
 
 `MINUS` shares a structure with `OPTIONAL`, because they ask the same question — did the right

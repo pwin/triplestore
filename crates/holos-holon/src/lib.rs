@@ -15,9 +15,11 @@
 //! Steps 1, 3 and 4 are real, and step 3 is *incremental* — it uses the revalidation of §8,
 //! which is the whole reason that was built. The rest is honest about itself:
 //!
-//! - **Step 2 does not run.** Boundary rules need SHACL-AF fixpoint evaluation. The adapted
-//!   engine has it, but only over a bridged snapshot, so firing rules per tick would mean
-//!   re-bridging per tick. Named in §8 as the gap the immutable engine graph leaves.
+//! - **Step 2 runs when it is given somewhere to run.** Boundary rules need SHACL-AF
+//!   fixpoint evaluation, which the adapted engine has. It used to need a fresh bridge per
+//!   tick — the gap §8 named — and no longer does: [`Rules`] holds one bridged graph and
+//!   keeps it current by delta. A caller that does not hold one gets a tick with no rule
+//!   step, which is the old behaviour and is still what [`tick`] does on its own.
 //! - **Step 5 recomputes rather than maintains.** §9 restricts incremental maintenance to a
 //!   fragment of SPARQL and the Z-set machinery is not built. [`Regime::Maintained`] is
 //!   refused rather than silently downgraded.
@@ -153,6 +155,34 @@ pub fn tick(
     session: &mut Session,
     delta: &Delta,
 ) -> Result<TickOutcome, HolonError> {
+    tick_with_rules(engine, holon, session, delta, None)
+}
+
+/// [`tick`], with somewhere to run the boundary's rules.
+///
+/// Pass a [`Rules`] kept across ticks and step 2 runs: the rules fire to a fixpoint over the
+/// scene as the delta leaves it, and what they infer is written into the scene alongside it.
+/// Pass `None` and the step is skipped, which is what [`tick`] does.
+///
+/// **Inferences are part of the commit.** They are applied before validation, so the boundary
+/// judges the scene the rules produced rather than the one the caller sent; they are recorded
+/// in the event as ordinary additions, because a reader asking what changed should not have
+/// to know which triples a rule wrote; and a refused tick takes them out again with
+/// everything else. A rule that infers something the boundary forbids therefore *rejects the
+/// commit* rather than quietly persisting — which is the point of running rules before
+/// validation rather than after.
+///
+/// # Errors
+///
+/// As [`tick`], plus a rule set that does not reach a fixpoint in [`Rules::MAX_ROUNDS`], and
+/// a [`Rules`] bridged against a different holon's scene.
+pub fn tick_with_rules(
+    engine: &mut Engine,
+    holon: &Holon,
+    session: &mut Session,
+    delta: &Delta,
+    rules: Option<&mut Rules>,
+) -> Result<TickOutcome, HolonError> {
     for projection in &holon.projections {
         if projection.regime == Regime::Maintained {
             return Err(HolonError::UnsupportedRegime(projection.id.clone()));
@@ -197,19 +227,49 @@ pub fn tick(
         }
     }
 
-    // --- 2. boundary rules to fixpoint --------------------------------------------------
-    // Not run. See the module note: SHACL-AF fixpoint evaluation exists in the adapted
-    // engine but only over a bridged snapshot, and re-bridging per tick would cost the
-    // whole graph. Left visible rather than silently skipped.
-
-    // --- 3. validate against the boundary ------------------------------------------------
-    let changes: Vec<Change> = applied
+    let mut changes: Vec<Change> = applied
         .iter()
         .map(|(op, _, encoded)| match op {
             Operation::Added => Change::added(*encoded),
             Operation::Removed => Change::removed(*encoded),
         })
         .collect();
+
+    // --- 2. boundary rules to fixpoint --------------------------------------------------
+    //
+    // The inferences join `applied` and `changes`, which is what makes them part of the
+    // commit rather than a side effect of it: validated with everything else, recorded in the
+    // event, and undone with the rest if the commit is refused.
+    if let Some(rules) = rules {
+        let inferred = match rules.fire(engine, holon, &changes) {
+            Ok(inferred) => inferred,
+            Err(e) => {
+                // A runaway rule set is a failed tick, not a half-applied one.
+                undo(engine, &applied)?;
+                return Err(e);
+            }
+        };
+        for triple in inferred {
+            let quad = into_scene(&triple, &scene);
+            let encoded = engine.store_mut().encode_quad(quad.as_ref())?;
+            // Policy applies to what a rule writes exactly as to what a caller writes. A rule
+            // is not a way around the boundary of §14 — it runs inside a session, and the
+            // session is the principal's.
+            if !session
+                .policy(engine.store())?
+                .permits_quad(encoded, Modes::WRITE)
+            {
+                undo(engine, &applied)?;
+                return Err(HolonError::WriteDenied(holon.scene.clone()));
+            }
+            if engine.store_mut().insert_encoded(encoded)? {
+                applied.push((Operation::Added, triple, encoded));
+                changes.push(Change::added(encoded));
+            }
+        }
+    }
+
+    // --- 3. validate against the boundary ------------------------------------------------
 
     let (violations, report) = validate(engine, holon, &changes)?;
     let admitted = violations == 0 || holon.admission == Admission::AdmitAndRecord;
@@ -287,6 +347,97 @@ fn validate(
     }
     let report = shapes.revalidate(engine.store(), changes)?;
     Ok((report.results.len(), Some(report)))
+}
+
+/// A boundary's rules, bridged once and kept current across ticks.
+///
+/// Rules are the one part of a tick that needs the *data* as an engine graph rather than as
+/// a store, and building one costs the whole scene. Held across ticks it costs that once,
+/// and each tick pays only for its own delta — which is the difference between a rule step
+/// that can run on a write path and one that cannot.
+///
+/// Kept by the caller rather than inside the holon because it is a cache, and a cache with
+/// an owner is one whose lifetime somebody has thought about. Dropping it is always safe:
+/// the next [`Rules::prepare`] rebuilds it.
+pub struct Rules {
+    run: holos_shacl::engine::EngineRun,
+    /// The scene these rules were bridged against, so using them on another is caught.
+    scene: NamedNode,
+}
+
+impl Rules {
+    /// How many rounds the fixpoint may take before it is called a runaway.
+    ///
+    /// A rule set that infers new terms without end does not converge, and there is no way to
+    /// tell that apart from a slow one except by giving up somewhere. Sixteen is well past
+    /// any rule depth a boundary is likely to have and short enough that a runaway is noticed
+    /// in the tick that caused it rather than in a log the next morning.
+    pub const MAX_ROUNDS: usize = 16;
+
+    /// Bridges a holon's scene and boundary. `None` when the boundary is absent, which is a
+    /// holon that constrains nothing rather than an error.
+    ///
+    /// The two graphs are treated differently on purpose. A **boundary** the dictionary has
+    /// never seen holds no shapes and no rules, so there is nothing to prepare. An empty
+    /// **scene** is an ordinary state — every holon has one before its first tick — so its
+    /// IRI is interned rather than looked up, which is what the first tick would do anyway.
+    ///
+    /// # Errors
+    ///
+    /// A storage failure, or a boundary the adapted engine cannot compile.
+    pub fn prepare(engine: &mut Engine, holon: &Holon) -> Result<Option<Self>, HolonError> {
+        let Some(boundary_id) = engine
+            .store()
+            .lookup_term(holon.boundary.as_ref().into())?
+            .map(GraphFilter::Named)
+        else {
+            return Ok(None);
+        };
+        // Interned by encoding a quad that names it. The quad is not inserted; encoding is
+        // what puts the terms in the dictionary.
+        let scene_id = GraphFilter::Named(
+            engine
+                .store_mut()
+                .encode_quad(oxrdf::QuadRef::new(
+                    holon.scene.as_ref(),
+                    holon.scene.as_ref(),
+                    holon.scene.as_ref(),
+                    oxrdf::GraphNameRef::DefaultGraph,
+                ))?
+                .subject,
+        );
+        let (data_graph, shapes_graph) = (scene_id, boundary_id);
+        let run = holos_shacl::engine::EngineRun::prepare(
+            engine.store(),
+            Options {
+                data_graph,
+                shapes_graph,
+            },
+        )?;
+        Ok(Some(Self {
+            run,
+            scene: holon.scene.clone(),
+        }))
+    }
+
+    /// Brings the bridged scene up to date and returns what the rules infer from it.
+    fn fire(
+        &mut self,
+        engine: &Engine,
+        holon: &Holon,
+        changes: &[Change],
+    ) -> Result<Vec<Triple>, HolonError> {
+        if self.scene != holon.scene {
+            return Err(HolonError::Shacl(holos_shacl::ShaclError::Unsupported(
+                format!(
+                    "these rules were bridged against <{}> and cannot be used on <{}>",
+                    self.scene, holon.scene
+                ),
+            )));
+        }
+        self.run.apply(engine.store(), changes)?;
+        Ok(self.run.infer(Self::MAX_ROUNDS)?)
+    }
 }
 
 /// Undoes what a rejected tick applied.

@@ -396,6 +396,68 @@ impl EngineRun {
         .map_err(|e| ShaclError::Unsupported(e.to_string()))
     }
 
+    /// Runs the shapes graph's SHACL-AF rules to a fixpoint and returns what they inferred.
+    ///
+    /// The triples come back rather than being written anywhere: a rule infers a *statement*,
+    /// and where that statement belongs — which graph, under whose policy, undone by what if
+    /// the commit is refused — is the caller's question, not this one's. `holos_holon` puts
+    /// them in the scene and records them so a rejected tick takes them out again.
+    ///
+    /// Only what the rules *added*. The engine's rule evaluation returns the whole closure,
+    /// premises included, and handing that back would make a caller diff it to find out what
+    /// happened.
+    ///
+    /// # Why this can be per-commit now
+    ///
+    /// It could not before. The rules need the data as an engine `Graph`, that graph was
+    /// immutable, and building one per commit costs the whole scene — which is why
+    /// `DESIGN.md` §9 left the holon tick's rule step switched off and named §8 as the
+    /// blocker. With [`Self::apply`] the graph tracks a delta in constant time, so a caller
+    /// that keeps one run alive across commits pays the bridge once.
+    ///
+    /// # Errors
+    ///
+    /// [`ShaclError::Unsupported`] when the rules do not reach a fixpoint inside
+    /// `max_rounds`, which is what a rule set that infers new terms without end looks like
+    /// from outside. Nothing is returned in that case rather than a partial closure: the
+    /// caller asked what the rules entail, and half an answer to that is not an answer.
+    pub fn infer(&mut self, max_rounds: usize) -> Result<Vec<oxrdf::Triple>, ShaclError> {
+        let before = self.bridged.graph.clone();
+        let after = holos_shacl_engine::rules::apply_iterated(
+            &before,
+            &self.shapes,
+            &self.shapes_graph,
+            &mut self.bridged.terms,
+            &self.bridged.vocab,
+            max_rounds,
+        )
+        .map_err(|e| ShaclError::Unsupported(e.to_string()))?;
+
+        let terms = &self.bridged.terms;
+        let mut out = Vec::new();
+        for [s, p, o] in after.iter() {
+            if before.contains(s, p, o) {
+                continue;
+            }
+            let (subject, predicate, object) =
+                (terms.to_oxrdf(s), terms.to_oxrdf(p), terms.to_oxrdf(o));
+            let (oxrdf::Term::NamedNode(predicate), Ok(subject)) =
+                (predicate, oxrdf::NamedOrBlankNode::try_from(subject))
+            else {
+                // A rule can only infer a well-formed triple, so this is unreachable in
+                // practice. Skipping rather than panicking keeps a malformed rule set a bad
+                // inference instead of a crash in a commit path.
+                continue;
+            };
+            out.push(oxrdf::Triple {
+                subject,
+                predicate,
+                object,
+            });
+        }
+        Ok(out)
+    }
+
     /// Whether [`Self::revalidate`] can work from the delta, or must validate everything.
     ///
     /// False when some shape reads more than the index can name. Worth asking before a

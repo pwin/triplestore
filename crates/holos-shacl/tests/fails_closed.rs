@@ -109,10 +109,18 @@ ex:bob a ex:Person .
     assert!(!report.conforms, "ex:bob has no name, so sh:minCount fails");
 }
 
-/// A SHACL-AF rule changes what the data *is*, so a validator that ignores it validates a
-/// graph nobody has yet.
+/// A SHACL-AF rule is *not* refused, and the distinction is the whole point of the list.
+///
+/// The first version of this test asserted the opposite, on the reasoning that a rule changes
+/// what the data is and so a validator ignoring one validates a graph nobody has yet. That
+/// reasoning is about a pipeline, not about validation: SHACL-AF says executing rules is a
+/// separate operation, so ignoring `sh:rule` is what the specification says validation does.
+///
+/// Refusing it had a cost that showed up as soon as something needed it — a boundary carrying
+/// rules could not be validated at all, which made rules and the incremental write path
+/// mutually exclusive. What belongs on the refusal list is what would change an *answer*.
 #[test]
-fn a_shacl_af_rule_is_refused() {
+fn a_shacl_af_rule_is_not_a_constraint() {
     let store = load(
         r#"
 @prefix ex: <http://example.com/> .
@@ -130,11 +138,10 @@ ex:PersonShape a sh:NodeShape ;
 ex:bob a ex:Person .
 "#,
     );
+    let shapes = CompiledShapes::compile(&store, options()).expect("rules do not refuse");
+    let report = shapes.validate(&store).expect("validate");
     assert!(
-        matches!(
-            CompiledShapes::compile(&store, options()),
-            Err(ShaclError::Unsupported(_))
-        ),
-        "sh:rule is not implemented here and must not be ignored"
+        report.conforms,
+        "nothing here constrains ex:bob, and the rule is not a constraint"
     );
 }
