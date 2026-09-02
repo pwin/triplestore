@@ -24,6 +24,38 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### `OPTIONAL` joins the bind join's fragment
+
+The fragment was `SELECT` over BGP, `JOIN`, `UNION`, `VALUES` and `FILTER`. `OPTIONAL` is the
+commonest construct outside it, so real queries fell back to the evaluator and paid the
+measured 3× that bad join ordering costs.
+
+| quads | evaluator | bind join |
+|---:|---:|---:|
+| 41,000 | 0.411 ms | **0.058 ms** |
+| 410,000 | 2.698 ms | **0.071 ms** |
+
+`OPTIONAL` is the construct that does not compose, so most of the work is in what the operator
+*refuses*. A left join neither commutes nor associates with a join: hoisting one past a
+required pattern turns `(A ⟕ B) ⋈ C` into `(A ⋈ C) ⟕ B`, and those agree only when nothing
+outside the optional reads a variable only it binds. That is the well-designedness condition,
+and a query failing it is declined rather than answered differently.
+
+The refusal is deliberately wider than that condition. Flattening loses the difference between
+`A OPTIONAL{B} OPTIONAL{C}`, where `C` really does see what `B` bound, and
+`{A OPTIONAL{B}} . {C OPTIONAL{D}}`, where `D` does not — both arrive as one list of items.
+Rather than reconstruct the nesting, any optional whose fresh variables something else reads
+goes to the evaluator.
+
+Twelve differential tests, each comparing the operator against the evaluator over the same
+store, because a wrong left join returns rows — just not the right ones. Five of six mutations
+are caught by a named test; the sixth is prevented twice over, by the ordering guard and by the
+cost estimate, and the comments say so rather than implying either is load-bearing alone.
+
+One bug the tests found: `evaluate` seeded its pending-filter set with *every* filter, so an
+optional's own condition was applied at the outer level. `OPTIONAL { ?s :city ?c FILTER(?age <
+35) }` then dropped the row for a person over 35 instead of leaving them with no city.
+
 ### The last two mislabelled results
 
 `service5` was the only test in any suite the differential rig blamed on HOLOS rather than

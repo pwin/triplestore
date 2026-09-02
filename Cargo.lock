@@ -824,6 +824,7 @@ dependencies = [
  "oxrdfio",
  "rustc-hash",
  "spareval",
+ "spargebra",
 ]
 
 [[package]]

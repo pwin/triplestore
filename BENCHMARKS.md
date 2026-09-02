@@ -188,6 +188,24 @@ A scene of 60,000 quads, a four-constraint boundary, 200 commits.
 
 ---
 
+## `OPTIONAL` through the bind join
+
+`cargo run -p holos-bench --release --bin bindopt`. A selective left side, an optional that
+misses nine times in ten, and a `LIMIT` — the shape most real queries have:
+
+| quads | rows | evaluator | bind join | speedup |
+|---:|---:|---:|---:|---:|
+| 41,000 | 20 | 0.411 ms | **0.058 ms** | 7.2× |
+| 410,000 | 20 | 2.698 ms | **0.071 ms** | 38× |
+
+The ratio grows because the two scale differently, which is the only claim worth making from
+two points: the evaluator's time follows the store, the bind join's follows the answer. A hash
+join materialises the whole right side to discover that most of it was never needed; an index
+nested-loop probes per row and stops at the limit.
+
+The row counts are asserted equal before either side is timed, so a speedup cannot come from
+answering less.
+
 ## SHACL validation on a write path
 
 `DESIGN.md` §8 runs two validators: the native evaluator, which revalidates a delta, and the

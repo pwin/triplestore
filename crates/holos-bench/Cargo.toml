@@ -27,6 +27,7 @@ holos-stats.workspace = true
 oxrdf.workspace = true
 oxrdfio.workspace = true
 spareval.workspace = true
+spargebra.workspace = true
 anyhow.workspace = true
 
 [features]

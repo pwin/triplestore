@@ -158,6 +158,13 @@ struct Run<'a> {
     seen: rustc_hash::FxHashSet<Vec<Option<TermId>>>,
     /// Rows consumed by `OFFSET` so far.
     skipped: usize,
+    /// How many times the todo list has been exhausted — a *match*, whether or not the row
+    /// that followed survived `DISTINCT` or `OFFSET`.
+    ///
+    /// This is what an `OPTIONAL` reads to decide whether it matched. Counting surviving rows
+    /// instead would make a duplicate look like a failure to match, and hand back unbound
+    /// variables for a match that happened.
+    completions: usize,
     limits: Limits<'a>,
     /// Set once a limit is hit; every frame unwinds on it.
     abandoned: bool,
@@ -211,6 +218,26 @@ struct Filter {
     needs: Vec<Variable>,
 }
 
+/// One `OPTIONAL`, kept whole rather than flattened into the surrounding conjunction.
+///
+/// A left join does not commute with a join, so its items cannot join the todo list and be
+/// reordered among the required ones: `(A ⟕ B) ⋈ C` and `(A ⋈ C) ⟕ B` are different queries
+/// in general. Keeping it as one entry, evaluated only once everything required is bound, is
+/// what makes the two agree — together with the check in [`well_designed`], which refuses the
+/// query outright when they would not.
+pub struct OptionalItem {
+    /// What the optional matches, ordered by cost among themselves like any other items.
+    items: Vec<Item>,
+    /// Indices into the plan's filters: those written inside the optional, plus the left
+    /// join's own condition, which is part of the match rather than a test applied after it.
+    filters: Vec<usize>,
+    /// Variables this optional binds that nothing outside it does.
+    ///
+    /// These are the ones that come back unbound when it does not match, and the ones
+    /// [`well_designed`] checks nothing else reads.
+    fresh: Vec<Variable>,
+}
+
 /// One step of a plan: something that binds variables.
 pub enum Item {
     /// A single triple pattern, probed against the store's indexes.
@@ -219,6 +246,8 @@ pub enum Item {
     Union(Vec<Vec<TriplePattern>>),
     /// `VALUES`: rows of terms bound directly rather than looked up.
     Values(ValuesItem),
+    /// `OPTIONAL { .. }`, evaluated after everything required.
+    Optional(Box<OptionalItem>),
 }
 
 /// The rows of a `VALUES` clause.
@@ -238,6 +267,7 @@ enum Todo<'p> {
     Pattern(&'p TriplePattern),
     Union(&'p [Vec<TriplePattern>]),
     Values(&'p ValuesItem),
+    Optional(&'p OptionalItem),
 }
 
 impl<'p> From<&'p Item> for Todo<'p> {
@@ -246,6 +276,7 @@ impl<'p> From<&'p Item> for Todo<'p> {
             Item::Pattern(triple) => Todo::Pattern(triple),
             Item::Union(branches) => Todo::Union(branches),
             Item::Values(values) => Todo::Values(values),
+            Item::Optional(optional) => Todo::Optional(optional),
         }
     }
 }
@@ -466,7 +497,153 @@ fn collect(
             Some(bound)
         }
 
+        // `OPTIONAL`. The left side joins the surrounding conjunction as usual; the right
+        // is kept whole, because a left join does not commute with a join.
+        //
+        // The right side's own filters and the left join's condition are the same thing to
+        // this operator — both decide whether the optional *matched*, and neither may be
+        // applied after the fact. A filter that failed after the match would drop the row
+        // instead of leaving the optional's variables unbound, which is a different answer.
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
+            let outer = collect(left, items, filters)?;
+
+            let mut inner_items = Vec::new();
+            let mut inner_filters = Vec::new();
+            let inner = collect(right, &mut inner_items, &mut inner_filters)?;
+
+            if let Some(expression) = expression {
+                let mut conjuncts = Vec::new();
+                flatten_conjunction(expression, &mut conjuncts);
+                for conjunct in conjuncts {
+                    let mut needs = Vec::new();
+                    if !inspect_expression(conjunct, &mut needs) {
+                        return None;
+                    }
+                    // The condition may read the left side as well as the right, so what it
+                    // needs is bound by the pair rather than by the optional alone.
+                    if !needs
+                        .iter()
+                        .all(|v| inner.certain.contains(v) || outer.certain.contains(v))
+                    {
+                        return None;
+                    }
+                    inner_filters.push(Filter {
+                        expression: to_sparopt(conjunct)?,
+                        needs,
+                    });
+                }
+            }
+
+            let fresh: Vec<Variable> = inner
+                .possible
+                .iter()
+                .filter(|v| !outer.possible.contains(v))
+                .cloned()
+                .collect();
+
+            let first = filters.len();
+            filters.extend(inner_filters);
+            let indices: Vec<usize> = (first..filters.len()).collect();
+
+            items.push(Item::Optional(Box::new(OptionalItem {
+                items: inner_items,
+                filters: indices,
+                fresh,
+            })));
+
+            // Nothing the optional binds is *certain*: that is the whole meaning of the
+            // word, and it is what stops an outer filter naming one of its variables from
+            // being hoisted above it.
+            let mut bound = outer;
+            for v in inner.possible {
+                if !bound.possible.contains(&v) {
+                    bound.possible.push(v);
+                }
+            }
+            Some(bound)
+        }
+
         _ => None,
+    }
+}
+
+/// Whether hoisting every `OPTIONAL` to the end preserves the query's meaning.
+///
+/// The nested loop orders items by cost and evaluates optionals last, which turns
+/// `(A ⟕ B) ⋈ C` into `(A ⋈ C) ⟕ B`. Those agree exactly when nothing outside an optional
+/// reads a variable only that optional binds — the well-designedness condition, and the
+/// reason `OPTIONAL` is famous for not composing.
+///
+/// `{ ?a :p ?b OPTIONAL { ?a :q ?c } . ?c :r ?d }` is the counter-example: `?c` escapes the
+/// optional into a required pattern, so evaluating the optional last would join against a
+/// binding the original query never had. Refused rather than answered differently.
+fn well_designed(items: &[Item], filters: &[Filter]) -> bool {
+    let mut optionals = Vec::new();
+    gather_optionals(items, &mut optionals);
+
+    for (position, optional) in optionals.iter().enumerate() {
+        // Everything else in the query: the other items, and every filter that is not this
+        // optional's own.
+        let mut elsewhere = Vec::new();
+        for (other, item) in optionals.iter().enumerate() {
+            if other != position {
+                variables_of_items(&item.items, &mut elsewhere);
+            }
+        }
+        collect_outside(items, optional, &mut elsewhere);
+        for (index, filter) in filters.iter().enumerate() {
+            if !optional.filters.contains(&index) {
+                elsewhere.extend(filter.needs.iter().cloned());
+            }
+        }
+        if optional.fresh.iter().any(|v| elsewhere.contains(v)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn gather_optionals<'a>(items: &'a [Item], out: &mut Vec<&'a OptionalItem>) {
+    for item in items {
+        if let Item::Optional(optional) = item {
+            out.push(optional);
+            gather_optionals(&optional.items, out);
+        }
+    }
+}
+
+/// Every variable the items mention, except inside `skip`.
+fn collect_outside(items: &[Item], skip: &OptionalItem, out: &mut Vec<Variable>) {
+    for item in items {
+        match item {
+            Item::Optional(optional) => {
+                if !std::ptr::eq(optional.as_ref(), skip) {
+                    collect_outside(&optional.items, skip, out);
+                }
+            }
+            other => variables_of_items(std::slice::from_ref(other), out),
+        }
+    }
+}
+
+fn variables_of_items(items: &[Item], out: &mut Vec<Variable>) {
+    for item in items {
+        match item {
+            Item::Pattern(triple) => collect_variables(triple, out),
+            Item::Union(branches) => {
+                for branch in branches {
+                    for triple in branch {
+                        collect_variables(triple, out);
+                    }
+                }
+            }
+            Item::Values(values) => out.extend(values.variables.iter().cloned()),
+            Item::Optional(optional) => variables_of_items(&optional.items, out),
+        }
     }
 }
 
@@ -628,6 +805,10 @@ fn finish(
     if !variables.iter().all(|v| bound.possible.contains(v)) {
         return None;
     }
+    // Optionals are evaluated last, which is only sound for a well-designed pattern.
+    if !well_designed(&items, &filters) {
+        return None;
+    }
     Some(Plan {
         items,
         filters,
@@ -671,13 +852,23 @@ impl Plan {
             out: Vec::new(),
             seen: rustc_hash::FxHashSet::default(),
             skipped: 0,
+            completions: 0,
             limits,
             abandoned: false,
             since_check: 0,
         };
 
         let todo: Vec<Todo<'_>> = self.items.iter().map(Todo::from).collect();
-        let pending: Vec<usize> = (0..self.filters.len()).collect();
+
+        // Every filter *except* those belonging to an optional. Theirs decide whether the
+        // optional matched and are added when it runs; starting them pending would apply
+        // them to the whole row, and a row failing one would vanish instead of coming back
+        // with the optional's variables unbound. `OPTIONAL { ?s :city ?c FILTER(?age < 35) }`
+        // is the case: a person over 35 has no city *in this optional*, not no row.
+        let owned = self.owned_by_optionals();
+        let pending: Vec<usize> = (0..self.filters.len())
+            .filter(|i| !owned.contains(i))
+            .collect();
         self.step(view, stats, &todo, &pending, &mut bindings, &mut run)?;
 
         // Discarded, not truncated. A partial answer returned as a whole one is precisely
@@ -700,7 +891,24 @@ impl Plan {
         todo: &[Todo<'_>],
         bindings: &FxHashMap<&Variable, TermId>,
     ) -> Option<usize> {
-        (0..todo.len()).min_by(|a, b| {
+        // Optionals do not take part in the ordering. Two reasons, and both are about
+        // meaning rather than cost:
+        //
+        // * an optional must see the whole required conjunction bound, because it is a left
+        //   join over it and not a conjunct within it;
+        // * among themselves they keep source order, because `(A ⟕ B) ⟕ C` and
+        //   `(A ⟕ C) ⟕ B` differ once `C` reads what `B` binds.
+        //
+        // So the first optional runs only when nothing required is left, and cost never
+        // enters into it. `estimate_todo` answers `INFINITY` for an optional as a second
+        // line of the same defence; neither alone is relied on.
+        let required: Vec<usize> = (0..todo.len())
+            .filter(|i| !matches!(todo[*i], Todo::Optional(_)))
+            .collect();
+        if required.is_empty() {
+            return (0..todo.len()).next();
+        }
+        required.into_iter().min_by(|a, b| {
             let ca = estimate_todo(&todo[*a], view, bindings, stats);
             let cb = estimate_todo(&todo[*b], view, bindings, stats);
             ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
@@ -747,6 +955,7 @@ impl Plan {
             }
         }
         let Some(index) = Self::cheapest(view, stats, todo, bindings) else {
+            run.completions += 1;
             let row = self.project(bindings);
             if self.distinct && !run.seen.insert(row.clone()) {
                 return Ok(());
@@ -794,6 +1003,32 @@ impl Plan {
 
             Todo::Values(values) => {
                 self.rows_of(view, stats, values, &rest, pending, bindings, run)?;
+            }
+
+            // A left join, in the one shape this fragment allows: everything required is
+            // already bound, so what remains is to try the optional's own items and, if
+            // none of them matched, carry on with its variables left unbound.
+            //
+            // "Matched" is read off `completions` rather than off the output, because a row
+            // the optional produced may still be dropped by `DISTINCT` or `OFFSET` — and a
+            // match that was deduplicated is still a match. Getting that backwards would
+            // emit the *unbound* row as well as the bound one.
+            Todo::Optional(optional) => {
+                let mut inner: Vec<Todo<'p>> = optional.items.iter().map(Todo::from).collect();
+                inner.extend_from_slice(&rest);
+
+                // The optional's filters join the pending set only for its own subtree. They
+                // decide whether it matched, so they must not survive into the fallback
+                // below, where its variables are unbound and the filter would error.
+                let mut inner_pending = pending.to_vec();
+                inner_pending.extend(optional.filters.iter().copied());
+
+                let before = run.completions;
+                self.step(view, stats, &inner, &inner_pending, bindings, run)?;
+
+                if run.completions == before && !run.abandoned {
+                    self.step(view, stats, &rest, pending, bindings, run)?;
+                }
             }
         }
         Ok(())
@@ -988,6 +1223,21 @@ impl Plan {
             .collect()
     }
 
+    /// Filter indices that belong to an optional rather than to the query as a whole.
+    fn owned_by_optionals(&self) -> rustc_hash::FxHashSet<usize> {
+        fn walk(items: &[Item], out: &mut rustc_hash::FxHashSet<usize>) {
+            for item in items {
+                if let Item::Optional(optional) = item {
+                    out.extend(optional.filters.iter().copied());
+                    walk(&optional.items, out);
+                }
+            }
+        }
+        let mut out = rustc_hash::FxHashSet::default();
+        walk(&self.items, &mut out);
+        out
+    }
+
     /// The variables this plan projects, in order.
     #[must_use]
     pub fn variables(&self) -> &[Variable] {
@@ -1138,6 +1388,13 @@ fn estimate_todo(
             })
             .sum(),
         Todo::Values(values) => values.rows.len() as f64,
+        // `cheapest` filters optionals out before asking, so this is not reached today.
+        // Kept, and kept as `INFINITY`, because the two agree: were the filter ever removed
+        // the estimate would still sort every optional last and preserve source order among
+        // them, turning a mistake there into slow rather than wrong. The filter states the
+        // rule; this is the floor under it. A mutation test cannot tell them apart, which is
+        // the point of having both.
+        Todo::Optional(_) => f64::INFINITY,
     }
 }
 
