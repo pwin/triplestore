@@ -1325,6 +1325,12 @@ fn bulk_write_opts() -> WriteOptions {
 fn value_opts() -> Options {
     let mut opts = Options::default();
     opts.set_compression_type(DBCompressionType::Lz4);
+    // No bloom filter here, unlike the index families below, and that is a measured choice
+    // rather than an oversight. A whole-key filter would be the textbook setting for a family
+    // read by point lookup, and `str2id` takes a miss for every term a load has not seen
+    // before. But `loadprofile` finds it worth nothing either way at 750k quads — the family
+    // is small enough to sit in the block cache, so a miss never reaches a file to skip.
+    // Worth revisiting at a scale where it does not, with that benchmark as the evidence.
     opts
 }
 
