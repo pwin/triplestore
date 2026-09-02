@@ -24,6 +24,38 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### `MINUS`, blank nodes and property paths — and two constructs that stay out
+
+`MINUS` shares a structure with `OPTIONAL`, because they ask the same question — did the right
+side match this left row — and differ only in what they do with the answer. It removes a
+solution when a compatible one exists on the right *and the two share a variable*; with
+disjoint domains it removes nothing, which is the rule people are surprised by. A right side
+sharing nothing certainly bound on the left is refused rather than reasoned about: the shared
+variable might be one an `OPTIONAL` left unbound, and then whether the row goes depends on the
+data.
+
+**Blank nodes now bind like the variables they are**, which turned out to be the larger half
+of "property paths". The parser desugars `?s :p/:q ?o` into a BGP joined on an anonymous blank
+node, so sequence paths were being refused for containing a blank node rather than for being
+paths — and `^:p` was already a swapped pattern. Renaming brings both in, along with the
+`[ ]` syntax. The name the rename produces is deliberately not valid SPARQL, because `_:x` and
+`?x` are different things and a rename that mapped them together would join them.
+
+Alternative paths (`:p|:q`) become union branches. The closure paths — `*`, `+`, `?` — and
+negated sets are refused: they need a fixpoint traversal this operator does not have.
+
+**`ORDER BY` and aggregation stay out, and the reason is worth stating.** Both are
+implementable; neither is implementable *safely*. SPARQL leaves the relative order of
+incomparable terms to the implementation, so matching the evaluator's sequence means matching
+its tie-breaking — duplicating code rather than reusing it, and creating two implementations
+that must agree exactly. Aggregation is the same argument over a larger surface: `COUNT
+DISTINCT`, `AVG` over mixed numerics, `GROUP_CONCAT` separators, and SPARQL's error semantics
+throughout. The fallback costs time; a second implementation that drifts costs answers.
+
+The fragment is now `SELECT` over BGP, `JOIN`, `UNION`, `VALUES`, `FILTER`, `OPTIONAL`,
+`GRAPH`, `MINUS`, hiding-nothing subqueries, blank nodes, and sequence, inverse and
+alternative paths — with `DISTINCT`, `LIMIT`, `OFFSET` and projection.
+
 ### `GRAPH` and subqueries join it too
 
 Scanning was hard-wired to the default graph, so every `GRAPH` query fell back. The scope is

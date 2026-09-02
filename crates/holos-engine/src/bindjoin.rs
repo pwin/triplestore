@@ -113,7 +113,7 @@ use holos_stats::Statistics;
 use oxrdf::NamedNode;
 use rustc_hash::FxHashMap;
 use spareval::{CancellationToken, QueryableDataset};
-use spargebra::algebra::{Expression, Function, GraphPattern};
+use spargebra::algebra::{Expression, Function, GraphPattern, PropertyPathExpression};
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
 
@@ -219,14 +219,32 @@ struct Filter {
     needs: Vec<Variable>,
 }
 
-/// One `OPTIONAL`, kept whole rather than flattened into the surrounding conjunction.
+/// What an [`OptionalItem`] does with a match.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OnMatch {
+    /// `OPTIONAL`: a match extends the row, and no match leaves the variables unbound.
+    Extend,
+    /// `MINUS`: a match *removes* the row, and no match keeps it.
+    ///
+    /// The same traversal answers both — "did the right side match this left row" — so they
+    /// share a structure and differ in what they do with the answer.
+    Remove,
+}
+
+/// One `OPTIONAL` or `MINUS`, kept whole rather than flattened into the surrounding
+/// conjunction.
 ///
-/// A left join does not commute with a join, so its items cannot join the todo list and be
-/// reordered among the required ones: `(A ⟕ B) ⋈ C` and `(A ⋈ C) ⟕ B` are different queries
-/// in general. Keeping it as one entry, evaluated only once everything required is bound, is
-/// what makes the two agree — together with the check in [`well_designed`], which refuses the
+/// Neither commutes with a join, so their items cannot join the todo list and be reordered
+/// among the required ones: `(A ⟕ B) ⋈ C` and `(A ⋈ C) ⟕ B` are different queries in general.
+/// Keeping one as a single entry, evaluated only once everything required is bound, is what
+/// makes the two agree — together with the check in [`well_designed`], which refuses the
 /// query outright when they would not.
+///
+/// The two share a structure because they ask the same question — did the right side match
+/// this left row — and differ only in what they do with the answer. See [`OnMatch`].
 pub struct OptionalItem {
+    /// Whether a match extends the row or removes it.
+    mode: OnMatch,
     /// What the optional matches, ordered by cost among themselves like any other items.
     items: Vec<Item>,
     /// Indices into the plan's filters: those written inside the optional, plus the left
@@ -450,14 +468,15 @@ fn collect(
                 if !usable_pattern(triple) {
                     return None;
                 }
-                collect_variables(triple, &mut bound.certain);
+                let triple = without_blank_nodes(triple);
+                collect_variables(&triple, &mut bound.certain);
                 if let Scope::Variable(g) = scope {
                     if !bound.certain.contains(g) {
                         bound.certain.push(g.clone());
                     }
                 }
                 items.push(Item::Pattern(PatternItem {
-                    triple: triple.clone(),
+                    triple,
                     scope: scope.clone(),
                 }));
             }
@@ -491,6 +510,88 @@ fn collect(
             }
             items.append(&mut inner_items);
             filters.append(&mut inner_filters);
+            Some(bound)
+        }
+
+        // `MINUS`. The traversal is the optional's — does the right side match this left row
+        // — and only the verdict differs: a match removes the row instead of extending it.
+        //
+        // SPARQL removes a solution only when a compatible one exists on the right *and the
+        // two share a variable*: with disjoint domains `MINUS` never removes anything. That
+        // is decided statically here, and a right side sharing nothing certainly bound on the
+        // left is refused rather than reasoned about — the shared variable might be one an
+        // optional left unbound, and then whether the row is removed depends on the data.
+        GraphPattern::Minus { left, right } => {
+            let outer = collect(left, scope, items, filters)?;
+
+            let mut inner_items = Vec::new();
+            let mut inner_filters = Vec::new();
+            let inner = collect(right, scope, &mut inner_items, &mut inner_filters)?;
+
+            if !inner.possible.iter().any(|v| outer.certain.contains(v)) {
+                return None;
+            }
+
+            let first = filters.len();
+            filters.extend(inner_filters);
+            let indices: Vec<usize> = (first..filters.len()).collect();
+
+            let fresh: Vec<Variable> = inner
+                .possible
+                .iter()
+                .filter(|v| !outer.possible.contains(v))
+                .cloned()
+                .collect();
+
+            items.push(Item::Optional(Box::new(OptionalItem {
+                mode: OnMatch::Remove,
+                items: inner_items,
+                filters: indices,
+                fresh,
+            })));
+
+            // A `MINUS` binds nothing: it only takes rows away. Its right side's variables
+            // stay out of the outer scope entirely, which is what the specification means by
+            // the two being evaluated over separate domains.
+            //
+            // The consequence is a refusal rather than a wrong answer: a query projecting a
+            // variable only the `MINUS` mentions finds it missing from `possible` and goes to
+            // the evaluator, which returns it unbound. Reporting it as possible would let
+            // this operator answer that query — also correctly, since the projection would
+            // find it unbound too — but it would be saying something false about scope to buy
+            // a fast path for a query nobody writes.
+            Some(outer)
+        }
+
+        // An alternative property path is a union of the branches, which this already has a
+        // shape for. The closure paths — `*`, `+`, `?` — and a negated set are refused: they
+        // need a traversal to a fixpoint that this operator does not have, and approximating
+        // one would answer a different query.
+        //
+        // Sequence and inverse paths never arrive here: the parser desugars `:p/:q` into a
+        // BGP joined on a blank node and `^:p` into a swapped pattern, so both are ordinary
+        // patterns by the time this sees them.
+        GraphPattern::Path {
+            subject,
+            path,
+            object,
+        } => {
+            let mut branches = Vec::new();
+            path_alternatives(path, subject, object, scope, &mut branches)?;
+            let mut bound = Bound::default();
+            for branch in &branches {
+                let mut here = Bound::default();
+                for pattern in branch {
+                    collect_variables(&pattern.triple, &mut here.certain);
+                }
+                here.possible.clone_from(&here.certain);
+                bound = if bound.possible.is_empty() {
+                    here
+                } else {
+                    bound.alternated(here)
+                };
+            }
+            items.push(Item::Union(branches));
             Some(bound)
         }
 
@@ -634,6 +735,7 @@ fn collect(
             let indices: Vec<usize> = (first..filters.len()).collect();
 
             items.push(Item::Optional(Box::new(OptionalItem {
+                mode: OnMatch::Extend,
                 items: inner_items,
                 filters: indices,
                 fresh,
@@ -731,6 +833,49 @@ fn variables_of_items(items: &[Item], out: &mut Vec<Variable>) {
     }
 }
 
+/// Flattens an alternative property path into union branches.
+///
+/// Only `a|b` and a bare predicate. Everything else — `*`, `+`, `?`, a negated set — needs a
+/// fixpoint traversal, and is refused rather than approximated.
+fn path_alternatives(
+    path: &PropertyPathExpression,
+    subject: &TermPattern,
+    object: &TermPattern,
+    scope: &Scope,
+    out: &mut Vec<Vec<PatternItem>>,
+) -> Option<()> {
+    match path {
+        PropertyPathExpression::NamedNode(p) => {
+            let triple = TriplePattern {
+                subject: match subject {
+                    TermPattern::Variable(v) => v.clone().into(),
+                    TermPattern::NamedNode(n) => n.clone().into(),
+                    TermPattern::BlankNode(b) => blank_as_variable(b.as_str()).into(),
+                    TermPattern::Literal(_) | TermPattern::Triple(_) => return None,
+                },
+                predicate: NamedNodePattern::NamedNode(p.clone()),
+                object: match object {
+                    TermPattern::BlankNode(b) => {
+                        TermPattern::Variable(blank_as_variable(b.as_str()))
+                    }
+                    TermPattern::Triple(_) => return None,
+                    other => other.clone(),
+                },
+            };
+            out.push(vec![PatternItem {
+                triple,
+                scope: scope.clone(),
+            }]);
+            Some(())
+        }
+        PropertyPathExpression::Alternative(a, b) => {
+            path_alternatives(a, subject, object, scope, out)?;
+            path_alternatives(b, subject, object, scope, out)
+        }
+        _ => None,
+    }
+}
+
 /// Flattens nested `UNION`s into a list of alternatives, each of which must be a plain BGP.
 ///
 /// A branch containing anything else — a filter, a nested join — ends the fragment. That is
@@ -763,10 +908,11 @@ fn union_branches(
                 return None;
             }
             let mut bound = Bound::default();
-            for triple in patterns {
-                if !usable_pattern(triple) {
-                    return None;
-                }
+            let renamed: Vec<TriplePattern> = patterns
+                .iter()
+                .map(|triple| usable_pattern(triple).then(|| without_blank_nodes(triple)))
+                .collect::<Option<_>>()?;
+            for triple in &renamed {
                 collect_variables(triple, &mut bound.certain);
             }
             if let Scope::Variable(g) = scope {
@@ -776,10 +922,10 @@ fn union_branches(
             }
             bound.possible.clone_from(&bound.certain);
             out.push(
-                patterns
-                    .iter()
+                renamed
+                    .into_iter()
                     .map(|triple| PatternItem {
-                        triple: triple.clone(),
+                        triple,
                         scope: scope.clone(),
                     })
                     .collect(),
@@ -790,14 +936,54 @@ fn union_branches(
     }
 }
 
+/// A blank node in a query pattern, as the variable it behaves like.
+///
+/// SPARQL gives a blank node in a pattern the same role as a variable, minus the ability to
+/// be projected — and since the only thing this operator does with a variable is bind it and
+/// look it up, that is a rename rather than a feature.
+///
+/// It matters more than it sounds. The parser desugars a *sequence path* into a BGP joined on
+/// an anonymous blank node, so `?s :p/:q ?o` was being refused for having a blank node in it
+/// rather than for being a path. Renaming brings sequence paths in with it, along with the
+/// `[ ]` syntax that means the same thing.
+///
+/// The name is deliberately not valid SPARQL — a space cannot appear in a variable — so it
+/// cannot collide with one the query wrote. `?s :p _:x . ?y :q ?x` is the case that needs it:
+/// `_:x` and `?x` are different things, and a rename that mapped them together would join
+/// them.
+fn blank_as_variable(label: &str) -> Variable {
+    Variable::new_unchecked(format!("bnode {label}"))
+}
+
+/// A pattern with its blank nodes renamed to variables.
+fn without_blank_nodes(triple: &TriplePattern) -> TriplePattern {
+    let rename = |term: &TermPattern| -> TermPattern {
+        match term {
+            TermPattern::BlankNode(b) => TermPattern::Variable(blank_as_variable(b.as_str())),
+            other => other.clone(),
+        }
+    };
+    TriplePattern {
+        subject: match rename(&triple.subject) {
+            TermPattern::Variable(v) => v.into(),
+            TermPattern::NamedNode(n) => n.into(),
+            // Neither a literal nor a triple term can be a subject, and `usable_pattern` has
+            // already refused the latter.
+            other => unreachable!("{other} cannot be a subject"),
+        },
+        predicate: triple.predicate.clone(),
+        object: rename(&triple.object),
+    }
+}
+
 /// Whether a triple pattern is one this path can probe with.
 ///
-/// A blank node behaves as a variable that cannot be projected, and an RDF 1.2 triple term
-/// needs the term encoding's side table. Neither is modelled here, and both are rare in the
-/// shapes this exists for.
+/// An RDF 1.2 triple term needs the term encoding's side table, which is not modelled here.
+/// Blank nodes are fine: [`without_blank_nodes`] turns them into the variables they behave
+/// like before anything else sees them.
 fn usable_pattern(triple: &TriplePattern) -> bool {
     for term in [&triple.subject, &triple.object] {
-        if matches!(term, TermPattern::BlankNode(_) | TermPattern::Triple(_)) {
+        if matches!(term, TermPattern::Triple(_)) {
             return false;
         }
     }
@@ -1140,8 +1326,19 @@ impl Plan {
             // match that was deduplicated is still a match. Getting that backwards would
             // emit the *unbound* row as well as the bound one.
             Todo::Optional(optional) => {
+                // `MINUS` asks the same question and acts on the opposite answer, so its right
+                // side runs *alone* rather than with the rest appended: a match must not emit
+                // anything, only decide. The rest then runs, or does not, on that verdict.
+                //
+                // Appending the rest anyway would still give the right answer — the truncate
+                // below discards whatever it produced, and the fallback re-runs it — so this
+                // is about not doing that work twice rather than about correctness. A
+                // mutation test cannot tell the two apart, and saying so is better than
+                // leaving a reader to assume the guard is load-bearing.
                 let mut inner: Vec<Todo<'p>> = optional.items.iter().map(Todo::from).collect();
-                inner.extend_from_slice(&rest);
+                if optional.mode == OnMatch::Extend {
+                    inner.extend_from_slice(&rest);
+                }
 
                 // The optional's filters join the pending set only for its own subtree. They
                 // decide whether it matched, so they must not survive into the fallback
@@ -1150,10 +1347,28 @@ impl Plan {
                 inner_pending.extend(optional.filters.iter().copied());
 
                 let before = run.completions;
+                let saved_out = run.out.len();
                 self.step(view, stats, &inner, &inner_pending, bindings, run)?;
+                let matched = run.completions != before;
 
-                if run.completions == before && !run.abandoned {
-                    self.step(view, stats, &rest, pending, bindings, run)?;
+                match optional.mode {
+                    // No match: carry on with the optional's variables unbound.
+                    OnMatch::Extend => {
+                        if !matched && !run.abandoned {
+                            self.step(view, stats, &rest, pending, bindings, run)?;
+                        }
+                    }
+                    // A `MINUS` decides and emits nothing, so whatever the probe produced is
+                    // discarded before the verdict is acted on. It produces rows only because
+                    // exhausting a todo list is how this loop signals a match, and the right
+                    // side's todo list is exhausted by matching.
+                    OnMatch::Remove => {
+                        run.out.truncate(saved_out);
+                        run.completions = before;
+                        if !matched && !run.abandoned {
+                            self.step(view, stats, &rest, pending, bindings, run)?;
+                        }
+                    }
                 }
             }
         }
