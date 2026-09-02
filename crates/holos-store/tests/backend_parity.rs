@@ -419,7 +419,7 @@ fn a_bulk_load_stores_exactly_what_an_ordinary_load_does() -> Result<()> {
     plain.flush()?;
 
     let mut bulk = Store::with_storage(RocksStorage::open(bulk_dir.path())?);
-    bulk.begin_bulk_load();
+    bulk.begin_bulk_load()?;
     load(&mut bulk, &quads)?;
     bulk.end_bulk_load()?;
 
@@ -463,7 +463,7 @@ fn a_bulk_load_stores_exactly_what_an_ordinary_load_does() -> Result<()> {
 fn a_bulk_load_interns_a_repeated_term_once() -> Result<()> {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut store = Store::with_storage(RocksStorage::open(dir.path())?);
-    store.begin_bulk_load();
+    store.begin_bulk_load()?;
     // The same long literal, used by many subjects, must intern once — the buffered-term
     // map is what makes that true before anything reaches disk.
     let shared = Literal::new_simple_literal("a shared value that is far too long to inline");

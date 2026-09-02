@@ -470,7 +470,10 @@ impl PyStore {
             let mut outer = self.engine.write().map_err(|_| poisoned())?;
             let guard = outer.as_mut().ok_or_else(closed)?;
             if bulk {
-                guard.store_mut().begin_bulk_load();
+                guard
+                    .store_mut()
+                    .begin_bulk_load()
+                    .map_err(|e| map_store_error(&e))?;
             }
             let result = match graph_name {
                 None => guard.bulk_load(reader, rdf_format, None),

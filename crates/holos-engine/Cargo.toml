@@ -28,5 +28,12 @@ thiserror.workspace = true
 rustc-hash.workspace = true
 rstar.workspace = true
 
+[features]
+default = []
+# Lets the engine be tested over the persistent backend, which is the only one where a
+# commit scope buffers and therefore the only one where the read overlay can be wrong.
+rocksdb = ["holos-store/rocksdb"]
+
 [dev-dependencies]
 flate2.workspace = true
+tempfile.workspace = true

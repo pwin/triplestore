@@ -196,6 +196,15 @@ But use the RocksDB features Oxigraph currently leaves on the table:
   than a wrong answer: during a bulk load, whose writes are buffered outside RocksDB, and on
   an in-memory store, which has no files to snapshot. Holon branching is
   `holos_holon::branch` — §9.
+- **One `WriteBatch` per commit.** **Built.** A single quad write was already atomic — all nine
+  or ten index-order puts go into one batch — but a SPARQL update or a holon tick is a
+  *sequence* of them, and a crash between two left half a commit. `Storage::begin` /
+  `commit` / `rollback` accumulate the whole sequence into one batch and write it once.
+  Buffering means every read inside the scope has to be answered from the buffer rather than
+  the database, so the scope carries an overlay for quads, named graphs and the dictionary;
+  a scope past a few hundred thousand quads is refused rather than silently split, because a
+  split batch would keep the interface and drop the guarantee. This is failure and crash
+  atomicity only — isolation is the timestamps below.
 - **User-defined timestamps** for MVCC and time travel. Caveat, stated plainly: UDT is still marked
   experimental upstream. Fallback if it disappoints — an explicit monotonic version suffix in the
   key, the TiKV approach, at the cost of writing your own GC.
@@ -455,15 +464,30 @@ answers, which is the current failure mode.
 > so a commit costs the size of its own change: **165 commits/s on a 300k-triple scene, 41×
 > cheaper than a full pass** (§16).
 >
-> Three things are deliberately *not* there, and each is visible in the code rather than
+> Boundary rules fire: `tick_with_rules` runs a holon's SHACL-AF rules to a fixpoint over the
+> scene the delta leaves behind, and what they infer joins the commit — validated with
+> everything else, recorded in the event, and refused with everything else if the boundary
+> objects. That used to mean re-bridging the whole graph per tick, which is why it was not
+> done; `EngineRun::apply` made the bridge incremental and removed the reason.
+>
+> A tick is also **atomic**. The whole of it — the delta, the inferences, the event and the
+> version bump — runs inside one commit scope on the store: on the persistent backend the
+> writes accumulate into one `WriteBatch` and are written once, so a crash between applying
+> the delta and writing the event can no longer leave the two disagreeing. The same scope
+> carries a SPARQL update, replacing the hand-rolled undo log that used to roll back by
+> writing the inverse of each change — an unwind that could itself fail, which abandoning an
+> unwritten batch cannot. The cost of buffering is that every read inside the scope has to be
+> answered through the buffer; that overlay is in `crates/holos-store/src/rocks`, and
+> `tests/commit_scope.rs` checks it by running the same script inside a scope and outside and
+> requiring every read to agree at every step.
+>
+> Two things are still deliberately *not* there, and each is visible in the code rather than
 > quietly skipped:
 >
-> - **A tick is not atomic.** A refused commit is undone by a compensating write, not a
->   rollback, and a crash between applying the delta and writing the event leaves the two
->   disagreeing. Closing this is what §6.1's MVCC and checkpoints are for.
-> - **Boundary rules do not fire.** SHACL-AF fixpoint evaluation exists in the adapted
->   engine but only over a bridged snapshot, so firing rules per tick would mean re-bridging
->   per tick — the gap §8 names.
+> - **A tick is atomic but not isolated.** A concurrent reader with its own view sees the
+>   store before the commit or after it, and nothing promises which. That is §6.1's MVCC, and
+>   it is not built. The server and the Python binding hold the engine behind an `RwLock`, so
+>   in those two deployments a writer excludes readers and the question does not arise.
 > - **Projections recompute rather than maintain.** `Regime::Maintained` is *refused*, not
 >   silently downgraded: claiming a guarantee the build does not provide would be worse than
 >   declining it.
@@ -589,7 +613,7 @@ the measurement.
 | **P2** ◐ | Characteristic-set statistics, cost-based optimizer, vectorized binary joins | *Statistics built and measured, and consumed.* Characteristic sets estimate 6 of 7 query shapes exactly — mean q-error **1.1** against the reused optimiser's **2×10⁸** — and bad estimates cost a measured **3×** (§16). `bindjoin` is an owned planner over them for the fragment it accepts, re-estimating at each step. Owes the rest of the language: `ORDER BY` and aggregation are refused on principle (§7), the remainder for want of the work. |
 | **P3** | Hypertrie hot tier + WCO multi-join + hybrid planner | Wins on cyclic and join-heavy queries without regressing star and chain queries; memory overhead measured and within budget. **Gated on P2's planner**, not just its statistics — §13 Q2 compares against a *well-planned* binary join, which does not exist yet. |
 | **P4** ✅ | SHACL subsystem on native indexes + incremental revalidation | *Done.* **98/98** W3C SHACL 1.0 Core and **138/138** SHACL 1.2 Core, through both validators (§15). Both revalidate a delta: the native one at **161×** a full pass, the adapted one at **0.08 ms against 150 ms** to prepare and validate at 250,000 quads. SPARQL constraints, SHACL-AF rules and node expressions are the adapted engine's; the native evaluator refuses them rather than dropping them. |
-| **P5** ◐ | Holon layer: versioned partitions, event log, IVM projections, time travel | *Walking skeleton built.* Scene, boundary, event log and the tick all work, validated incrementally at 41× a full pass (§16). Owes: atomicity (needs §6.1's MVCC), boundary rules to fixpoint, incrementally maintained projections, and time travel. Boundary rules were blocked on the adapted engine re-bridging per tick; P4 removed that, so they are now unblocked work rather than a dependency. |
+| **P5** ◐ | Holon layer: versioned partitions, event log, IVM projections, time travel | *Walking skeleton built.* Scene, boundary, event log and the tick all work, validated incrementally at 41× a full pass (§16). Boundary rules fire to a fixpoint per tick, and the whole tick is one atomic commit — both were owed here and both are done. Owes: isolation (needs §6.1's MVCC), incrementally maintained projections, and time travel. |
 | **P6** ◐ | HTTP protocol server, PyO3/WASM bindings, text + vector module | *Server built* — SPARQL 1.2 Protocol (**34/34**), Graph Store Protocol (**13/13**), SPARQL Update, YASGUI console, PyO3 bindings, policy enforced per request (§10). Owes WASM and the text/vector module. |
 
 P0–P2 is a conventional, low-risk, well-understood engine. P3–P5 is the research content. Structure

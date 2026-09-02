@@ -23,13 +23,22 @@
 //! - **Step 5 recomputes rather than maintains.** §9 restricts incremental maintenance to a
 //!   fragment of SPARQL and the Z-set machinery is not built. [`Regime::Maintained`] is
 //!   refused rather than silently downgraded.
-//! - **A tick is not atomic.** There is no transaction underneath it: a rejected commit is
-//!   undone by a compensating write, not a rollback, and a crash between applying the delta
-//!   and writing the event leaves the two disagreeing. Making it atomic is what §6.1's MVCC
-//!   and checkpoints are for, and neither is built.
+//! - **A tick is atomic but not isolated.** The whole of it — the delta, what the rules
+//!   inferred, the event and the version bump — runs inside one [`Store`] commit scope, so a
+//!   crash between applying the delta and writing the event can no longer leave the two
+//!   disagreeing: on a persistent backend nothing is written until the scope commits. What is
+//!   still missing is isolation. A concurrent reader with its own view sees the store before
+//!   the commit or after it and this promises nothing about which; that is §6.1's MVCC, and
+//!   it is not built. The server and the Python binding hold the engine behind an `RwLock`,
+//!   so there the question does not arise.
 //!
-//! That last one is the honest limit of a walking skeleton. It demonstrates the shape;
-//! it is not yet a thing to put a ledger in.
+//!   Note what a scope does *not* replace: a commit the boundary **refuses** is still undone
+//!   by a compensating write, because refusing is not failing. The event has to record that
+//!   the attempt happened, so the tick keeps writing while unapplying the delta — an ordinary
+//!   part of the commit rather than an unwind.
+//!
+//! The projection limit above is the honest limit of a walking skeleton. It demonstrates the
+//! shape; it is not yet a thing to put a ledger in.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::pedantic)]
@@ -183,6 +192,35 @@ pub fn tick_with_rules(
     delta: &Delta,
     rules: Option<&mut Rules>,
 ) -> Result<TickOutcome, HolonError> {
+    // The scope is opened here rather than inside the body so that *every* way out of the
+    // body passes through it — including the `?` on a store call, which no hand-placed undo
+    // at each `return` would have caught.
+    //
+    // A caller may already have one open, in which case the tick joins that commit instead of
+    // making one of its own and the rollback point is the caller's.
+    let owned = !engine.store().in_scope();
+    if owned {
+        engine.store_mut().begin()?;
+    }
+    let outcome = tick_body(engine, holon, session, delta, rules);
+    if owned {
+        if outcome.is_ok() {
+            engine.store_mut().commit()?;
+        } else {
+            engine.store_mut().rollback();
+        }
+    }
+    outcome
+}
+
+/// The tick itself, with the commit scope already open around it.
+fn tick_body(
+    engine: &mut Engine,
+    holon: &Holon,
+    session: &mut Session,
+    delta: &Delta,
+    rules: Option<&mut Rules>,
+) -> Result<TickOutcome, HolonError> {
     for projection in &holon.projections {
         if projection.regime == Regime::Maintained {
             return Err(HolonError::UnsupportedRegime(projection.id.clone()));
@@ -201,7 +239,6 @@ pub fn tick_with_rules(
             .policy(engine.store())?
             .permits_quad(encoded, Modes::WRITE)
         {
-            undo(engine, &applied)?;
             return Err(HolonError::WriteDenied(holon.scene.clone()));
         }
         if engine.store_mut().insert_encoded(encoded)? {
@@ -218,7 +255,6 @@ pub fn tick_with_rules(
             if !policy.permits_quad(encoded, Modes::WRITE)
                 || !policy.permits_quad(encoded, Modes::READ)
             {
-                undo(engine, &applied)?;
                 return Err(HolonError::WriteDenied(holon.scene.clone()));
             }
         }
@@ -241,14 +277,9 @@ pub fn tick_with_rules(
     // commit rather than a side effect of it: validated with everything else, recorded in the
     // event, and undone with the rest if the commit is refused.
     if let Some(rules) = rules {
-        let inferred = match rules.fire(engine, holon, &changes) {
-            Ok(inferred) => inferred,
-            Err(e) => {
-                // A runaway rule set is a failed tick, not a half-applied one.
-                undo(engine, &applied)?;
-                return Err(e);
-            }
-        };
+        // A runaway rule set is a failed tick, not a half-applied one — which is now the
+        // scope's business rather than something to unwind by hand here.
+        let inferred = rules.fire(engine, holon, &changes)?;
         for triple in inferred {
             let quad = into_scene(&triple, &scene);
             let encoded = engine.store_mut().encode_quad(quad.as_ref())?;
@@ -259,7 +290,6 @@ pub fn tick_with_rules(
                 .policy(engine.store())?
                 .permits_quad(encoded, Modes::WRITE)
             {
-                undo(engine, &applied)?;
                 return Err(HolonError::WriteDenied(holon.scene.clone()));
             }
             if engine.store_mut().insert_encoded(encoded)? {
@@ -440,10 +470,13 @@ impl Rules {
     }
 }
 
-/// Undoes what a rejected tick applied.
+/// Unapplies the delta of a commit the boundary refused.
 ///
-/// A compensating write, not a rollback: there is no transaction underneath. If this fails
-/// the scene is left inconsistent, which is exactly the hole §6.1's MVCC would close.
+/// Deliberately *not* a rollback, and the only caller left is the refusal path. A refused
+/// commit still has to write: the event records that the attempt happened and what it would
+/// have changed, so discarding everything the tick did would discard the evidence. So this
+/// is a compensating write inside the commit rather than an unwind of it — and if it fails,
+/// the failure propagates and the scope around the tick discards the whole thing.
 fn undo(
     engine: &mut Engine,
     applied: &[(Operation, Triple, EncodedQuad)],

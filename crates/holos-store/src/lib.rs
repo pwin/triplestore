@@ -246,9 +246,54 @@ impl Store {
         self.inner.checkpoint(destination)
     }
 
+    /// Opens a commit scope: everything written until [`Store::commit`] lands together.
+    ///
+    /// A single quad write is already atomic — every index order for it goes into one
+    /// batch — so what this adds is atomicity across *several*. A SPARQL update or a holon
+    /// tick is a sequence of quad writes, and without a scope a crash between two of them
+    /// leaves half a commit behind.
+    ///
+    /// Reads inside the scope see the scope's own writes, which is what lets an update's
+    /// later operations see what its earlier ones did. What the scope does **not** give is
+    /// isolation from *other* holders of the store; see [`Storage::begin`].
+    ///
+    /// # Errors
+    ///
+    /// A scope already open, or a bulk load running.
+    pub fn begin(&mut self) -> Result<()> {
+        self.inner.begin()
+    }
+
+    /// Commits a scope opened by [`Store::begin`].
+    ///
+    /// # Errors
+    ///
+    /// A write failure, or no scope open.
+    pub fn commit(&mut self) -> Result<()> {
+        self.inner.commit()
+    }
+
+    /// Abandons a scope, leaving the store as it was when [`Store::begin`] was called.
+    ///
+    /// Infallible on purpose: it is the failure path, and a rollback that can itself fail
+    /// leaves a state nobody can describe.
+    pub fn rollback(&mut self) {
+        self.inner.rollback();
+    }
+
+    /// Whether a commit scope is open.
+    #[must_use]
+    pub fn in_scope(&self) -> bool {
+        self.inner.in_scope()
+    }
+
     /// Announces a bulk load, so the backend can buffer writes and skip its log.
-    pub fn begin_bulk_load(&mut self) {
-        self.inner.begin_bulk_load();
+    ///
+    /// # Errors
+    ///
+    /// A commit scope open: see [`Storage::begin_bulk_load`].
+    pub fn begin_bulk_load(&mut self) -> Result<()> {
+        self.inner.begin_bulk_load()
     }
 
     /// Ends a bulk load, writing anything buffered and making it durable.

@@ -209,7 +209,7 @@ fn load_rocksdb(
 
     let started = Instant::now();
     if bulk {
-        engine.store_mut().begin_bulk_load();
+        engine.store_mut().begin_bulk_load()?;
     }
     let loaded = engine.bulk_load(std::io::BufReader::new(file), RdfFormat::NTriples, None)?;
     if bulk {

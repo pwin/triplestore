@@ -84,6 +84,69 @@ pub struct RocksStorage {
     predicate_counts: FxHashMap<TermId, u64>,
     /// `Some` while a bulk load is running: see [`RocksStorage::begin_bulk_load`].
     bulk: Option<BulkState>,
+    /// `Some` while a commit scope is open: see [`Storage::begin`].
+    scope: Option<ScopeState>,
+}
+
+/// How many buffered operations a commit scope may hold.
+///
+/// A scope keeps everything in one batch so the write is atomic, and one batch has to fit in
+/// memory: roughly ten operations per quad, so this is a few hundred thousand quads in a
+/// single commit. Past that it refuses, because the alternative — spilling to several
+/// batches — would silently drop the one guarantee the scope exists to give, and the caller
+/// would go on believing in an atomicity it no longer had.
+///
+/// The way past it is not a bigger number. A commit that large is a load, and a load belongs
+/// on [`RocksStorage::begin_bulk_load`], which buffers in bounded batches precisely because
+/// it does *not* promise to be atomic.
+const MAX_SCOPE_OPS: usize = 4 << 20;
+
+/// Whether something is in the store now, and whether it was before the scope opened.
+///
+/// Both are needed. `present` answers a read; `in_db` says whether the database iterator
+/// will produce it, which is what keeps an overlaid scan from yielding a quad twice.
+#[derive(Debug, Clone, Copy)]
+struct Presence {
+    in_db: bool,
+    present: bool,
+}
+
+/// What a commit scope has to remember.
+///
+/// The buffered writes, and enough about them to answer every read that would otherwise go
+/// to the database. That second half is not optional: a buffered write is invisible to a
+/// `get` and to an iterator, so without it a scope would show the caller the store as it was
+/// when the scope opened — and SPARQL requires each update operation to see the effects of
+/// the ones before it. A bulk load can skip all of this because a load does not read.
+///
+/// Everything here is bounded by the size of the commit rather than of the store, which is
+/// why a scope suits a tick and the bulk path suits a load.
+#[derive(Debug, Default)]
+struct ScopeState {
+    pending: Vec<Pending>,
+    /// Quads the scope has touched. Consulted by `contains_encoded` and overlaid onto
+    /// `scan` — without it, inserting one quad twice inside a scope writes and counts it
+    /// twice, and a `DELETE WHERE` cannot see what an earlier `INSERT DATA` added.
+    quads: FxHashMap<EncodedQuad, Presence>,
+    /// Named graphs the scope has created or dropped, for the same reason.
+    graphs: FxHashMap<TermId, Presence>,
+    /// Terms interned since the scope opened, keyed by their **exact serialised bytes** for
+    /// the reason `BulkState::terms` documents. Without it a term interned inside a scope is
+    /// interned again the next time it appears, and the two quads that mention it get
+    /// different ids and no longer join.
+    terms: FxHashMap<Vec<u8>, TermId>,
+    /// The same map backwards, which the bulk path has no use for and a scope does: `decode`
+    /// turns an id into a term on the read path, and an id minted inside the scope has no
+    /// `id2str` row yet.
+    strings: FxHashMap<TermId, Vec<u8>>,
+    /// Candidate lists for hashed dictionary keys, buffered so a second term hashing to a key
+    /// this scope already appended to extends that list rather than the stale one on disk.
+    /// Rare, and it is exactly the collision case §5 exists to survive.
+    candidates: FxHashMap<Vec<u8>, Vec<u8>>,
+    /// The counters as they were when the scope opened. They live in memory and are written
+    /// in the same batch, so discarding the batch has to discard them too.
+    quad_count: u64,
+    predicate_counts: FxHashMap<TermId, u64>,
 }
 
 /// What a bulk load has to remember that the database cannot yet answer.
@@ -208,6 +271,7 @@ impl RocksStorage {
             quad_count,
             predicate_counts,
             bulk: None,
+            scope: None,
         })
     }
 
@@ -292,38 +356,30 @@ impl RocksStorage {
 
     /// Records one write, buffering it during a bulk load.
     fn put(&mut self, family: &'static str, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
-        match self.bulk.as_mut() {
-            Some(state) => {
-                state
-                    .pending
-                    .push(Pending::Put(family, key.into(), value.into()));
-                Ok(())
-            }
-            None => {
-                let mut batch = WriteBatch::default();
-                batch.put_cf(cf(&self.db, family)?, key, value);
-                self.db.write(batch).map_err(rocks_err)
-            }
-        }
+        self.commit_ops(vec![Pending::Put(family, key.into(), value.into())])
     }
 
     /// Records one delete, buffering it during a bulk load.
     fn delete(&mut self, family: &'static str, key: Vec<u8>) -> Result<()> {
-        match self.bulk.as_mut() {
-            Some(state) => {
-                state.pending.push(Pending::Delete(family, key.into()));
-                Ok(())
-            }
-            None => {
-                let mut batch = WriteBatch::default();
-                batch.delete_cf(cf(&self.db, family)?, key);
-                self.db.write(batch).map_err(rocks_err)
-            }
-        }
+        self.commit_ops(vec![Pending::Delete(family, key.into())])
     }
 
     /// Applies a group of writes atomically, or buffers them.
     fn commit_ops(&mut self, ops: Vec<Pending>) -> Result<()> {
+        // A scope buffers without flushing: the whole point is that nothing reaches the
+        // database until the commit, so a crash before it leaves the store as it was.
+        if let Some(scope) = self.scope.as_mut() {
+            scope.pending.extend(ops);
+            if scope.pending.len() > MAX_SCOPE_OPS {
+                return Err(StorageError::corruption(format!(
+                    "a commit scope exceeded {MAX_SCOPE_OPS} buffered operations, about \
+                     {} quads. A commit that large is a load, and a load belongs on the bulk \
+                     path, which is built for the volume and does not promise atomicity.",
+                    MAX_SCOPE_OPS / 10
+                )));
+            }
+            return Ok(());
+        }
         if let Some(state) = self.bulk.as_mut() {
             state.pending.extend(ops);
             if state.pending.len() >= BULK_BATCH_OPS {
@@ -433,6 +489,11 @@ impl RocksStorage {
                 return Ok(*existing);
             }
         }
+        if let Some(state) = self.scope.as_ref() {
+            if let Some(existing) = state.terms.get(&serialised) {
+                return Ok(*existing);
+            }
+        }
         if let Some(existing) = self.resolve(&dict_key, hashed, term)? {
             // Remember it: without this every *repeated* term costs a random read, which
             // dominates a bulk load — a term appearing a thousand times is looked up a
@@ -447,6 +508,10 @@ impl RocksStorage {
         if let Some(state) = self.bulk.as_mut() {
             state.terms.insert(serialised.clone(), id);
         }
+        if let Some(state) = self.scope.as_mut() {
+            state.terms.insert(serialised.clone(), id);
+            state.strings.insert(id, serialised.clone());
+        }
         ops.push(Pending::Put(
             ID2STR,
             put_id(id).to_vec().into(),
@@ -455,12 +520,25 @@ impl RocksStorage {
         if hashed {
             // Append to the candidate list rather than replacing it, so a hash collision
             // between two genuinely different terms keeps both.
-            let mut candidates = self
-                .db
-                .get_cf(cf(&self.db, STR2ID)?, &dict_key)
-                .map_err(rocks_err)?
-                .unwrap_or_default();
+            let buffered = self
+                .scope
+                .as_ref()
+                .and_then(|s| s.candidates.get(&dict_key))
+                .cloned();
+            let mut candidates = match buffered {
+                Some(list) => list,
+                None => self
+                    .db
+                    .get_cf(cf(&self.db, STR2ID)?, &dict_key)
+                    .map_err(rocks_err)?
+                    .unwrap_or_default(),
+            };
             candidates.extend_from_slice(&put_id(id));
+            if let Some(state) = self.scope.as_mut() {
+                state
+                    .candidates
+                    .insert(dict_key.clone(), candidates.clone());
+            }
             ops.push(Pending::Put(STR2ID, dict_key.into(), candidates.into()));
         } else {
             ops.push(Pending::Put(
@@ -495,6 +573,67 @@ impl RocksStorage {
             }
         }
         Ok(None)
+    }
+
+    /// Whether the database holds a quad, ignoring any open scope.
+    ///
+    /// The scope needs this to learn what it is overlaying: `Presence::in_db` is answered
+    /// once, when the scope first touches a quad, and remembered.
+    fn db_contains(&self, quad: EncodedQuad) -> Result<bool> {
+        let (order, k) = match quad.graph_name {
+            None => (DSPO, key(&[quad.subject, quad.predicate, quad.object])),
+            Some(g) => (GSPO, key(&[g, quad.subject, quad.predicate, quad.object])),
+        };
+        Ok(self
+            .db
+            .get_pinned_cf(cf(&self.db, order)?, k)
+            .map_err(rocks_err)?
+            .is_some())
+    }
+
+    /// Whether the database holds a named graph, ignoring any open scope.
+    fn db_contains_graph(&self, graph: TermId) -> Result<bool> {
+        Ok(self
+            .db
+            .get_pinned_cf(cf(&self.db, GRAPHS)?, put_id(graph))
+            .map_err(rocks_err)?
+            .is_some())
+    }
+
+    /// Records what a scope did to a quad.
+    ///
+    /// `in_db_if_new` is what the caller already learned by asking: both callers reach here
+    /// having just run `contains_encoded`, so when there is no entry yet its answer came from
+    /// the database and settles `in_db` without a second read.
+    fn note_quad(&mut self, quad: EncodedQuad, present: bool, in_db_if_new: bool) {
+        if let Some(scope) = self.scope.as_mut() {
+            scope
+                .quads
+                .entry(quad)
+                .or_insert(Presence {
+                    in_db: in_db_if_new,
+                    present,
+                })
+                .present = present;
+        }
+    }
+
+    /// Records what a scope did to a named graph.
+    ///
+    /// Unlike a quad this may need a read: `insert_encoded` creates a graph as a side effect
+    /// without ever asking whether it was there. Once per distinct graph per scope.
+    fn note_graph(&mut self, graph: TermId, present: bool) -> Result<()> {
+        if self.scope.is_none() {
+            return Ok(());
+        }
+        let in_db = match self.scope.as_ref().and_then(|s| s.graphs.get(&graph)) {
+            Some(known) => known.in_db,
+            None => self.db_contains_graph(graph)?,
+        };
+        if let Some(scope) = self.scope.as_mut() {
+            scope.graphs.insert(graph, Presence { in_db, present });
+        }
+        Ok(())
     }
 
     fn scan_order(&self, order: &'static str, prefix: &[TermId]) -> Result<RowScan<'_>> {
@@ -567,6 +706,14 @@ impl Storage for RocksStorage {
             _ => None,
         };
         let serialised = put_term(term, components);
+        // A term interned inside a scope has no `str2id` row yet, so resolving against the
+        // database alone reports it absent — and `contains` is built on this, which would
+        // make a quad the scope had just written invisible to duplicate detection.
+        if let Some(state) = self.scope.as_ref() {
+            if let Some(existing) = state.terms.get(&serialised) {
+                return Ok(Some(*existing));
+            }
+        }
         let (dict_key, hashed) = Self::dictionary_key(&serialised);
         self.resolve(&dict_key, hashed, term)
     }
@@ -578,12 +725,18 @@ impl Storage for RocksStorage {
         if id.tag().is_inline() {
             return Ok(inline::decode(id));
         }
-        let Some(bytes) = self
-            .db
-            .get_cf(cf(&self.db, ID2STR)?, put_id(id))
-            .map_err(rocks_err)?
-        else {
-            return Ok(None);
+        // A term minted inside a scope has no `id2str` row yet, so the scope answers first.
+        let bytes = if let Some(bytes) = self.scope.as_ref().and_then(|s| s.strings.get(&id)) {
+            bytes.clone()
+        } else {
+            let Some(bytes) = self
+                .db
+                .get_cf(cf(&self.db, ID2STR)?, put_id(id))
+                .map_err(rocks_err)?
+            else {
+                return Ok(None);
+            };
+            bytes
         };
         Ok(match codec::read_term(&bytes)? {
             StoredTerm::Complete(term) => Some(term),
@@ -673,6 +826,12 @@ impl Storage for RocksStorage {
             ));
         }
         self.commit_ops(ops)?;
+        // `contains_encoded` said no just above, so a quad with no entry yet is one the
+        // database does not hold.
+        self.note_quad(quad, true, false);
+        if let Some(g) = graph_name {
+            self.note_graph(g, true)?;
+        }
         Ok(true)
     }
 
@@ -712,19 +871,19 @@ impl Storage for RocksStorage {
         ));
         decrement(&mut self.predicate_counts, p, &mut ops);
         self.commit_ops(ops)?;
+        // And here it said yes, so a quad with no entry yet is one the database does hold.
+        self.note_quad(quad, false, true);
         Ok(true)
     }
 
     fn contains_encoded(&self, quad: EncodedQuad) -> Result<bool> {
-        let (order, k) = match quad.graph_name {
-            None => (DSPO, key(&[quad.subject, quad.predicate, quad.object])),
-            Some(g) => (GSPO, key(&[g, quad.subject, quad.predicate, quad.object])),
-        };
-        Ok(self
-            .db
-            .get_pinned_cf(cf(&self.db, order)?, k)
-            .map_err(rocks_err)?
-            .is_some())
+        // The scope's own writes first. A buffered write is invisible to the `get` below, so
+        // without this a scope that inserts a quad and then asks whether it is there is told
+        // no — and duplicate detection is exactly that question.
+        if let Some(known) = self.scope.as_ref().and_then(|s| s.quads.get(&quad)) {
+            return Ok(known.present);
+        }
+        self.db_contains(quad)
     }
 
     fn scan(
@@ -740,7 +899,30 @@ impl Storage for RocksStorage {
                     .chain(self.scan(subject, predicate, object, GraphFilter::AnyNamed)),
             ),
             _ => match self.routed_scan(subject, predicate, object, graph) {
-                Ok(iter) => iter,
+                Ok(iter) => match self.scope.as_ref() {
+                    None => iter,
+                    // The overlay: drop what the scope removed, add what it wrote. The second
+                    // half is restricted to quads the database does not hold, so a quad
+                    // removed and re-inserted inside the scope is yielded once, by the
+                    // iterator, rather than twice.
+                    Some(scope) => Box::new(
+                        iter.filter(move |row| match row {
+                            Ok(quad) => scope.quads.get(quad).is_none_or(|k| k.present),
+                            Err(_) => true,
+                        })
+                        .chain(
+                            scope
+                                .quads
+                                .iter()
+                                .filter(move |(quad, known)| {
+                                    known.present
+                                        && !known.in_db
+                                        && matches(**quad, subject, predicate, object, graph)
+                                })
+                                .map(|(quad, _)| Ok(*quad)),
+                        ),
+                    ),
+                },
                 Err(e) => Box::new(std::iter::once(Err(e))),
             },
         }
@@ -755,6 +937,7 @@ impl Storage for RocksStorage {
             return Ok(false);
         }
         self.put(GRAPHS, put_id(graph).to_vec(), Vec::new())?;
+        self.note_graph(graph, true)?;
         Ok(true)
     }
 
@@ -768,16 +951,16 @@ impl Storage for RocksStorage {
         }
         if existed {
             self.delete(GRAPHS, put_id(graph).to_vec())?;
+            self.note_graph(graph, false)?;
         }
         Ok(existed)
     }
 
     fn contains_named_graph(&self, graph: TermId) -> Result<bool> {
-        Ok(self
-            .db
-            .get_pinned_cf(cf(&self.db, GRAPHS)?, put_id(graph))
-            .map_err(rocks_err)?
-            .is_some())
+        if let Some(known) = self.scope.as_ref().and_then(|s| s.graphs.get(&graph)) {
+            return Ok(known.present);
+        }
+        self.db_contains_graph(graph)
     }
 
     fn named_graphs(&self) -> Result<Vec<TermId>> {
@@ -787,7 +970,25 @@ impl Storage for RocksStorage {
             .iterator_cf(cf(&self.db, GRAPHS)?, IteratorMode::Start)
         {
             let (k, _) = row.map_err(rocks_err)?;
-            out.push(read_id(&k)?);
+            let id = read_id(&k)?;
+            // Dropped inside the scope: on disk until the commit, gone as far as a reader
+            // is concerned.
+            if let Some(known) = self.scope.as_ref().and_then(|s| s.graphs.get(&id)) {
+                if !known.present {
+                    continue;
+                }
+            }
+            out.push(id);
+        }
+        if let Some(scope) = self.scope.as_ref() {
+            // Created inside the scope, so the iterator above could not have produced them.
+            out.extend(
+                scope
+                    .graphs
+                    .iter()
+                    .filter(|(_, known)| known.present && !known.in_db)
+                    .map(|(id, _)| *id),
+            );
         }
         Ok(out)
     }
@@ -806,8 +1007,63 @@ impl Storage for RocksStorage {
         v
     }
 
-    fn begin_bulk_load(&mut self) {
+    fn begin(&mut self) -> Result<()> {
+        if self.bulk.is_some() {
+            return Err(StorageError::corruption(
+                "a bulk load is running; its buffer and a scope's would interleave",
+            ));
+        }
+        if self.scope.is_some() {
+            return Err(StorageError::corruption(
+                "a commit scope is already open; nesting them would read as two commits and \
+                 be one",
+            ));
+        }
+        self.scope = Some(ScopeState {
+            quad_count: self.quad_count,
+            predicate_counts: self.predicate_counts.clone(),
+            ..ScopeState::default()
+        });
+        Ok(())
+    }
+
+    fn commit(&mut self) -> Result<()> {
+        let Some(scope) = self.scope.take() else {
+            return Err(StorageError::corruption("no commit scope is open"));
+        };
+        // One batch, one write. This is the whole guarantee: RocksDB applies a batch
+        // atomically, so a crash lands either before the commit or after it.
+        self.write_pending(scope.pending, false)
+    }
+
+    fn rollback(&mut self) {
+        let Some(scope) = self.scope.take() else {
+            return;
+        };
+        // Nothing was written, so there is nothing to undo in the database — which is what
+        // makes this infallible where a compensating-write undo is not. Only the in-memory
+        // counters moved, and they go back to what the scope opened with.
+        self.quad_count = scope.quad_count;
+        self.predicate_counts = scope.predicate_counts;
+        // `next` is deliberately left where it is. Restoring it would hand the ids the
+        // abandoned scope minted to *different* terms, so a caller holding one would silently
+        // read the wrong term; leaving it burns those ids instead, and a caller holding one
+        // gets an honest miss. The same choice the in-memory store makes, for the same
+        // reason: the dictionary is append-only and `holos compact` is what reclaims it.
+    }
+
+    fn in_scope(&self) -> bool {
+        self.scope.is_some()
+    }
+
+    fn begin_bulk_load(&mut self) -> Result<()> {
+        if self.scope.is_some() {
+            return Err(StorageError::corruption(
+                "a commit scope is open; a bulk load inside one would buffer into it",
+            ));
+        }
         self.start_bulk();
+        Ok(())
     }
 
     fn end_bulk_load(&mut self) -> Result<()> {
@@ -898,6 +1154,32 @@ impl RocksStorage {
             }
             GraphFilter::Any => unreachable!("handled by the caller"),
         })
+    }
+}
+
+/// Whether a quad answers a scan's pattern.
+///
+/// The database side of a scan is answered by choosing an index order and a key prefix; the
+/// scope side has no index, so it is answered by looking. That is affordable for exactly the
+/// reason the scope is bounded: a commit is small.
+fn matches(
+    quad: EncodedQuad,
+    subject: Option<TermId>,
+    predicate: Option<TermId>,
+    object: Option<TermId>,
+    graph: GraphFilter,
+) -> bool {
+    if subject.is_some_and(|s| s != quad.subject)
+        || predicate.is_some_and(|p| p != quad.predicate)
+        || object.is_some_and(|o| o != quad.object)
+    {
+        return false;
+    }
+    match graph {
+        GraphFilter::Default => quad.graph_name.is_none(),
+        GraphFilter::Named(g) => quad.graph_name == Some(g),
+        GraphFilter::AnyNamed => quad.graph_name.is_some(),
+        GraphFilter::Any => true,
     }
 }
 

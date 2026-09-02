@@ -333,8 +333,12 @@ Three things worth knowing:
 - **It takes the write lock.** `/update` is the only endpoint that does, so a writer
   excludes readers for the update's duration. That is what makes the update's failure
   atomicity behave as isolation in this deployment.
-- **It is all-or-nothing.** If any operation in the request fails, the store is left
-  exactly as it was — including the operations that had already succeeded.
+- **It is all-or-nothing, including across a crash.** The whole request runs inside one
+  commit scope: the writes accumulate into a single RocksDB batch and are written once. If
+  any operation fails, the store is left exactly as it was — including the operations that
+  had already succeeded — and if the process dies mid-request, so is the store on disk,
+  because nothing had been written yet. The scope refuses past a few hundred thousand quads
+  in one request; load data that size with `--data`, which is built for the volume.
 - **Policy applies to the write path.** Every quad written is checked for `WRITE`, and the
   `WHERE` clause is filtered by read policy on the same path as a `SELECT` — so a principal
   cannot delete what it cannot see. `SILENT` suppresses an operation's own error but never

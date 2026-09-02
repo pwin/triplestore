@@ -894,6 +894,7 @@ dependencies = [
  "spargebra",
  "spargeo",
  "sparopt",
+ "tempfile",
  "thiserror 2.0.20",
  "wkt",
 ]

@@ -127,7 +127,7 @@ fn a_checkpoint_during_a_bulk_load_is_refused() {
     let snapshot = destination("snap4");
 
     let mut store = store_at(&live);
-    store.begin_bulk_load();
+    store.begin_bulk_load().expect("begin a bulk load");
     store.insert(quad(1).as_ref()).expect("insert");
 
     let error = store.checkpoint(&snapshot).expect_err("should refuse");

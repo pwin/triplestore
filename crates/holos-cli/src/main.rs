@@ -132,7 +132,7 @@ fn main() -> Result<()> {
     if !opts.data.is_empty() {
         let started = std::time::Instant::now();
         let mut total = 0;
-        opts.begin_bulk(&mut engine);
+        opts.begin_bulk(&mut engine)?;
         for path in &opts.data {
             let format = format_for(path)?;
             total += engine
@@ -351,7 +351,7 @@ fn compact(engine: &Engine, opts: &Options) -> Result<()> {
     let graphs_before = source.named_graphs()?.len();
 
     let mut fresh = opts.open_store_at(destination)?;
-    fresh.begin_bulk_load();
+    fresh.begin_bulk_load()?;
 
     // Empty named graphs first: a graph with no quads exists in the store and would
     // otherwise vanish, which the Graph Store Protocol can tell the difference between.
@@ -894,10 +894,11 @@ impl Options {
         }
     }
 
-    fn begin_bulk(&self, engine: &mut Engine) {
+    fn begin_bulk(&self, engine: &mut Engine) -> Result<()> {
         if self.bulk {
-            engine.store_mut().begin_bulk_load();
+            engine.store_mut().begin_bulk_load()?;
         }
+        Ok(())
     }
 
     fn has_policy(&self) -> bool {
