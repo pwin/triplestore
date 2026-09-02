@@ -193,10 +193,12 @@ A scene of 60,000 quads, a four-constraint boundary, 200 commits.
 `cargo run -p holos-bench --release --bin bindopt`. A selective left side, an optional that
 misses nine times in ten, and a `LIMIT` — the shape most real queries have:
 
-| quads | rows | evaluator | bind join | speedup |
-|---:|---:|---:|---:|---:|
-| 41,000 | 20 | 0.411 ms | **0.058 ms** | 7.2× |
-| 410,000 | 20 | 2.698 ms | **0.071 ms** | 38× |
+| quads | shape | evaluator | bind join | speedup |
+|---:|---|---:|---:|---:|
+| 82,000 | `OPTIONAL` | 0.642 ms | **0.111 ms** | 5.8× |
+| 82,000 | `GRAPH ?g` | 0.313 ms | **0.122 ms** | 2.6× |
+| 820,000 | `OPTIONAL` | 2.882 ms | **0.071 ms** | 41× |
+| 820,000 | `GRAPH ?g` | 0.536 ms | **0.059 ms** | 9.0× |
 
 The ratio grows because the two scale differently, which is the only claim worth making from
 two points: the evaluator's time follows the store, the bind join's follows the answer. A hash

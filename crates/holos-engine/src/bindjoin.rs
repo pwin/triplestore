@@ -110,10 +110,11 @@
 use crate::view::{DatasetView, ViewError};
 use holos_core::TermId;
 use holos_stats::Statistics;
+use oxrdf::NamedNode;
 use rustc_hash::FxHashMap;
 use spareval::{CancellationToken, QueryableDataset};
 use spargebra::algebra::{Expression, Function, GraphPattern};
-use spargebra::term::{GroundTerm, TermPattern, TriplePattern, Variable};
+use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
 
 /// The two conditions under which the fast path gives up and defers to the evaluator.
@@ -238,12 +239,36 @@ pub struct OptionalItem {
     fresh: Vec<Variable>,
 }
 
+/// Which graph a pattern matches against.
+///
+/// Carried per pattern rather than per plan, because `GRAPH` scopes a *block* and a query may
+/// hold several — including patterns outside any of them, which stay on the default graph.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// Outside any `GRAPH`: the dataset's default graph.
+    Default,
+    /// `GRAPH <g> { .. }` — one named graph, known before the scan.
+    Named(NamedNode),
+    /// `GRAPH ?g { .. }` — every named graph, binding `?g` to whichever matched.
+    ///
+    /// Once `?g` is bound, a later pattern in the same block resolves it and scans that one
+    /// graph instead of all of them, which is the bind join's whole trick applied to the
+    /// graph position.
+    Variable(Variable),
+}
+
+/// A triple pattern together with the graph it is matched in.
+pub struct PatternItem {
+    triple: TriplePattern,
+    scope: Scope,
+}
+
 /// One step of a plan: something that binds variables.
 pub enum Item {
     /// A single triple pattern, probed against the store's indexes.
-    Pattern(TriplePattern),
+    Pattern(PatternItem),
     /// `UNION`, flattened to a list of alternatives, each a conjunction of patterns.
-    Union(Vec<Vec<TriplePattern>>),
+    Union(Vec<Vec<PatternItem>>),
     /// `VALUES`: rows of terms bound directly rather than looked up.
     Values(ValuesItem),
     /// `OPTIONAL { .. }`, evaluated after everything required.
@@ -264,8 +289,8 @@ pub struct ValuesItem {
 /// things, in whatever order turns out cheapest".
 #[derive(Clone, Copy)]
 enum Todo<'p> {
-    Pattern(&'p TriplePattern),
-    Union(&'p [Vec<TriplePattern>]),
+    Pattern(&'p PatternItem),
+    Union(&'p [Vec<PatternItem>]),
     Values(&'p ValuesItem),
     Optional(&'p OptionalItem),
 }
@@ -392,7 +417,7 @@ pub fn plan(query: &Query) -> Option<Plan> {
             GraphPattern::Project { inner, variables } => {
                 let mut items = Vec::new();
                 let mut filters = Vec::new();
-                let bound = collect(inner, &mut items, &mut filters)?;
+                let bound = collect(inner, &Scope::Default, &mut items, &mut filters)?;
                 return finish(
                     items,
                     filters,
@@ -414,6 +439,7 @@ pub fn plan(query: &Query) -> Option<Plan> {
 /// fragment. The return value is what makes filter hoisting safe — see below.
 fn collect(
     pattern: &GraphPattern,
+    scope: &Scope,
     items: &mut Vec<Item>,
     filters: &mut Vec<Filter>,
 ) -> Option<Bound> {
@@ -425,18 +451,75 @@ fn collect(
                     return None;
                 }
                 collect_variables(triple, &mut bound.certain);
-                items.push(Item::Pattern(triple.clone()));
+                if let Scope::Variable(g) = scope {
+                    if !bound.certain.contains(g) {
+                        bound.certain.push(g.clone());
+                    }
+                }
+                items.push(Item::Pattern(PatternItem {
+                    triple: triple.clone(),
+                    scope: scope.clone(),
+                }));
             }
             bound.possible.clone_from(&bound.certain);
             Some(bound)
+        }
+
+        // A subquery. SPARQL evaluates one bottom-up and joins its *projected* solutions,
+        // so flattening its patterns into the surrounding conjunction is only the same thing
+        // when the projection hides nothing: a variable the subquery binds and does not
+        // project is invisible outside it, and flattening would expose it to join against an
+        // outer variable that happens to share the name.
+        //
+        // So a subquery projecting everything it binds is spliced in — which is what
+        // `{ SELECT * WHERE { .. } }` always is, and what braces used for readability
+        // produce — and one that hides a variable is refused.
+        //
+        // Widening this means renaming the hidden variables to something unique before
+        // splicing, at which point a collision cannot arise. That is a real fix rather than
+        // a wider guess, and it is not done here.
+        //
+        // A subquery carrying its own `LIMIT`, `DISTINCT` or `ORDER BY` arrives wrapped in a
+        // `Slice`, `Distinct` or `OrderBy` rather than a bare `Project`, and falls through to
+        // the refusal below: those change how many solutions there are, which no join does.
+        GraphPattern::Project { inner, variables } => {
+            let mut inner_items = Vec::new();
+            let mut inner_filters = Vec::new();
+            let bound = collect(inner, scope, &mut inner_items, &mut inner_filters)?;
+            if !bound.possible.iter().all(|v| variables.contains(v)) {
+                return None;
+            }
+            items.append(&mut inner_items);
+            filters.append(&mut inner_filters);
+            Some(bound)
+        }
+
+        // `GRAPH`. The block's patterns are tagged with the graph and then join the flat
+        // todo list like any others, so they can still be ordered against patterns outside
+        // the block — which is the point, since a selective pattern in the default graph
+        // should be able to drive a scan of a named one.
+        //
+        // A nested `GRAPH` re-scopes its block, and this refuses rather than implementing
+        // that: it is rare, and getting the inner-overrides-outer rule subtly wrong would
+        // answer against the wrong graph, which is the one failure this operator must not
+        // have.
+        GraphPattern::Graph { name, inner } => {
+            if !matches!(scope, Scope::Default) {
+                return None;
+            }
+            let inner_scope = match name {
+                NamedNodePattern::NamedNode(g) => Scope::Named(g.clone()),
+                NamedNodePattern::Variable(v) => Scope::Variable(v.clone()),
+            };
+            collect(inner, &inner_scope, items, filters)
         }
 
         // A join of conjunctions is a conjunction, so the two sides simply concatenate. The
         // nested loop then orders the whole lot together rather than respecting a tree shape
         // that carries no information about cost.
         GraphPattern::Join { left, right } => {
-            let a = collect(left, items, filters)?;
-            let b = collect(right, items, filters)?;
+            let a = collect(left, scope, items, filters)?;
+            let b = collect(right, scope, items, filters)?;
             Some(a.joined(b))
         }
 
@@ -448,7 +531,7 @@ fn collect(
         // certainly bound in the subtree makes the two orders agree, because a compatible
         // join cannot change the value of a variable the subtree already fixed.
         GraphPattern::Filter { expr, inner } => {
-            let bound = collect(inner, items, filters)?;
+            let bound = collect(inner, scope, items, filters)?;
             let mut conjuncts = Vec::new();
             flatten_conjunction(expr, &mut conjuncts);
             for conjunct in conjuncts {
@@ -467,7 +550,7 @@ fn collect(
 
         GraphPattern::Union { .. } => {
             let mut branches = Vec::new();
-            let bound = union_branches(pattern, &mut branches)?;
+            let bound = union_branches(pattern, scope, &mut branches)?;
             items.push(Item::Union(branches));
             Some(bound)
         }
@@ -490,6 +573,7 @@ fn collect(
                     bound.certain.push(variable.clone());
                 }
             }
+            let _ = scope;
             items.push(Item::Values(ValuesItem {
                 variables: variables.clone(),
                 rows: bindings.clone(),
@@ -509,11 +593,11 @@ fn collect(
             right,
             expression,
         } => {
-            let outer = collect(left, items, filters)?;
+            let outer = collect(left, scope, items, filters)?;
 
             let mut inner_items = Vec::new();
             let mut inner_filters = Vec::new();
-            let inner = collect(right, &mut inner_items, &mut inner_filters)?;
+            let inner = collect(right, scope, &mut inner_items, &mut inner_filters)?;
 
             if let Some(expression) = expression {
                 let mut conjuncts = Vec::new();
@@ -633,11 +717,11 @@ fn collect_outside(items: &[Item], skip: &OptionalItem, out: &mut Vec<Variable>)
 fn variables_of_items(items: &[Item], out: &mut Vec<Variable>) {
     for item in items {
         match item {
-            Item::Pattern(triple) => collect_variables(triple, out),
+            Item::Pattern(pattern) => variables_of_pattern(pattern, out),
             Item::Union(branches) => {
                 for branch in branches {
-                    for triple in branch {
-                        collect_variables(triple, out);
+                    for pattern in branch {
+                        variables_of_pattern(pattern, out);
                     }
                 }
             }
@@ -651,12 +735,28 @@ fn variables_of_items(items: &[Item], out: &mut Vec<Variable>) {
 ///
 /// A branch containing anything else — a filter, a nested join — ends the fragment. That is
 /// narrower than SPARQL allows and wide enough for what produces unions here.
-fn union_branches(pattern: &GraphPattern, out: &mut Vec<Vec<TriplePattern>>) -> Option<Bound> {
+fn union_branches(
+    pattern: &GraphPattern,
+    scope: &Scope,
+    out: &mut Vec<Vec<PatternItem>>,
+) -> Option<Bound> {
     match pattern {
         GraphPattern::Union { left, right } => {
-            let a = union_branches(left, out)?;
-            let b = union_branches(right, out)?;
+            let a = union_branches(left, scope, out)?;
+            let b = union_branches(right, scope, out)?;
             Some(a.alternated(b))
+        }
+        // A `GRAPH` block as a union branch re-scopes that branch, which is common enough to
+        // be worth having: `{ GRAPH <a> { .. } } UNION { GRAPH <b> { .. } }`.
+        GraphPattern::Graph { name, inner } => {
+            if !matches!(scope, Scope::Default) {
+                return None;
+            }
+            let inner_scope = match name {
+                NamedNodePattern::NamedNode(g) => Scope::Named(g.clone()),
+                NamedNodePattern::Variable(v) => Scope::Variable(v.clone()),
+            };
+            union_branches(inner, &inner_scope, out)
         }
         GraphPattern::Bgp { patterns } => {
             if patterns.is_empty() {
@@ -669,8 +769,21 @@ fn union_branches(pattern: &GraphPattern, out: &mut Vec<Vec<TriplePattern>>) -> 
                 }
                 collect_variables(triple, &mut bound.certain);
             }
+            if let Scope::Variable(g) = scope {
+                if !bound.certain.contains(g) {
+                    bound.certain.push(g.clone());
+                }
+            }
             bound.possible.clone_from(&bound.certain);
-            out.push(patterns.clone());
+            out.push(
+                patterns
+                    .iter()
+                    .map(|triple| PatternItem {
+                        triple: triple.clone(),
+                        scope: scope.clone(),
+                    })
+                    .collect(),
+            );
             Some(bound)
         }
         _ => None,
@@ -817,6 +930,19 @@ fn finish(
         offset,
         limit,
     })
+}
+
+/// Every variable a pattern mentions, the graph position included.
+///
+/// `GRAPH ?g` binds `?g` as surely as the triple binds its own variables, and a walk that
+/// missed it would let `?g` be projected without anything appearing to bind it.
+fn variables_of_pattern(pattern: &PatternItem, out: &mut Vec<Variable>) {
+    collect_variables(&pattern.triple, out);
+    if let Scope::Variable(g) = &pattern.scope {
+        if !out.contains(g) {
+            out.push(g.clone());
+        }
+    }
 }
 
 fn collect_variables(triple: &TriplePattern, out: &mut Vec<Variable>) {
@@ -977,8 +1103,8 @@ impl Plan {
             .collect();
 
         match todo[index] {
-            Todo::Pattern(triple) => {
-                self.probe(view, stats, triple, &rest, pending, bindings, run)?;
+            Todo::Pattern(pattern) => {
+                self.probe(view, stats, pattern, &rest, pending, bindings, run)?;
             }
 
             // Each alternative is tried in turn, with its own patterns prepended to whatever
@@ -1040,15 +1166,42 @@ impl Plan {
         &'p self,
         view: &DatasetView<'_>,
         stats: Option<&Statistics>,
-        triple: &'p TriplePattern,
+        pattern: &'p PatternItem,
         rest: &[Todo<'p>],
         pending: &[usize],
         bindings: &mut FxHashMap<&'p Variable, TermId>,
         run: &mut Run<'_>,
     ) -> Result<(), ViewError> {
+        let triple = &pattern.triple;
         // A constant absent from the dictionary kills the branch before any scan.
         let Some((subject, predicate, object)) = Self::resolve(triple, view, bindings)? else {
             return Ok(());
+        };
+
+        // Which graph to scan. A `GRAPH ?g` whose variable an earlier pattern already bound
+        // becomes a scan of that one graph — the bind join's trick applied to the graph
+        // position, and the reason `GRAPH ?g { ?s :p ?o . ?s :q ?r }` does not scan every
+        // graph for the second pattern.
+        //
+        // Purely an optimisation: `bind_variable` below rejects a quad from a different
+        // graph anyway, so scanning them all and discarding gives the same answer more
+        // slowly. A mutation test cannot tell the two apart, which is why the benchmark
+        // exists — correctness is the binding check, and this is the speed.
+        let graph: Option<Option<TermId>> = match &pattern.scope {
+            Scope::Default => Some(None),
+            Scope::Named(g) => match lookup(view, oxrdf::Term::from(g.clone()).as_ref())? {
+                // A graph the dictionary never saw holds nothing, so the branch is dead
+                // before any scan rather than after a fruitless one.
+                Slot::Missing => return Ok(()),
+                Slot::Fixed(id) => Some(Some(id)),
+                Slot::Any => None,
+            },
+            Scope::Variable(v) => match bindings.get(v) {
+                Some(id) => Some(Some(*id)),
+                // `None` is `spareval`'s "any named graph", which is what an unbound `GRAPH
+                // ?g` ranges over — never the default graph.
+                None => None,
+            },
         };
 
         // The probe. Where the previous depth bound the subject, this is a prefix lookup
@@ -1057,7 +1210,7 @@ impl Plan {
             subject.as_ref(),
             predicate.as_ref(),
             object.as_ref(),
-            Some(None),
+            graph.as_ref().map(Option::as_ref),
         ) {
             let quad = quad?;
             // Checked here as well as on entry to the next frame, because a quad that fails
@@ -1068,7 +1221,16 @@ impl Plan {
                 break;
             }
             let mut added = Vec::new();
-            if !bind(&triple.subject, quad.subject, bindings, &mut added)
+            // The graph is bound first, so an incompatible one costs nothing else.
+            let graph_ok = match (&pattern.scope, quad.graph_name) {
+                (Scope::Variable(v), Some(g)) => bind_variable(v, g, bindings, &mut added),
+                // A quad from the default graph cannot satisfy `GRAPH ?g`, and the scan does
+                // not produce one; this is the belt to that brace.
+                (Scope::Variable(_), None) => false,
+                _ => true,
+            };
+            if !graph_ok
+                || !bind(&triple.subject, quad.subject, bindings, &mut added)
                 || !bind_predicate(&triple.predicate, quad.predicate, bindings, &mut added)
                 || !bind(&triple.object, quad.object, bindings, &mut added)
             {
@@ -1375,7 +1537,7 @@ fn estimate_todo(
     stats: Option<&Statistics>,
 ) -> f64 {
     match todo {
-        Todo::Pattern(triple) => estimate(triple, view, bindings, stats),
+        Todo::Pattern(pattern) => estimate(&pattern.triple, view, bindings, stats),
         // Each branch yields at most what its most selective pattern does, and the union
         // yields the sum of the branches.
         Todo::Union(branches) => branches
@@ -1383,7 +1545,7 @@ fn estimate_todo(
             .map(|branch| {
                 branch
                     .iter()
-                    .map(|triple| estimate(triple, view, bindings, stats))
+                    .map(|pattern| estimate(&pattern.triple, view, bindings, stats))
                     .fold(f64::INFINITY, f64::min)
             })
             .sum(),

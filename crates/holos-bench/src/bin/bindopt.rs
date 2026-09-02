@@ -52,6 +52,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for n in [10_000usize, 100_000] {
         let mut engine = Engine::new();
         engine.bulk_load(dataset(n).as_bytes(), RdfFormat::Turtle, None)?;
+        // The same data again in four named graphs, so `GRAPH ?g` has somewhere to range and
+        // the narrowing has something to narrow.
+        for g in 0..4 {
+            engine.bulk_load_into_graph(
+                dataset(n / 4).as_bytes(),
+                RdfFormat::Turtle,
+                None,
+                &oxrdf::GraphName::NamedNode(oxrdf::NamedNode::new_unchecked(format!("{EX}g{g}"))),
+            )?;
+        }
         let store = engine.store();
         let session = Session::unrestricted(store)?;
         let stats = Arc::new(Statistics::build(store, GraphFilter::Default)?);
@@ -112,6 +122,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{quads:>9}  {rows:>10}  {reference:>11.3} ms  {ours:>11.3} ms  {:>7.1}x",
             reference / ours.max(1e-9)
         );
+
+        // The same comparison for `GRAPH ?g`, where the second pattern in a block scans the
+        // one graph the first bound rather than all of them.
+        let graphed = format!(
+            "PREFIX ex: <{EX}> SELECT ?g ?s ?name WHERE {{              GRAPH ?g {{ ?s ex:memberOf ex:u7 . ?s ex:name ?name }} }} LIMIT 20"
+        );
+        let parsed_g = spargebra::SparqlParser::new().parse_query(&graphed)?;
+        if holos_engine::bindjoin::plan(&parsed_g).is_some() {
+            let ours_g = median(
+                (0..5)
+                    .map(|_| {
+                        let view = engine.view(&session);
+                        let started = Instant::now();
+                        let (results, _) =
+                            Engine::query_with(&view, &graphed, &options).expect("query");
+                        let _ = count(results);
+                        started.elapsed().as_secs_f64() * 1e3
+                    })
+                    .collect(),
+            );
+            let reference_g = median(
+                (0..5)
+                    .map(|_| {
+                        let view = engine.view(&session);
+                        let started = Instant::now();
+                        let results = Engine::evaluator()
+                            .prepare(&parsed_g)
+                            .execute(&view)
+                            .expect("reference");
+                        let _ = count(results);
+                        started.elapsed().as_secs_f64() * 1e3
+                    })
+                    .collect(),
+            );
+            println!(
+                "{:>9}  {:>10}  {reference_g:>11.3} ms  {ours_g:>11.3} ms  {:>7.1}x",
+                "  (GRAPH)",
+                "",
+                reference_g / ours_g.max(1e-9)
+            );
+        }
     }
 
     println!();

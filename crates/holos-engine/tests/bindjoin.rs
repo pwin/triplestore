@@ -203,15 +203,16 @@ fn shapes_outside_the_fragment_still_work() {
     // Each of these must be refused by `plan` and answered by the evaluator. What is checked
     // is that the fast path's presence did not break them.
     //
-    // `FILTER` and `OPTIONAL` used to be on this list and are not any more; the refusal is
-    // asserted rather than described, so that moving something into the fragment cannot
-    // leave a comment here quietly claiming it is still outside. `OPTIONAL` has its own
-    // file, because a left join can be answered *wrongly* rather than merely slowly.
+    // `FILTER`, `OPTIONAL`, `GRAPH` and subqueries used to be on this list and are not any
+    // more; the refusal is asserted rather than described, so that moving something into the
+    // fragment cannot leave a comment here quietly claiming it is still outside. Each of the
+    // three has its own file, because each can be answered *wrongly* rather than merely
+    // slowly — a left join that does not compose, a scan that reaches the wrong graph, a
+    // projection that leaks a variable it hides.
     let engine = engine();
     for query in [
         format!("{P} SELECT ?n WHERE {{ ?s ex:name ?n }} ORDER BY ?n LIMIT 3"),
         format!("{P} SELECT (COUNT(*) AS ?c) WHERE {{ ?s ex:name ?n }}"),
-        format!("{P} SELECT ?n WHERE {{ GRAPH ?g {{ ?s ex:name ?n }} }}"),
         format!("{P} SELECT ?n WHERE {{ ?s ex:name ?n MINUS {{ ?s ex:nickname ?k }} }}"),
         // A union branch that is not a plain BGP is still outside: the flattening only
         // understands alternatives made of patterns.

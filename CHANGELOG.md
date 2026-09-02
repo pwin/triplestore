@@ -24,6 +24,36 @@ The last two are report-level rather than constraint-level:
   "this is fine" and "this is fine *by these lights*". `Report::with_conformance_disallows`
   recomputes conformance against an explicit set and records it.
 
+### `GRAPH` and subqueries join it too
+
+Scanning was hard-wired to the default graph, so every `GRAPH` query fell back. The scope is
+now carried **per pattern** rather than per plan, which is what lets a selective pattern in
+the default graph drive a scan of a named one — and lets `GRAPH ?g { ?s :p ?o . ?s :q ?r }`
+scan one graph for the second pattern instead of all of them, once the first has bound `?g`.
+
+Getting this wrong is the worst failure available to a store: answering against the wrong
+graph looks exactly like answering, and under §14 a named graph is a unit of access policy, so
+a misdirected scan would be a disclosure rather than a mistake. Eight differential tests, and
+four of five mutations caught by a named test — the fifth narrows a scan that the binding
+check would reject anyway, so it costs time rather than correctness, and the comment says so.
+
+Subqueries are spliced in when their projection **hides nothing**. A variable a subquery binds
+and does not project is invisible outside it, and flattening would expose it to join against
+an outer variable that happens to share the name:
+
+```sparql
+SELECT ?s ?o WHERE { { SELECT ?s WHERE { ?s ex:p ?o } } ?s ex:q ?o }
+```
+
+Flattened, the two `?o`s become one and the query demands a subject's `ex:p` and `ex:q` values
+coincide — so it answers nothing where the right answer has rows. That query is refused, and
+the refusal is pinned by a test that checks the *answer*, not just the refusal. A subquery
+carrying its own `LIMIT`, `DISTINCT` or `ORDER BY` arrives wrapped in a `Slice` and is refused
+too: those change how many solutions there are, which no join does.
+
+Widening the subquery case means renaming hidden variables before splicing, at which point a
+collision cannot arise. That is a real fix rather than a wider guess, and it is not done here.
+
 ### `OPTIONAL` joins the bind join's fragment
 
 The fragment was `SELECT` over BGP, `JOIN`, `UNION`, `VALUES` and `FILTER`. `OPTIONAL` is the
