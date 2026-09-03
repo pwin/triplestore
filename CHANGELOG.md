@@ -3,7 +3,15 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## Unreleased
+## 0.4.0 — 2026-09-03
+
+The release that made a filter reach the index, and finished P1.
+
+0.3.0 made every write path atomic. This one is about reads: a `FILTER` that bounds a
+pattern's object now bounds that pattern's scan, which is the promise `DESIGN.md` §5 has
+carried since the first commit and had never kept. Along the way the load path stopped
+holding a whole load in memory, three queries the specifications call invalid stopped being
+answered, and the maintenance commands stopped being able to fill a disk.
 
 ### Range filters reach the index
 
