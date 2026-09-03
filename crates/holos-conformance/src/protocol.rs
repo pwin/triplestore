@@ -149,7 +149,9 @@ fn read_request(graph: &Graph, node: NamedOrBlankNodeRef<'_>) -> Result<Scripted
     let mut expected_status_class = Vec::new();
     if let Some(resp) = response {
         for term in graph.objects_for_subject_predicate(resp, iri(MF, "expectedStatus").as_ref()) {
-            let TermRef::NamedNode(n) = term else { continue };
+            let TermRef::NamedNode(n) = term else {
+                continue;
+            };
             if let Some(code) = status_code(n.as_str()) {
                 expected_status.push(code);
             } else if let Some(class) = status_class(n.as_str()) {
@@ -161,7 +163,8 @@ fn read_request(graph: &Graph, node: NamedOrBlankNodeRef<'_>) -> Result<Scripted
     let expected_boolean = response
         .and_then(|resp| literal(graph, resp, &iri(MF, "expectedBoolean")))
         .and_then(|v| v.parse().ok());
-    let expected_format = response.and_then(|resp| literal(graph, resp, &iri(MF, "expectedFormat")));
+    let expected_format =
+        response.and_then(|resp| literal(graph, resp, &iri(MF, "expectedFormat")));
 
     Ok(ScriptedRequest {
         method,
@@ -309,8 +312,8 @@ impl HttpResponse {
 ///
 /// Fails on connection or I/O trouble, or a response that is not HTTP/1.x.
 pub fn send(address: &str, request: &ScriptedRequest) -> Result<HttpResponse> {
-    let mut stream = TcpStream::connect(address)
-        .with_context(|| format!("connecting to {address}"))?;
+    let mut stream =
+        TcpStream::connect(address).with_context(|| format!("connecting to {address}"))?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
 
     let body = request.body.as_deref().unwrap_or_default();
@@ -378,7 +381,8 @@ mod tests {
 
     #[test]
     fn a_response_parses_into_status_headers_and_body() {
-        let raw = b"HTTP/1.1 201 Created\r\nContent-Type: text/turtle\r\nX-Other: 1\r\n\r\nbody here";
+        let raw =
+            b"HTTP/1.1 201 Created\r\nContent-Type: text/turtle\r\nX-Other: 1\r\n\r\nbody here";
         let r = parse_response(raw).expect("parse");
         assert_eq!(r.status, 201);
         assert_eq!(r.header("content-type"), Some("text/turtle"));

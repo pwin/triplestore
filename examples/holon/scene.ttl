@@ -1,0 +1,38 @@
+# The starting state of the `wo:orders` holon's scene.
+#
+# Loaded straight into the scene graph before the holon is registered, which is the one time
+# data goes in without passing the boundary. Everything after this arrives as a tick.
+#
+# It conforms — deliberately. A scene that starts in violation would make the first tick fail
+# for a reason that has nothing to do with the tick.
+
+@prefix wo:   <https://example.org/workorders#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+# --- the assets orders are raised against -------------------------------------------
+
+wo:pump-14
+    a wo:Asset ;
+    rdfs:label "Transfer pump 14" ;
+    wo:site wo:northolt .
+
+wo:pump-27
+    a wo:Asset ;
+    rdfs:label "Transfer pump 27" ;
+    wo:site wo:northolt .
+
+wo:compressor-3
+    a wo:Asset ;
+    rdfs:label "Air compressor 3" ;
+    wo:site wo:greenford .
+
+# --- one order already in flight ------------------------------------------------------
+
+wo:WO-1001
+    a wo:WorkOrder ;
+    wo:asset wo:pump-14 ;
+    wo:status wo:InProgress ;
+    wo:raisedOn "2026-08-14"^^xsd:date ;
+    wo:meterHours "8412.5"^^xsd:decimal ;
+    wo:summary "Seal weeping at the drive end." .

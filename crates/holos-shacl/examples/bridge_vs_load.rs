@@ -47,14 +47,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("engine terms (own loader)   {}", engine_terms.len());
     println!("engine terms (bridged)      {}", bridged.terms.len());
     println!();
-    println!("engine loads the file       {:.3}s", engine_load.as_secs_f64());
-    println!("bridge from a live store    {:.3}s", bridge_time.as_secs_f64());
+    println!(
+        "engine loads the file       {:.3}s",
+        engine_load.as_secs_f64()
+    );
+    println!(
+        "bridge from a live store    {:.3}s",
+        bridge_time.as_secs_f64()
+    );
     println!(
         "                            {:.1}x cheaper",
         engine_load.as_secs_f64() / bridge_time.as_secs_f64().max(f64::MIN_POSITIVE)
     );
     println!();
-    println!("(for context, HOLOS's own load of the same file: {:.3}s — paid once, and", store_load.as_secs_f64());
+    println!(
+        "(for context, HOLOS's own load of the same file: {:.3}s — paid once, and",
+        store_load.as_secs_f64()
+    );
     println!(" shared with the query engine and the policy layer rather than by SHACL alone)");
 
     assert_eq!(

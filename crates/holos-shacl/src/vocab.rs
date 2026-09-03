@@ -39,9 +39,21 @@ const SH: &str = "http://www.w3.org/ns/shacl#";
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const RDFS: &str = "http://www.w3.org/2000/01/rdf-schema#";
 
-macro_rules! sh { ($n:literal) => { concat!("http://www.w3.org/ns/shacl#", $n) } }
-macro_rules! rdf { ($n:literal) => { concat!("http://www.w3.org/1999/02/22-rdf-syntax-ns#", $n) } }
-macro_rules! rdfs { ($n:literal) => { concat!("http://www.w3.org/2000/01/rdf-schema#", $n) } }
+macro_rules! sh {
+    ($n:literal) => {
+        concat!("http://www.w3.org/ns/shacl#", $n)
+    };
+}
+macro_rules! rdf {
+    ($n:literal) => {
+        concat!("http://www.w3.org/1999/02/22-rdf-syntax-ns#", $n)
+    };
+}
+macro_rules! rdfs {
+    ($n:literal) => {
+        concat!("http://www.w3.org/2000/01/rdf-schema#", $n)
+    };
+}
 
 sh_vocab! {
     // --- RDF and RDFS
@@ -92,6 +104,28 @@ sh_vocab! {
     flags => sh!("flags"),
     language_in => sh!("languageIn"),
     unique_lang => sh!("uniqueLang"),
+    // SHACL 1.2 list constraints. They take an RDF list as the *value node* and say
+    // something about its members, which is a different shape of check from everything
+    // above: the value is a handle to a structure rather than a value in itself.
+    min_list_length => sh!("minListLength"),
+    max_list_length => sh!("maxListLength"),
+    unique_members => sh!("uniqueMembers"),
+    member_shape => sh!("memberShape"),
+    single_line => sh!("singleLine"),
+    subset_of => sh!("subsetOf"),
+    unique_values_for => sh!("uniqueValuesFor"),
+    some_value => sh!("someValue"),
+    by_types => sh!("ByTypes"),
+    shape => sh!("shape"),
+    shape_class => sh!("ShapeClass"),
+    reifier_shape => sh!("reifierShape"),
+    reification_required => sh!("reificationRequired"),
+    root_class => sh!("rootClass"),
+    target_where => sh!("targetWhere"),
+    node_by_expression => sh!("nodeByExpression"),
+    source_constraint => sh!("sourceConstraint"),
+    conformance_disallows => sh!("conformanceDisallows"),
+    rdf_reifies => rdf!("reifies"),
     equals => sh!("equals"),
     disjoint => sh!("disjoint"),
     less_than => sh!("lessThan"),
@@ -121,6 +155,10 @@ sh_vocab! {
     violation => sh!("Violation"),
     warning => sh!("Warning"),
     info => sh!("Info"),
+    // SHACL 1.2 adds two levels below `sh:Info`. They are diagnostic rather than
+    // judgemental: a report may carry them and still say the data conforms.
+    debug => sh!("Debug"),
+    trace => sh!("Trace"),
 
     // --- report vocabulary
     validation_report => sh!("ValidationReport"),
@@ -151,6 +189,17 @@ sh_vocab! {
     pattern_component => sh!("PatternConstraintComponent"),
     language_in_component => sh!("LanguageInConstraintComponent"),
     unique_lang_component => sh!("UniqueLangConstraintComponent"),
+    min_list_length_component => sh!("MinListLengthConstraintComponent"),
+    max_list_length_component => sh!("MaxListLengthConstraintComponent"),
+    unique_members_component => sh!("UniqueMembersConstraintComponent"),
+    member_shape_component => sh!("MemberShapeConstraintComponent"),
+    single_line_component => sh!("SingleLineConstraintComponent"),
+    subset_of_component => sh!("SubsetOfConstraintComponent"),
+    unique_values_for_component => sh!("UniqueValuesForConstraintComponent"),
+    some_value_component => sh!("SomeValueConstraintComponent"),
+    reifier_shape_component => sh!("ReifierShapeConstraintComponent"),
+    root_class_component => sh!("RootClassConstraintComponent"),
+    node_by_expression_component => sh!("NodeByExpressionConstraintComponent"),
     equals_component => sh!("EqualsConstraintComponent"),
     disjoint_component => sh!("DisjointConstraintComponent"),
     less_than_component => sh!("LessThanConstraintComponent"),

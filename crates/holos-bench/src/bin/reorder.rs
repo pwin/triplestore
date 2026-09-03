@@ -22,7 +22,12 @@ use std::time::{Duration, Instant};
 
 const EX: &str = "http://holos.example/";
 
-fn run(engine: &Engine, session: &Session, sparql: &str, options: &QueryOptions) -> (usize, Duration) {
+fn run(
+    engine: &Engine,
+    session: &Session,
+    sparql: &str,
+    options: &QueryOptions,
+) -> (usize, Duration) {
     let mut best = Duration::MAX;
     let mut rows = 0;
     for _ in 0..3 {

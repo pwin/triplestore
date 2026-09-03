@@ -568,7 +568,22 @@ impl Engine<'_> {
                     self.push_frame(inner, &values, stack, frames)?;
                 }
                 constraint => {
+                    // A `{| sh:message ... |}` or `{| sh:severity ... |}` annotation
+                    // replaces the shape's own for results from *this* constraint, so it is
+                    // applied to what this call appended rather than threaded through the
+                    // thirty-odd places `eval` builds a result.
+                    let start = out.len();
                     self.eval(shape, constraint, &frames[i].sets, out, stack, store)?;
+                    if let Some(annotation) = shape.annotations.get(k) {
+                        for r in &mut out[start..] {
+                            if !annotation.messages.is_empty() {
+                                r.messages.clone_from(&annotation.messages);
+                            }
+                            if let Some(severity) = annotation.severity {
+                                r.severity = severity;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -766,19 +781,10 @@ impl Engine<'_> {
             Constraint::MaxLength(n) => {
                 per_value!(|value| self.str_len(value, store).is_some_and(|l| l <= *n as usize))
             }
-            Constraint::Pattern { regex, source } => {
-                for row in sets.rows() {
-                    for &value in row.values {
-                        // Blank nodes have no lexical form to match against.
-                        let ok = store.kind(value) != TermKind::Blank
-                            && store.lexical_form(value).is_some_and(|s| regex.is_match(s));
-                        if !ok {
-                            let mut r = self.result(shape, component, row.focus).with_value(value);
-                            r.source_constraint = Some(*source);
-                            out.push(r);
-                        }
-                    }
-                }
+            Constraint::Pattern(regex) => {
+                // Blank nodes have no lexical form to match against.
+                per_value!(|value| store.kind(value) != TermKind::Blank
+                    && store.lexical_form(value).is_some_and(|s| regex.is_match(s)))
             }
             Constraint::LanguageIn(ranges) => per_value!(|value| {
                 store.language(value).is_some_and(|tag| {
@@ -980,7 +986,10 @@ impl Engine<'_> {
             }
 
             // --- other
-            Constraint::ReifierShape(inner) => {
+            Constraint::ReifierShape {
+                shape: inner,
+                required,
+            } => {
                 // The annotation syntax `{| ... |}` produces a node that
                 // `rdf:reifies` the triple term, so the reifiers of a statement
                 // are found by looking that term up.
@@ -989,10 +998,22 @@ impl Engine<'_> {
                 };
                 for row in sets.rows() {
                     for &value in row.values {
-                        let Some(tt) = store.get_triple_term(row.focus, p, value) else {
+                        let reifiers: Vec<TermId> = store
+                            .get_triple_term(row.focus, p, value)
+                            .map(|tt| self.data.subjects(v.rdf_reifies, tt).collect())
+                            .unwrap_or_default();
+                        // `sh:reificationRequired` is the one way an *absent* reifier is a
+                        // fault. Without it an unreified statement satisfies the constraint
+                        // vacuously, which is what the constraint says: how a reifier must
+                        // look, not that there must be one.
+                        if reifiers.is_empty() {
+                            if *required {
+                                out.push(
+                                    self.result(shape, component, row.focus).with_value(value),
+                                );
+                            }
                             continue;
-                        };
-                        let reifiers: Vec<TermId> = self.data.subjects(v.rdf_reifies, tt).collect();
+                        }
                         // Like `sh:node`, the nested results are not reported
                         // directly: a non-conforming reifier faults the value
                         // whose statement it annotates.
@@ -1182,9 +1203,15 @@ impl Engine<'_> {
                                 None => true,
                             };
                             if !ok {
-                                out.push(
-                                    self.result(shape, component, row.focus).with_value(value),
-                                );
+                                // `sh:sourceConstraint` names the node that *stated* the
+                                // constraint, which here is the expression rather than the
+                                // shape it resolved to. For a constant expression the two
+                                // coincide; for any other they do not, and it is the
+                                // expression a reader needs to see.
+                                let mut r =
+                                    self.result(shape, component, row.focus).with_value(value);
+                                r.source_constraint = Some(*expr);
+                                out.push(r);
                             }
                         }
                     }

@@ -236,6 +236,40 @@ vocab_table![
     "http://www.w3.org/ns/shacl#ClosedConstraintComponent",
     "http://www.w3.org/ns/shacl#HasValueConstraintComponent",
     "http://www.w3.org/ns/shacl#InConstraintComponent",
+    // --- SHACL 1.2 additions. Appended, because a payload is an index into this table and
+    // that index is on disk; inserting these next to their 1.0 relatives would renumber
+    // every term after them.
+    "http://www.w3.org/ns/shacl#minListLength",
+    "http://www.w3.org/ns/shacl#maxListLength",
+    "http://www.w3.org/ns/shacl#uniqueMembers",
+    "http://www.w3.org/ns/shacl#memberShape",
+    "http://www.w3.org/ns/shacl#singleLine",
+    "http://www.w3.org/ns/shacl#MinListLengthConstraintComponent",
+    "http://www.w3.org/ns/shacl#MaxListLengthConstraintComponent",
+    "http://www.w3.org/ns/shacl#UniqueMembersConstraintComponent",
+    "http://www.w3.org/ns/shacl#MemberShapeConstraintComponent",
+    "http://www.w3.org/ns/shacl#SingleLineConstraintComponent",
+    "http://www.w3.org/ns/shacl#Debug",
+    "http://www.w3.org/ns/shacl#Trace",
+    "http://www.w3.org/ns/shacl#subsetOf",
+    "http://www.w3.org/ns/shacl#SubsetOfConstraintComponent",
+    "http://www.w3.org/ns/shacl#uniqueValuesFor",
+    "http://www.w3.org/ns/shacl#UniqueValuesForConstraintComponent",
+    "http://www.w3.org/ns/shacl#someValue",
+    "http://www.w3.org/ns/shacl#SomeValueConstraintComponent",
+    "http://www.w3.org/ns/shacl#ByTypes",
+    "http://www.w3.org/ns/shacl#shape",
+    "http://www.w3.org/ns/shacl#ShapeClass",
+    "http://www.w3.org/ns/shacl#reifierShape",
+    "http://www.w3.org/ns/shacl#reificationRequired",
+    "http://www.w3.org/ns/shacl#rootClass",
+    "http://www.w3.org/ns/shacl#targetWhere",
+    "http://www.w3.org/ns/shacl#nodeByExpression",
+    "http://www.w3.org/ns/shacl#NodeByExpressionConstraintComponent",
+    "http://www.w3.org/ns/shacl#sourceConstraint",
+    "http://www.w3.org/ns/shacl#conformanceDisallows",
+    "http://www.w3.org/ns/shacl#RootClassConstraintComponent",
+    "http://www.w3.org/ns/shacl#ReifierShapeConstraintComponent",
     // --- prov: (the holon Event graph is PROV-O shaped, DESIGN.md §9)
     "http://www.w3.org/ns/prov#Entity",
     "http://www.w3.org/ns/prov#Activity",
@@ -249,6 +283,10 @@ vocab_table![
     "http://www.w3.org/ns/prov#startedAtTime",
     "http://www.w3.org/ns/prov#endedAtTime",
     "http://www.w3.org/ns/prov#generatedAtTime",
+    // --- rdfs, appended: rdfs12 needs to name what it produces.
+    "http://www.w3.org/2000/01/rdf-schema#ContainerMembershipProperty",
+    // RDF 1.2: what a triple term denotes, and the range of `rdf:reifies`.
+    "http://www.w3.org/2000/01/rdf-schema#Proposition",
 ];
 
 fn lookup() -> &'static HashMap<&'static str, u64> {

@@ -87,7 +87,10 @@ fn sparql_protocol() {
             port,
             &["--gsp-path", "/gsp", "--gsp-base", "http://www.example"],
         ) else {
-            skipped.push((test.short_id().to_owned(), format!("no server on port {port}")));
+            skipped.push((
+                test.short_id().to_owned(),
+                format!("no server on port {port}"),
+            ));
             continue;
         };
 
@@ -144,8 +147,8 @@ fn load_dataset(address: &str, graphs: &[(String, std::path::PathBuf)]) -> Resul
             expected_boolean: None,
             expected_format: None,
         };
-        let response = protocol::send(address, &request)
-            .map_err(|e| format!("loading <{name}>: {e}"))?;
+        let response =
+            protocol::send(address, &request).map_err(|e| format!("loading <{name}>: {e}"))?;
         if response.status / 100 != 2 {
             return Err(format!(
                 "loading <{name}> answered {}: {}",
@@ -165,7 +168,12 @@ fn replay(address: &str, script: &protocol::Script) -> Result<(), String> {
         trace(request);
 
         let response = protocol::send(address, request).map_err(|e| {
-            format!("request {} ({} {}): {e}", i + 1, request.method, request.path)
+            format!(
+                "request {} ({} {}): {e}",
+                i + 1,
+                request.method,
+                request.path
+            )
         })?;
 
         let where_ = format!("request {} ({} {})", i + 1, request.method, request.path);
@@ -185,7 +193,10 @@ fn replay(address: &str, script: &protocol::Script) -> Result<(), String> {
             continue;
         }
 
-        let content_type = response.header("content-type").unwrap_or_default().to_owned();
+        let content_type = response
+            .header("content-type")
+            .unwrap_or_default()
+            .to_owned();
 
         if let Some(family) = &request.expected_format {
             if !format_matches(&content_type, family) {
@@ -205,7 +216,9 @@ fn replay(address: &str, script: &protocol::Script) -> Result<(), String> {
                 ));
             };
             if actual != expected {
-                return Err(format!("{where_} answered the ASK {actual}, expected {expected}"));
+                return Err(format!(
+                    "{where_} answered the ASK {actual}, expected {expected}"
+                ));
             }
         }
     }
@@ -220,7 +233,11 @@ fn replay(address: &str, script: &protocol::Script) -> Result<(), String> {
 /// deliberately-bad requests, where sending them to the query endpoint would produce the
 /// right status code for the wrong reason.
 fn redirect(request: &protocol::ScriptedRequest) -> String {
-    let endpoint = if is_update(request) { UPDATE_PATH } else { QUERY_PATH };
+    let endpoint = if is_update(request) {
+        UPDATE_PATH
+    } else {
+        QUERY_PATH
+    };
     match request.path.split_once('?') {
         Some((_, query)) => format!("{endpoint}?{query}"),
         None => endpoint.to_owned(),
@@ -305,7 +322,11 @@ fn boolean_in(body: &str) -> Option<bool> {
 mod tests {
     use super::*;
 
-    fn request(path: &str, body: Option<&str>, content_type: Option<&str>) -> protocol::ScriptedRequest {
+    fn request(
+        path: &str,
+        body: Option<&str>,
+        content_type: Option<&str>,
+    ) -> protocol::ScriptedRequest {
         protocol::ScriptedRequest {
             method: "POST".to_owned(),
             path: path.to_owned(),
@@ -328,22 +349,37 @@ mod tests {
 
     #[test]
     fn an_update_parameter_picks_the_update_endpoint() {
-        let r = request("/sparql/", Some("update=CLEAR%20ALL"), Some("application/x-www-form-urlencoded"));
+        let r = request(
+            "/sparql/",
+            Some("update=CLEAR%20ALL"),
+            Some("application/x-www-form-urlencoded"),
+        );
         assert_eq!(redirect(&r), "/update");
         assert!(is_update(&r));
     }
 
     #[test]
     fn a_direct_update_body_picks_the_update_endpoint() {
-        let r = request("/sparql/", Some("CLEAR ALL"), Some("application/sparql-update"));
+        let r = request(
+            "/sparql/",
+            Some("CLEAR ALL"),
+            Some("application/sparql-update"),
+        );
         assert!(is_update(&r));
     }
 
     #[test]
     fn a_query_that_mentions_update_is_still_a_query() {
         // The word appears in the query text; the parameter name is what decides.
-        let r = request("/sparql/", Some("query=SELECT%20%3Fupdate%20WHERE%7B%7D"), None);
-        assert!(!is_update(&r), "matched on the text rather than the parameter");
+        let r = request(
+            "/sparql/",
+            Some("query=SELECT%20%3Fupdate%20WHERE%7B%7D"),
+            None,
+        );
+        assert!(
+            !is_update(&r),
+            "matched on the text rather than the parameter"
+        );
     }
 
     #[test]

@@ -88,6 +88,13 @@ Regenerate with `cargo run --release -p holos-bench`.
 
 ## Load timings
 
+> **These load timings predate sorted ingestion.** They were measured before
+> `SstFileWriter` + `IngestExternalFile` replaced the buffered-batch write path, which an
+> interleaved A/B put at **1.7× on a whole `--bulk` load**. The `--bulk` rows below are
+> therefore pessimistic by roughly that much, and the no-`--bulk` rows are unaffected.
+> Re-running `cargo run --release -p holos-bench` is what replaces them; until someone does,
+> this note is more honest than numbers carried over from a different measurement.
+
 | People | Quads | Backend | Time | Rate | On disk | Dictionary |
 |---:|---:|---|---:|---:|---:|---:|
 | 100,000 | 753,218 | in memory | 3.87s | 194,384 quads/s | — | 200,881 |
@@ -187,6 +194,52 @@ A scene of 60,000 quads, a four-constraint boundary, 200 commits.
 - **holon: scene joined to log** — current state joined to its own history, across two named graphs — the query that would need two databases without this model
 
 ---
+
+## `OPTIONAL` through the bind join
+
+`cargo run -p holos-bench --release --bin bindopt`. A selective left side, an optional that
+misses nine times in ten, and a `LIMIT` — the shape most real queries have:
+
+| quads | shape | evaluator | bind join | speedup |
+|---:|---|---:|---:|---:|
+| 82,000 | `OPTIONAL` | 0.642 ms | **0.111 ms** | 5.8× |
+| 82,000 | `GRAPH ?g` | 0.313 ms | **0.122 ms** | 2.6× |
+| 820,000 | `OPTIONAL` | 2.882 ms | **0.071 ms** | 41× |
+| 820,000 | `GRAPH ?g` | 0.536 ms | **0.059 ms** | 9.0× |
+
+The ratio grows because the two scale differently, which is the only claim worth making from
+two points: the evaluator's time follows the store, the bind join's follows the answer. A hash
+join materialises the whole right side to discover that most of it was never needed; an index
+nested-loop probes per row and stops at the limit.
+
+The row counts are asserted equal before either side is timed, so a speedup cannot come from
+answering less.
+
+## SHACL validation on a write path
+
+`DESIGN.md` §8 runs two validators: the native evaluator, which revalidates a delta, and the
+adapted engine, which covers more constraint components. The engine's graph used to be
+immutable, so gating a commit with it meant bridging the whole store again on every write.
+
+Measured with `cargo run -p holos-bench --release --bin shaclinc`, on a shapes graph with
+five constraints and one changed data triple:
+
+| quads | prepare (re-bridge) | full validate | engine revalidate | native revalidate | speedup |
+|---:|---:|---:|---:|---:|---:|
+| 5,018 | 1.78 ms | 0.66 ms | **0.0072 ms** | 0.0073 ms | 338× |
+| 50,018 | 21.1 ms | 7.04 ms | **0.0200 ms** | 0.0540 ms | 1,409× |
+| 250,018 | 143 ms | 58.7 ms | **0.1095 ms** | 1.69 ms | 1,840× |
+
+The speedup is `(prepare + full validate) ÷ engine revalidate`: what gating one commit used
+to cost against what it costs now. The *shape* matters more than the ratio — `prepare` grows
+with the store, revalidation grows with the change.
+
+The adapted engine's revalidation is faster than the native evaluator's at scale, which is
+the reverse of what the two were built for. The engine computes focus nodes from three flat
+sorted arrays; the native evaluator scans the store for them. The comparison is not
+apples-to-apples — the engine covers `sh:sparql`, SHACL-AF rules and node expressions, which
+the native evaluator refuses — but it does mean the write path no longer trades coverage for
+speed.
 
 ## Reading the results
 
@@ -350,6 +403,226 @@ will keep rising.
 
 This is not an estimation problem. The order is optimal in both columns. It is the absence
 of an index nested-loop operator, and it cannot be fixed from outside the evaluator.
+
+### 3d. The operator now exists
+
+`holos_engine::bindjoin` is that operator, sitting ahead of `spareval` in the query path for
+the shapes it can answer. The same benchmark, on the same 753,199-quad store:
+
+| | Before | After |
+|---|---:|---:|
+| Query path, 20 rows from a three-pattern star | 43.9 ms | **0.535 ms** |
+| Hand-written bind join | 0.072 ms | 0.084 ms |
+| Gap to hand-written | **611×** | **~10×** |
+
+**About 82× on the real query path.** What is left is the difference between a general
+implementation and a hand-written one for a single known shape: choosing the next pattern
+from statistics at each step, hashed bindings, decoding through the dictionary. That is a
+tuning problem rather than a missing operator, and a much less urgent one.
+
+Three things kept it honest:
+
+* **The fragment is small.** `SELECT` in the default graph over basic graph patterns, `JOIN`,
+  `UNION`, `VALUES` and `FILTER`, with `DISTINCT`, `LIMIT`, `OFFSET` and a projection.
+  `OPTIONAL`, `GRAPH`, `MINUS`, aggregation, `ORDER BY`, property paths, `FROM`, blank nodes
+  and triple terms are all refused and fall back. A fast path that is wrong is worse than no
+  fast path.
+* **Ordering is decided at each step, not once.** After the first pattern binds `?s`, the
+  others stop being predicate scans and become subject-and-predicate lookups — a different
+  estimate entirely. Ordering up front would miss the effect the operator exists for.
+* **Policy is structural.** Scans go through the same `QueryableDataset` call `spareval`
+  makes, so `decide_quad` runs on every quad. The fast path has no way to read around §14.
+
+Seventeen differential tests run the same SPARQL through both paths and compare exactly —
+rows, bindings and multiplicity — including that duplicates survive without `DISTINCT`, which
+a bind join that deduplicated by accident would otherwise pass.
+
+#### Three bugs, and the coverage that was not there
+
+The differential tests all passed. Three bugs survived them, all of one kind: **the fast path
+took over queries carrying something it did not model.** Comparing answers cannot find that,
+because two of the three do not change an answer.
+
+* **A substitution was dropped.** `QueryOptions::substitutions` binds a variable without
+  interpolating it into query text. The gate excluding it read `!options.touches_dataset()`,
+  and `touches_dataset` — accurately, given its name — reports on the dataset, not on the
+  query. A substituted query was answered as though nothing had been bound. The comment above
+  that gate already said substitutions were excluded; only the code disagreed.
+* **A cross product materialised 13.7 GB.** `SELECT * WHERE { ?a ?b ?c . ?d ?e ?f }` over
+  20,000 triples is 400 million rows. It is inside the fragment, legitimately — but this
+  operator *materialises* where the evaluator streams, and it consulted no cancellation
+  token, because the token is checked by the evaluator it had just skipped. The query's 60 ms
+  timeout never fired. It was found as a test binary sitting at 13.7 GB resident and climbing.
+* **`FROM` was ignored, and that one returned wrong rows.** `FROM` and `FROM NAMED` live in
+  `Query::Select::dataset`, *beside* the pattern rather than inside it, so a check that reads
+  only the pattern sees an answerable query and answers a different one. `SELECT ?s FROM <g1>
+  WHERE { ?s ?p ?o }` returned the default graph's rows instead of `g1`'s.
+
+The middle one is the most instructive, because nothing about it was *incorrect*: given time
+and memory it would have produced the right answer. Being right eventually is a different
+property from being usable, and only the first was under test.
+
+The first two now run under `bindjoin::Limits` — a row budget and the deadline's token —
+where hitting either returns `None`, meaning *ask the evaluator*, discarding the partial rows
+rather than returning them short. The budget counts `seen` as well as `out`, because under
+`DISTINCT` a large `OFFSET` grows one and not the other. The third is refused outright.
+
+#### The suites that were supposed to catch this could not reach it
+
+The honest part. There are three ways into evaluation, and the fast path was wired into one
+of them. The W3C conformance runner reaches evaluation through
+`Engine::query_prepared_with_services`, and the Python binding and audited CLI path through
+`Engine::query`; both went straight to the evaluator. **Roughly a thousand W3C queries
+appeared to be covering this operator and were not executing a line of it**, and the
+most-used surface — the published `holosdb` package — never got the operator at all.
+
+All three now share one `try_bind_join`, with a test comparing their answers against the
+evaluator's so they cannot drift apart again. With the suites actually reaching it,
+`sparql10`, `sparql11` and `sparql12` are unchanged to the test — the first real evidence the
+operator agrees with the evaluator on SPARQL it did not have written for it.
+
+A second gap sat underneath: `FROM` had **no coverage in this repo at all**. The SPARQL 1.1
+suite contains exactly two queries using it and both are `CONSTRUCT`. The nineteen tests that
+exercise dataset specification are in the SPARQL 1.0 suite, which was on disk and had never
+been run. It is now the `sparql10` ratchet, at 262/263. A newer suite is not a superset of an
+older one — 1.1's manifests test what 1.1 *added*.
+
+#### 3e. Filters, pushed down
+
+A `FILTER` is applied as soon as the last variable it mentions is bound, rather than after
+the join. On the same store, a selective filter over the three-pattern star:
+
+| | Rows | Time |
+|---|---:|---:|
+| Evaluator, filter after the join | 19 | 20.7 ms |
+| Bind join, filter pushed down | 19 | **0.286 ms** |
+| | | **72×** |
+
+Steady-state over repeated runs. The first measurement taken was 67.5 ms against 0.948 ms —
+the same multiple, on a cold cache; the absolute numbers move by a factor of three between a
+cold and a warm store, and the ratio does not.
+
+Row counts are asserted equal in the benchmark, not reported and hoped over. The benchmark
+also asserts the filter matches *something*: the first version of it compared a string-typed
+`badgeNumber` against a number, which SPARQL treats as a type error and an eliminated
+solution, so it measured two ways of returning nothing and called the result 1×.
+
+The predicate is evaluated by **`spareval`'s own expression evaluator**, through this
+engine's function registry. That is the point: SPARQL comparison is value-based with numeric
+promotion across `xsd` types, and a second implementation of `=` that got
+`"1"^^xsd:integer` versus `"1.0"^^xsd:decimal` wrong would be a silent wrong answer. Only two
+classes are refused, both because the borrowed evaluator runs against an empty dataset and
+without an evaluation context: `EXISTS`, which would quietly answer `false` everywhere, and
+`NOW`/`RAND`/`UUID`/`STRUUID`/`BNODE`.
+
+Conjunctions are split, because `A && B` can only be applied once the later half is bound and
+splitting lets the earlier half prune sooner.
+
+#### 3f. `JOIN`, `UNION`, `VALUES` — and the spatial index finally pays
+
+`FILTER` alone was expected to make the spatial index and the bind join compose. It did not,
+and the reason is worth keeping: a routed GeoSPARQL query does not reach the planner as a
+filtered BGP. `topology::rewrite` turns `?f geo:sfWithin <window>` into a geometry lookup
+joined in as a *union* of ordinary patterns, and the spatial index then joins a `VALUES` of
+candidate geometries onto that. The actual shape is
+
+```text
+Filter(Join(Join(Bgp, Union(Bgp, Union(Bgp, Bgp))), Values))
+```
+
+so all four node kinds had to be in the fragment before any of it could use an index
+nested-loop join. With them in:
+
+| Geometries | Rows | Unindexed | Indexed | Speed-up |
+|---:|---:|---:|---:|---:|
+| 10,000 | 0 | 75.95 ms | **114.40 µs** | **664×** |
+| 50,000 | 4 | 381.22 ms | **158.30 µs** | **2,408×** |
+
+This is the same benchmark that, earlier in this work, showed the index making **no
+difference at all** — narrowing fifty thousand geometries to four changed nothing while the
+join scanned all fifty thousand regardless. Two components, each correct, that did not
+compose until there was an operator able to use a binding.
+
+Row counts are asserted equal at both scales, not reported and hoped over.
+
+The plan is a flat list of items rather than a tree, because evaluation is a nested loop:
+entering a `UNION` branch replaces that entry with the branch's own patterns and carries on.
+Ordering is still chosen per step, which is what puts a `VALUES` of four candidates ahead of
+a scan of fifty thousand — the whole behaviour the index exists to create. `UNION` is a
+multiset union: a solution satisfying two branches is produced twice, which the geometry
+lookup depends on for a resource carrying both `geo:hasGeometry` and
+`geo:hasDefaultGeometry`.
+
+Two boundaries are worth stating because they are not obvious:
+
+* **Hoisting a filter out of a join is only sound when its variables are certainly bound
+  inside the subtree it was written against.** `{ ?a ?b ?c FILTER(?d = 1) } { ?d ?e ?f }` is
+  the counter-example — `?d` is unbound where the filter sits, so it errors and eliminates
+  everything, while the same filter after the join would see `?d` bound. A `UNION` makes this
+  live rather than theoretical, since a variable bound in one branch may be unbound in
+  another, so the plan tracks *certainly* bound separately from *possibly* bound.
+* **A `VALUES` term the dictionary has never seen sends the query back to the evaluator.**
+  Such a term still binds — `VALUES ?x { <urn:absent> }` is one solution, not none — but
+  representing it needs a term id that does not exist, and interning one would be a write in
+  the middle of a read. It costs nothing where it matters: the `VALUES` the spatial index
+  generates holds geometries read out of the store.
+
+#### 3g. What a write costs the index
+
+The index earns 2,408× on reads. Until now it was rebuilt in full on **every write**, which
+made that a property of a read-only store: one write to a 200,000-geometry store cost about
+as much as four thousand probes.
+
+Where a rebuild's time goes, measured before changing anything:
+
+| Geometries | Scan | Decode + parse | Tree build | Total |
+|---:|---:|---:|---:|---:|
+| 50,000 | 2.14 ms | 18.50 ms | 10.31 ms | 30.95 ms |
+| 200,000 | 15.59 ms | 118.91 ms | 74.89 ms | 209.39 ms |
+
+**The parse is 57% and the scan is 7%.** That decided the design: a refresh can afford to
+keep scanning every quad, as long as it never re-decodes or re-parses a term it has already
+seen, and never re-packs the whole tree.
+
+| Geometries | Added | Rebuild | Refresh | Saved |
+|---:|---:|---:|---:|---:|
+| 50,000 | 100 | 56–61 ms | 0.10–0.29 ms | **196–547×** |
+| 200,000 | 100 | 222–271 ms | 0.14–0.27 ms | **813–1,895×** |
+
+Ranges over three runs. The ratio swings because the rebuild does, and because the refresh is
+small enough that noise shows; the number that matters is that **the refresh takes the same
+time at 200,000 geometries as at 50,000**. It is proportional to what was added, not to what
+was already there.
+
+That is possible because the index stopped scanning the store at all. The dictionary gives
+each kind of term its own dense, append-only index space, so every literal ever interned is
+`TermId::new(Tag::Literal, i)` for some `i` below the current count. The index remembers how
+far it has read; catching up means reading from there.
+
+The design turns on an asymmetry worth stating plainly. The index is a **superset filter**:
+the `VALUES` it produces is joined back against the store, so a geometry it still lists after
+its quads are deleted simply fails to join and contributes no row. **Omitting a geometry is a
+silently missing answer; keeping one that has left is invisible.** So the index tracks the
+*dictionary* rather than the store — and the dictionary is append-only by construction, so it
+never removes anything. What it holds is bounded by how many distinct geometries have ever
+been interned, not by how many are currently reachable.
+
+Two consequences worth naming:
+
+* **The staleness check became exact, and cheaper.** It was a heuristic comparing quad and
+  term counts, which called the index stale after any write at all. Now the index holds a
+  geometry for every literal id below its watermark, and every geometry in the store is a
+  literal in the dictionary — so a watermark level with the dictionary means nothing can be
+  missing. A write that only adds quads over geometries already interned no longer costs a
+  refresh, because nothing was interned.
+* **The tree repacks itself.** `rstar` packs a far better tree from a bulk load than from
+  repeated inserts, so past ten thousand incremental inserts the index rebuilds from what it
+  already holds — the tree construction, none of the parsing.
+
+Two tests carry the weight: one asserts a refreshed index answers *identically* to a rebuilt
+one over several probe windows and rounds of writing; the other deletes every geometry quad
+and asserts that the entries the index still holds produce no rows, which is what makes
+over-inclusion safe rather than merely convenient.
 
 ### 4. A commit costs the size of its change, not the size of the scene
 

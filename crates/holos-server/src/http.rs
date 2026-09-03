@@ -98,18 +98,16 @@ pub fn decode(s: &str) -> String {
                 out.push(b' ');
                 i += 1;
             }
-            b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    Ok(byte) => {
-                        out.push(byte);
-                        i += 3;
-                    }
-                    Err(_) => {
-                        out.push(bytes[i]);
-                        i += 1;
-                    }
+            b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                Ok(byte) => {
+                    out.push(byte);
+                    i += 3;
                 }
-            }
+                Err(_) => {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            },
             b => {
                 out.push(b);
                 i += 1;
@@ -250,17 +248,16 @@ mod tests {
 
     #[test]
     fn accept_headers_select_a_format() {
-        assert_eq!(
-            negotiate_results(Some("text/csv")),
-            QueryResultsFormat::Csv
-        );
+        assert_eq!(negotiate_results(Some("text/csv")), QueryResultsFormat::Csv);
         assert_eq!(
             negotiate_results(Some("application/sparql-results+xml")),
             QueryResultsFormat::Xml
         );
         // Quality values decide between two acceptable types.
         assert_eq!(
-            negotiate_results(Some("text/csv;q=0.5, application/sparql-results+json;q=0.9")),
+            negotiate_results(Some(
+                "text/csv;q=0.5, application/sparql-results+json;q=0.9"
+            )),
             QueryResultsFormat::Json
         );
         // An unknown type falls back rather than failing the request.
@@ -293,8 +290,14 @@ mod tests {
         // The protocol makes two `query` parameters a client error. `parse_form` keeps the
         // first and drops the rest, so by the time a request is a map the duplicate is
         // gone — which is why this reads the encoded text instead.
-        assert!(given_more_than_once("query=ASK%20%7B%7D&query=SELECT%20%2A%20%7B%7D", "query"));
-        assert!(!given_more_than_once("query=ASK%20%7B%7D&default-graph-uri=x", "query"));
+        assert!(given_more_than_once(
+            "query=ASK%20%7B%7D&query=SELECT%20%2A%20%7B%7D",
+            "query"
+        ));
+        assert!(!given_more_than_once(
+            "query=ASK%20%7B%7D&default-graph-uri=x",
+            "query"
+        ));
         assert!(!given_more_than_once("", "query"));
     }
 
@@ -307,7 +310,11 @@ mod tests {
     #[test]
     fn a_repeatable_parameter_may_of_course_repeat() {
         // The dataset parameters are the exception, and are joined rather than dropped.
-        let params = parse_form("default-graph-uri=http%3A%2F%2Fa&default-graph-uri=http%3A%2F%2Fb");
-        assert_eq!(values(&params, "default-graph-uri"), ["http://a", "http://b"]);
+        let params =
+            parse_form("default-graph-uri=http%3A%2F%2Fa&default-graph-uri=http%3A%2F%2Fb");
+        assert_eq!(
+            values(&params, "default-graph-uri"),
+            ["http://a", "http://b"]
+        );
     }
 }

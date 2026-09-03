@@ -114,7 +114,11 @@ fn a_conforming_tick_commits() {
     assert_eq!(outcome.version, 1);
     assert_eq!(outcome.violations, 0);
     assert_eq!(outcome.applied, 3);
-    assert_eq!(scene_size(&engine, &h), 3, "the scene holds the new triples");
+    assert_eq!(
+        scene_size(&engine, &h),
+        3,
+        "the scene holds the new triples"
+    );
     assert!(events_size(&engine, &h) > 0, "the tick was recorded");
     assert_eq!(registry::version(&engine, &h).unwrap(), 1);
 }
@@ -324,8 +328,10 @@ fn an_unimplemented_projection_regime_is_refused_not_downgraded() {
     // built. Silently recomputing a projection that asked to be maintained would be a lie
     // about what the system guarantees.
     let mut engine = Engine::new();
-    let mut h = Holon::new(NamedNode::new_unchecked("urn:holon:p"))
-        .with_projection(ex("names"), "SELECT ?n WHERE { ?s <http://example.com/name> ?n }");
+    let mut h = Holon::new(NamedNode::new_unchecked("urn:holon:p")).with_projection(
+        ex("names"),
+        "SELECT ?n WHERE { ?s <http://example.com/name> ?n }",
+    );
     h.projections[0].regime = holos_holon::Regime::Maintained;
     let mut session = admin_session(engine.store());
 

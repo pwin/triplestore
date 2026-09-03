@@ -95,14 +95,16 @@ fn main() -> Result<()> {
         scales
     };
 
-    let work = std::env::var("HOLOS_BENCH_DIR").map_or_else(
-        |_| std::env::temp_dir().join("holos-bench"),
-        PathBuf::from,
-    );
+    let work = std::env::var("HOLOS_BENCH_DIR")
+        .map_or_else(|_| std::env::temp_dir().join("holos-bench"), PathBuf::from);
     std::fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
 
     println!("# HOLOS benchmark\n");
-    println!("Machine: {} / {} logical cores", std::env::consts::OS, available_parallelism());
+    println!(
+        "Machine: {} / {} logical cores",
+        std::env::consts::OS,
+        available_parallelism()
+    );
     println!("Working directory: `{}`\n", work.display());
 
     let mut load_rows: Vec<(usize, LoadResult)> = Vec::new();
@@ -127,7 +129,10 @@ fn main() -> Result<()> {
             #[cfg(feature = "rocksdb")]
             {
                 for (label, bulk) in [("rocksdb, --bulk", true), ("rocksdb, no --bulk", false)] {
-                    let dir = work.join(format!("db-{people}-{}", if bulk { "bulk" } else { "plain" }));
+                    let dir = work.join(format!(
+                        "db-{people}-{}",
+                        if bulk { "bulk" } else { "plain" }
+                    ));
                     let _ = std::fs::remove_dir_all(&dir);
                     load_rows.push((people, load_rocksdb(label, &path, quads, &dir, bulk)?));
                     if !bulk {
@@ -204,7 +209,7 @@ fn load_rocksdb(
 
     let started = Instant::now();
     if bulk {
-        engine.store_mut().begin_bulk_load();
+        engine.store_mut().begin_bulk_load()?;
     }
     let loaded = engine.bulk_load(std::io::BufReader::new(file), RdfFormat::NTriples, None)?;
     if bulk {
@@ -331,7 +336,11 @@ fn run_holon_suite(work: &Path, people: usize) -> Result<HolonResults> {
 
     let mut engine = Engine::new();
     let holon = Holon::new(NamedNode::new_unchecked("urn:holon:people"));
-    let mut session = Session::open(engine.store(), Principal::anonymous(), unrestricted_policy())?;
+    let mut session = Session::open(
+        engine.store(),
+        Principal::anonymous(),
+        unrestricted_policy(),
+    )?;
 
     registry::register(&mut engine, &holon, &mut session)?;
 
@@ -407,7 +416,10 @@ fn run_holon_suite(work: &Path, people: usize) -> Result<HolonResults> {
     let started = Instant::now();
     let refused = tick(&mut engine, &holon, &mut session, &bad)?;
     let rejected_tick = started.elapsed();
-    anyhow::ensure!(!refused.committed(), "the boundary should have refused this");
+    anyhow::ensure!(
+        !refused.committed(),
+        "the boundary should have refused this"
+    );
 
     let queries = {
         let session = Session::unrestricted(engine.store())?;
@@ -525,7 +537,8 @@ fn report(
             load.backend,
             load.elapsed.as_secs_f64(),
             thousands(load.rate() as u64),
-            load.on_disk.map_or_else(|| "—".to_owned(), |b| format!("{} MB", mb(b))),
+            load.on_disk
+                .map_or_else(|| "—".to_owned(), |b| format!("{} MB", mb(b))),
             thousands(load.dictionary as u64),
         );
     }
@@ -575,7 +588,12 @@ fn report(
 
     if let Some((_, first)) = queries.first() {
         for (i, case) in first.iter().enumerate() {
-            print!("| {} | {} | {} |", case.label, case.group.label(), thousands(case.rows as u64));
+            print!(
+                "| {} | {} | {} |",
+                case.label,
+                case.group.label(),
+                thousands(case.rows as u64)
+            );
             for (_, results) in queries {
                 match results.get(i) {
                     Some(r) => print!(" {} |", ms(r.median)),
@@ -590,7 +608,12 @@ fn report(
     if let Some((_, first)) = queries.first() {
         let cases = queries::battery(1000);
         for (case, result) in cases.iter().zip(first) {
-            println!("- **{}** ({}) — {}", result.label, result.group.label(), case.tests);
+            println!(
+                "- **{}** ({}) — {}",
+                result.label,
+                result.group.label(),
+                case.tests
+            );
         }
     }
 
@@ -602,8 +625,14 @@ fn report(
     );
     println!("| | Time |");
     println!("|---|---:|");
-    println!("| Full validation of the scene | {} ms |", ms(holon.full_validation));
-    println!("| **One accepted commit** | **{} ms** |", ms(holon.accepted_tick));
+    println!(
+        "| Full validation of the scene | {} ms |",
+        ms(holon.full_validation)
+    );
+    println!(
+        "| **One accepted commit** | **{} ms** |",
+        ms(holon.accepted_tick)
+    );
     println!("| One rejected commit | {} ms |", ms(holon.rejected_tick));
     let ratio = holon.full_validation.as_secs_f64() / holon.accepted_tick.as_secs_f64().max(1e-9);
     println!("| **Commit vs full pass** | **{ratio:.0}× cheaper** |");
@@ -616,7 +645,12 @@ fn report(
     println!("| Query | Rows | Time |");
     println!("|---|---:|---:|");
     for case in &holon.queries {
-        println!("| {} | {} | {} ms |", case.label, thousands(case.rows as u64), ms(case.median));
+        println!(
+            "| {} | {} | {} ms |",
+            case.label,
+            thousands(case.rows as u64),
+            ms(case.median)
+        );
     }
 
     println!("\n#### What each holonic query isolates\n");

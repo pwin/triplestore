@@ -55,8 +55,12 @@ pub struct QueryOptions {
     /// What neither layer stops is a query that blocks *inside a single step* without
     /// touching the store — a cross product over small relations already held in memory can
     /// spin for a long time between dataset reads. Bounding that needs cooperative
-    /// cancellation inside the join operators, which is upstream work. A row-count or
-    /// result-size cap is the practical defence, and this is not one.
+    /// cancellation inside the join operators, which is upstream work, and this is not a
+    /// row-count or result-size cap.
+    ///
+    /// One operator is an exception, because it is ours: [`crate::bindjoin`] reads this
+    /// token itself and runs under a row budget besides. It has to — it skips the evaluator,
+    /// and with it both layers above.
     pub timeout: Option<Duration>,
 
     /// Collect the query plan, with per-operator statistics.
@@ -71,6 +75,12 @@ pub struct QueryOptions {
     /// Statistics are a snapshot: build them once and share the `Arc`. A stale snapshot
     /// makes plans worse, never wrong, because reordering a BGP cannot change its answer.
     pub reorder_with: Option<std::sync::Arc<holos_stats::Statistics>>,
+    /// An R-tree to narrow GeoSPARQL topology relations with, when one side is constant.
+    ///
+    /// Optional and checked: an index built before a write is missing what the write added,
+    /// so `crate::topology` verifies it still describes the store and falls back to a full
+    /// scan if not. Supplying a stale one costs time, never correctness.
+    pub spatial: Option<std::sync::Arc<crate::spatial::SpatialIndex>>,
 }
 
 impl QueryOptions {
@@ -103,7 +113,11 @@ impl QueryOptions {
 
     /// Binds a value to a variable without it passing through the parser.
     #[must_use]
-    pub fn with_substitution(mut self, variable: impl Into<Variable>, term: impl Into<Term>) -> Self {
+    pub fn with_substitution(
+        mut self,
+        variable: impl Into<Variable>,
+        term: impl Into<Term>,
+    ) -> Self {
         self.substitutions.push((variable.into(), term.into()));
         self
     }
@@ -126,6 +140,13 @@ impl QueryOptions {
     #[must_use]
     pub fn reordering(mut self, stats: std::sync::Arc<holos_stats::Statistics>) -> Self {
         self.reorder_with = Some(stats);
+        self
+    }
+
+    /// Narrow topology relations with this spatial index where it applies.
+    #[must_use]
+    pub fn with_spatial(mut self, index: std::sync::Arc<crate::spatial::SpatialIndex>) -> Self {
+        self.spatial = Some(index);
         self
     }
 

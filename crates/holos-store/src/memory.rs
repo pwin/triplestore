@@ -5,12 +5,21 @@
 //! by default.
 
 use crate::dictionary::Dictionary;
-use crate::error::Result;
+use crate::error::{Result, StorageError};
 use crate::index::{EncodedQuad, GraphFilter, QuadIndex, QuadScan};
 use crate::storage::Storage;
 use holos_core::TermId;
 use oxrdf::{Term, TermRef};
 use rustc_hash::FxHashMap;
+
+/// One write to undo if a commit scope is abandoned.
+#[derive(Debug, Clone, Copy)]
+enum Undo {
+    Inserted(EncodedQuad),
+    Removed(EncodedQuad),
+    GraphCreated(TermId),
+    GraphDropped(TermId),
+}
 
 /// Quads and terms held in memory.
 #[derive(Debug, Default, Clone)]
@@ -18,6 +27,17 @@ pub struct MemoryStorage {
     dictionary: Dictionary,
     index: QuadIndex,
     predicate_counts: FxHashMap<TermId, u64>,
+    /// The open commit scope's journal, if one is open.
+    ///
+    /// An in-memory store applies as it goes and undoes on failure, rather than buffering and
+    /// applying at the end. That is the right shape here for the reason the trait gives: a
+    /// crash loses the whole store, so the only thing a scope can add is *failure* atomicity,
+    /// and reads see their own writes without any arrangement.
+    ///
+    /// The dictionary is deliberately not journalled. It is append-only, an entry with no
+    /// quad referring to it is unreachable rather than wrong, and `holos compact` is what
+    /// reclaims those — rolling it back would mean invalidating ids a caller may hold.
+    undo: Option<Vec<Undo>>,
 }
 
 impl MemoryStorage {
@@ -37,6 +57,13 @@ impl MemoryStorage {
     #[must_use]
     pub fn index(&self) -> &QuadIndex {
         &self.index
+    }
+
+    /// Notes a write, if a scope is open to note it in.
+    fn record(&mut self, entry: Undo) {
+        if let Some(undo) = self.undo.as_mut() {
+            undo.push(entry);
+        }
     }
 
     fn decrement(&mut self, predicate: TermId) {
@@ -66,12 +93,76 @@ impl Storage for MemoryStorage {
         self.dictionary.len()
     }
 
+    fn begin(&mut self) -> Result<()> {
+        if self.undo.is_some() {
+            return Err(StorageError::corruption(
+                "a commit scope is already open; nesting them would read as two commits and \
+                 be one",
+            ));
+        }
+        self.undo = Some(Vec::new());
+        Ok(())
+    }
+
+    fn commit(&mut self) -> Result<()> {
+        if self.undo.take().is_none() {
+            return Err(StorageError::corruption("no commit scope is open"));
+        }
+        // Nothing to write: an in-memory store applies as it goes and the journal exists only
+        // to undo. Dropping it is the commit.
+        Ok(())
+    }
+
+    fn rollback(&mut self) {
+        let Some(undo) = self.undo.take() else {
+            return;
+        };
+        // Backwards, so a quad inserted and then removed within the scope comes back to the
+        // state it started in rather than to whichever the last operation happened to be.
+        for entry in undo.into_iter().rev() {
+            let outcome = match entry {
+                Undo::Inserted(quad) => self.remove_encoded(quad),
+                Undo::Removed(quad) => self.insert_encoded(quad),
+                Undo::GraphCreated(g) => self.remove_named_graph(g),
+                Undo::GraphDropped(g) => self.insert_named_graph(g),
+            };
+            // The index is in memory and these are the inverses of operations it just
+            // performed, so a failure here is not something a caller can act on. Ignored
+            // rather than propagated, which is what lets `rollback` be infallible and the
+            // failure path have no failure path of its own.
+            let _ = outcome;
+        }
+    }
+
+    fn in_scope(&self) -> bool {
+        self.undo.is_some()
+    }
+
+    fn dictionary_count_for(&self, tag: holos_core::Tag) -> usize {
+        self.dictionary.count_for(tag)
+    }
+
     fn insert_encoded(&mut self, quad: EncodedQuad) -> Result<bool> {
+        // A quad creates its graph, and `QuadIndex::insert` does that itself — so whether the
+        // graph is new has to be asked *before* the insert. Asking after gets `false` every
+        // time, and the graph is left behind by a rollback that undid everything else.
+        // Only worth asking while a scope is open, since otherwise nobody is journalling it.
+        let new_graph = match quad.graph_name {
+            Some(g) if self.undo.is_some() => !self.index.contains_named_graph(g)?,
+            _ => false,
+        };
         if self.index.insert(quad)? {
             *self.predicate_counts.entry(quad.predicate).or_insert(0) += 1;
             if let Some(g) = quad.graph_name {
                 self.index.insert_named_graph(g)?;
+                // Journalled separately from the quad because it is a separate write: undoing
+                // the quad does not undo the graph, and a rollback that put the quads back
+                // but left the graph behind leaves a named graph nothing ever created.
+                if new_graph {
+                    self.record(Undo::GraphCreated(g));
+                }
             }
+            self.record(Undo::Inserted(quad));
             Ok(true)
         } else {
             Ok(false)
@@ -81,6 +172,7 @@ impl Storage for MemoryStorage {
     fn remove_encoded(&mut self, quad: EncodedQuad) -> Result<bool> {
         if self.index.remove(quad)? {
             self.decrement(quad.predicate);
+            self.record(Undo::Removed(quad));
             Ok(true)
         } else {
             Ok(false)
@@ -120,6 +212,11 @@ impl Storage for MemoryStorage {
     }
 
     fn insert_named_graph(&mut self, graph: TermId) -> Result<bool> {
+        // Recorded before the call so the journal is written once rather than in each arm.
+        let created = !self.index.contains_named_graph(graph)?;
+        if created {
+            self.record(Undo::GraphCreated(graph));
+        }
         self.index.insert_named_graph(graph)
     }
 
@@ -128,8 +225,19 @@ impl Storage for MemoryStorage {
             .index
             .quads_for_pattern(None, None, None, GraphFilter::Named(graph))
             .collect::<Result<Vec<_>>>()?;
+        // Each quad separately, so a rollback puts the graph's contents back and not merely
+        // its name. Dropping a graph is the one write whose undo is not a single operation.
+        for quad in &doomed {
+            self.record(Undo::Removed(*quad));
+        }
         for quad in doomed {
             self.decrement(quad.predicate);
+        }
+        if self.index.contains_named_graph(graph)? {
+            // Dropped, so the undo is to create it again. Recording `GraphCreated` here —
+            // which is what the first version of this did — makes the rollback drop a graph
+            // the scope had only ever read.
+            self.record(Undo::GraphDropped(graph));
         }
         self.index.remove_named_graph(graph)
     }

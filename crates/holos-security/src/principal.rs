@@ -66,7 +66,11 @@ impl Label {
     pub fn join(&self, other: &Self) -> Self {
         Self {
             level: self.level.max(other.level),
-            compartments: self.compartments.union(&other.compartments).cloned().collect(),
+            compartments: self
+                .compartments
+                .union(&other.compartments)
+                .cloned()
+                .collect(),
         }
     }
 }
@@ -278,7 +282,9 @@ mod tests {
         };
         let secret_alpha_beta = Label {
             level: 2,
-            compartments: ["ALPHA".to_owned(), "BETA".to_owned()].into_iter().collect(),
+            compartments: ["ALPHA".to_owned(), "BETA".to_owned()]
+                .into_iter()
+                .collect(),
         };
 
         assert!(internal.dominates(&public));
@@ -373,11 +379,7 @@ mod tests {
             .with_clearance(Label::level(2));
         let quads = p.to_quads(&g);
         assert!(quads.iter().all(|q| q.graph_name == g.clone().into()));
-        assert!(quads
-            .iter()
-            .any(|q| q.predicate == holos("role")));
-        assert!(quads
-            .iter()
-            .any(|q| q.predicate == holos("clearanceLevel")));
+        assert!(quads.iter().any(|q| q.predicate == holos("role")));
+        assert!(quads.iter().any(|q| q.predicate == holos("clearanceLevel")));
     }
 }

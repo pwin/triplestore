@@ -40,6 +40,22 @@ pub enum Target {
     SubjectsOf(TermId),
     /// `sh:targetObjectsOf`.
     ObjectsOf(TermId),
+    /// `sh:targetWhere` — every node that conforms to a shape.
+    ///
+    /// The only target that has to *evaluate* something to know what it selects, so it is
+    /// also the only one whose cost is not bounded by an index lookup.
+    Where(ShapeIdx),
+}
+
+/// What a `{| ... |}` annotation said about one constraint.
+#[derive(Debug, Clone, Default)]
+pub struct Annotation {
+    /// `sh:message` — replaces the shape's own messages for results from this constraint.
+    pub messages: Vec<TermId>,
+    /// `sh:severity` — replaces the shape's severity for results from this constraint.
+    pub severity: Option<TermId>,
+    /// `sh:deactivated` — this constraint is not evaluated at all.
+    pub deactivated: bool,
 }
 
 /// A SHACL property path.
@@ -75,10 +91,18 @@ pub struct NodeKindSpec {
 /// One compiled constraint.
 #[derive(Debug, Clone)]
 pub enum Constraint {
-    /// `sh:class`
-    Class(TermId),
-    /// `sh:datatype`
-    Datatype(TermId),
+    /// `sh:class` — one class, or a list of them, satisfied by any.
+    ///
+    /// SHACL 1.2 allows `sh:class ( ex:A ex:B )`. Read as a single IRI the list's blank node
+    /// is a class nothing instantiates, so every value violates.
+    Class(Vec<TermId>),
+    /// `sh:datatype` — one datatype, or a list of them.
+    ///
+    /// SHACL 1.2 allows `sh:datatype ( xsd:string rdf:langString )`, satisfied by any of
+    /// them. Read as a single IRI the list's blank node matches nothing, so every value
+    /// violates — which is how this surfaced: thirty triples reported where nine were
+    /// expected.
+    Datatype(Vec<TermId>),
     /// `sh:nodeKind`
     NodeKind(NodeKindSpec),
     /// `sh:minCount`
@@ -103,14 +127,14 @@ pub enum Constraint {
     LanguageIn(Vec<String>),
     /// `sh:uniqueLang`
     UniqueLang,
-    /// `sh:equals`
-    Equals(TermId),
-    /// `sh:disjoint`
-    Disjoint(TermId),
-    /// `sh:lessThan`
-    LessThan(TermId),
-    /// `sh:lessThanOrEquals`
-    LessThanOrEquals(TermId),
+    /// `sh:equals` — a path, as SHACL 1.2 allows `sh:equals ( ex:a ex:b )`.
+    Equals(PathIdx),
+    /// `sh:disjoint`, likewise.
+    Disjoint(PathIdx),
+    /// `sh:lessThan` — a path, because SHACL 1.2 allows `sh:lessThan ( ex:a ex:b )`.
+    LessThan(PathIdx),
+    /// `sh:lessThanOrEquals`, likewise.
+    LessThanOrEquals(PathIdx),
     /// `sh:not`
     Not(ShapeIdx),
     /// `sh:and`
@@ -125,12 +149,87 @@ pub enum Constraint {
     Property(ShapeIdx),
     /// `sh:qualifiedValueShape` with its counts.
     Qualified(Box<Qualified>),
-    /// `sh:closed`
-    Closed(Vec<TermId>),
+    /// `sh:closed` — the ignored properties, and where the allowed set comes from.
+    ///
+    /// `sh:closed true` closes against the shape's *own* property shapes.
+    /// `sh:closed sh:ByTypes` closes against the property shapes of every shape that is a
+    /// class the focus node is an instance of, following `rdfs:subClassOf` upwards — so a
+    /// subclass may use its superclass's properties, and an instance of the superclass alone
+    /// may not use the subclass's.
+    Closed {
+        /// `sh:ignoredProperties`.
+        ignored: Vec<TermId>,
+        /// True for `sh:ByTypes`, which cannot be resolved until a focus node is known.
+        by_types: bool,
+    },
     /// `sh:hasValue`
     HasValue(TermId),
     /// `sh:in`
     In(Vec<TermId>),
+    /// `sh:minListLength` — the value node is a list of at least this many members.
+    MinListLength(usize),
+    /// `sh:maxListLength` — at most this many.
+    MaxListLength(usize),
+    /// `sh:uniqueMembers` — no member of the list appears twice.
+    UniqueMembers,
+    /// `sh:memberShape` — every member of the list conforms to this shape.
+    MemberShape(ShapeIdx),
+    /// `sh:singleLine` — the lexical form contains no line break.
+    SingleLine,
+    /// `sh:subsetOf` — every value node is also reached by this *path* from the focus
+    /// node. A path rather than a predicate: SHACL 1.2 allows
+    /// `sh:subsetOf ( ex:a ex:b )`, and reading it as an IRI makes every value violate.
+    SubsetOf(PathIdx),
+    /// `sh:reifierShape` — every reifier of the triple that produced a value conforms.
+    ///
+    /// RDF 1.2 lets a statement be annotated: `ex:s ex:p "v" {| ex:note true |}` asserts the
+    /// triple and, separately, a reifier that says something *about* it. This constrains
+    /// those reifiers, so it is the one constraint whose subject is a triple rather than a
+    /// node.
+    ReifierShape {
+        /// The shape every reifier must conform to.
+        shape: ShapeIdx,
+        /// `sh:reificationRequired` — a triple with no reifier at all violates.
+        ///
+        /// Without it, an unannotated triple passes vacuously: there is nothing to check.
+        required: bool,
+    },
+    /// `sh:nodeByExpression` — the focus node conforms to a shape a node expression names.
+    ///
+    /// SHACL Core defines no interesting node expressions, so the only form reachable here
+    /// is a constant IRI, which evaluates to itself and therefore names a shape directly.
+    /// That makes this `sh:node` with a different report: the expression is recorded as
+    /// `sh:sourceConstraint` so a reader can see which one was evaluated.
+    ///
+    /// A non-constant expression is not compiled at all rather than approximated. That means
+    /// such a shape reports nothing, which is a real limitation and is why it is written
+    /// here rather than left to be inferred from the code.
+    NodeByExpression {
+        /// The shape the expression named.
+        shape: ShapeIdx,
+        /// The expression itself, reported as `sh:sourceConstraint`.
+        expression: TermId,
+    },
+    /// `sh:rootClass` — the value is that class, or a subclass of it.
+    ///
+    /// About the class hierarchy rather than about instances: `sh:class ex:Animal` asks
+    /// whether a value *is* an animal, and this asks whether it is a *kind* of animal.
+    RootClass(TermId),
+    /// `sh:someValue` — at least one value node conforms to this shape.
+    ///
+    /// The existential counterpart of `sh:node`, which requires *every* value to conform.
+    /// A focus node with no values at all fails it: "some" needs one.
+    SomeValue(ShapeIdx),
+    /// `sh:uniqueValuesFor` — no two focus nodes of this shape share a key.
+    ///
+    /// The properties are a **composite key**, not a sequence path: `( skos:notation
+    /// skos:inScheme )` means the *pair* must be unique, not that one is reached through the
+    /// other. `sh:subsetOf` takes a list and means the opposite thing, which is why these
+    /// are compiled apart rather than sharing a helper.
+    ///
+    /// Unlike every other constraint here, it is not a statement about one focus node, so it
+    /// is evaluated once per shape rather than once per node — see `Validator::validate_all`.
+    UniqueValuesFor(Vec<TermId>),
 }
 
 /// A compiled `sh:pattern`.
@@ -176,6 +275,17 @@ impl Constraint {
             Self::Pattern(_) => sh.pattern_component,
             Self::LanguageIn(_) => sh.language_in_component,
             Self::UniqueLang => sh.unique_lang_component,
+            Self::MinListLength(_) => sh.min_list_length_component,
+            Self::MaxListLength(_) => sh.max_list_length_component,
+            Self::UniqueMembers => sh.unique_members_component,
+            Self::MemberShape(_) => sh.member_shape_component,
+            Self::SingleLine => sh.single_line_component,
+            Self::SubsetOf(_) => sh.subset_of_component,
+            Self::SomeValue(_) => sh.some_value_component,
+            Self::RootClass(_) => sh.root_class_component,
+            Self::NodeByExpression { .. } => sh.node_by_expression_component,
+            Self::ReifierShape { .. } => sh.reifier_shape_component,
+            Self::UniqueValuesFor(_) => sh.unique_values_for_component,
             Self::Equals(_) => sh.equals_component,
             Self::Disjoint(_) => sh.disjoint_component,
             Self::LessThan(_) => sh.less_than_component,
@@ -193,7 +303,7 @@ impl Constraint {
                     sh.qualified_max_count_component
                 }
             }
-            Self::Closed(_) => sh.closed_component,
+            Self::Closed { .. } => sh.closed_component,
             Self::HasValue(_) => sh.has_value_component,
             Self::In(_) => sh.in_component,
         }
@@ -217,6 +327,14 @@ pub struct Shape {
     pub targets: Vec<Target>,
     /// The constraints to check.
     pub constraints: Vec<Constraint>,
+    /// Annotations on the triples that declared those constraints, aligned with them.
+    ///
+    /// RDF 1.2 lets a shape say `sh:datatype xsd:integer {| sh:message "..."@en |}`, which
+    /// attaches a message to *that constraint* rather than to the shape. The parser turns it
+    /// into a reifier — `_:r rdf:reifies <<( shape sh:datatype xsd:integer )>>` plus
+    /// `_:r sh:message ...` — so the annotation is ordinary data by the time it arrives
+    /// here, and reading it is a lookup rather than a parsing problem.
+    pub annotations: Vec<Annotation>,
     /// `sh:severity`, defaulting to `sh:Violation`.
     pub severity: TermId,
     /// `sh:message`, in shapes-graph order.
@@ -258,6 +376,35 @@ impl Shapes {
         &self.shapes[idx.0 as usize]
     }
 
+    /// Whether a change this shape reads can imply a violation at a focus node that is not
+    /// an endpoint of the changed quad.
+    ///
+    /// A shape whose path is one predicate has its focus node *at* the quad: writing
+    /// `(s, ex:name, o)` can only fault `s`. A compound path breaks that —
+    /// `sh:path ( ex:knows ex:name )` faults whoever knows the node that changed, which is
+    /// one hop upstream and appears nowhere in the delta. Attributing such a change to the
+    /// endpoints alone finds the violation at the node that changed and misses the one at
+    /// the node that owns the path, which is the violation the shape was written for.
+    ///
+    /// Reported for the shape that *reads* the predicate, so the caller can widen whichever
+    /// targeted ancestor it attributes the change to.
+    #[must_use]
+    pub fn focus_may_be_upstream(&self, idx: ShapeIdx) -> bool {
+        let shape = self.shape(idx);
+        let compound = |p: PathIdx| !matches!(self.path(p), Path::Predicate(_));
+        if shape.path.is_some_and(compound) {
+            return true;
+        }
+        shape.constraints.iter().any(|c| match c {
+            Constraint::Equals(p)
+            | Constraint::Disjoint(p)
+            | Constraint::LessThan(p)
+            | Constraint::LessThanOrEquals(p)
+            | Constraint::SubsetOf(p) => compound(*p),
+            _ => false,
+        })
+    }
+
     /// One path by index.
     #[must_use]
     pub fn path(&self, idx: PathIdx) -> &Path {
@@ -282,17 +429,13 @@ impl Shapes {
     /// rather than the size of the graph (`DESIGN.md` §8).
     #[must_use]
     pub fn shapes_touching(&self, predicate: TermId) -> &[ShapeIdx] {
-        self.by_predicate
-            .get(&predicate)
-            .map_or(&[], Vec::as_slice)
+        self.by_predicate.get(&predicate).map_or(&[], Vec::as_slice)
     }
 
     /// Shapes targeting a class.
     #[must_use]
     pub fn shapes_targeting_class(&self, class: TermId) -> &[ShapeIdx] {
-        self.by_target_class
-            .get(&class)
-            .map_or(&[], Vec::as_slice)
+        self.by_target_class.get(&class).map_or(&[], Vec::as_slice)
     }
 
     /// The targeted shapes a shape is evaluated under.
@@ -338,9 +481,25 @@ impl Shapes {
 /// Every shape a shape refers to.
 fn referenced_shapes(shape: &Shape) -> Vec<ShapeIdx> {
     let mut out = Vec::new();
+    // Targets first. `sh:targetWhere` names a shape whose *conforming nodes* are this shape's
+    // focus set, so a change that alters what the inner shape selects alters what this shape
+    // validates — even when nothing this shape's own constraints read has changed. Walking
+    // constraints alone leaves the outer shape out of the revalidation frontier entirely.
+    for target in &shape.targets {
+        if let Target::Where(i) = target {
+            out.push(*i);
+        }
+    }
     for constraint in &shape.constraints {
         match constraint {
-            Constraint::Not(i) | Constraint::Node(i) | Constraint::Property(i) => out.push(*i),
+            Constraint::Not(i)
+            | Constraint::Node(i)
+            | Constraint::Property(i)
+            | Constraint::MemberShape(i)
+            | Constraint::SomeValue(i) => out.push(*i),
+            Constraint::ReifierShape { shape, .. } | Constraint::NodeByExpression { shape, .. } => {
+                out.push(*shape)
+            }
             Constraint::And(v) | Constraint::Or(v) | Constraint::Xone(v) => {
                 out.extend(v.iter().copied());
             }
@@ -401,14 +560,21 @@ impl<'a> Compiler<'a> {
                     Target::SubjectsOf(p) | Target::ObjectsOf(p) => {
                         by_predicate.entry(*p).or_default().push(idx);
                     }
-                    Target::Node(_) => {}
+                    // A filter target selects by evaluation rather than by predicate, so
+                    // there is no single predicate a change to it would arrive on. Left out
+                    // of the index deliberately: incremental revalidation cannot narrow it,
+                    // and pretending otherwise would make it miss changes.
+                    Target::Where(_) | Target::Node(_) => {}
                 }
             }
             for predicate in self.predicates_of(shape) {
                 by_predicate.entry(predicate).or_default().push(idx);
             }
         }
-        for shapes in by_predicate.values_mut().chain(by_target_class.values_mut()) {
+        for shapes in by_predicate
+            .values_mut()
+            .chain(by_target_class.values_mut())
+        {
             shapes.sort_unstable();
             shapes.dedup();
         }
@@ -448,10 +614,17 @@ impl<'a> Compiler<'a> {
         }
         for constraint in &shape.constraints {
             match constraint {
-                Constraint::Equals(p)
-                | Constraint::Disjoint(p)
-                | Constraint::LessThan(p)
-                | Constraint::LessThanOrEquals(p) => out.push(*p),
+                // Path-valued comparisons. Their predicates have to be walked out of the
+                // path rather than taken directly, or incremental revalidation stops
+                // noticing writes to them — the constraint would still be evaluated on a
+                // full run and silently skipped on a partial one.
+                Constraint::Equals(path)
+                | Constraint::Disjoint(path)
+                | Constraint::LessThan(path)
+                | Constraint::LessThanOrEquals(path)
+                | Constraint::SubsetOf(path) => self.path_predicates(*path, &mut out),
+                // A composite key reads each of its properties.
+                Constraint::UniqueValuesFor(properties) => out.extend(properties.iter().copied()),
                 // A class constraint reads rdf:type, so a new type triple must reach it.
                 Constraint::Class(_) => out.push(self.sh.rdf_type),
                 _ => {}
@@ -478,7 +651,14 @@ impl<'a> Compiler<'a> {
     /// shape, anything carrying a target, and anything with a `sh:path`.
     fn root_shape_nodes(&self) -> Result<Vec<TermId>, ShaclError> {
         let mut nodes = Vec::new();
-        for class in [self.sh.node_shape, self.sh.property_shape] {
+        // `sh:ShapeClass` declares a node to be a class *and* a shape at once, so it is a
+        // root in its own right — without it here, such a shape is never compiled and its
+        // implicit class target never fires.
+        for class in [
+            self.sh.node_shape,
+            self.sh.property_shape,
+            self.sh.shape_class,
+        ] {
             nodes.extend(self.graph.subjects(self.sh.rdf_type, class)?);
         }
         for parameter in [
@@ -524,12 +704,142 @@ impl<'a> Compiler<'a> {
             path_node: None,
             targets: Vec::new(),
             constraints: Vec::new(),
+            annotations: Vec::new(),
             severity: self.sh.violation,
             messages: Vec::new(),
             deactivated: false,
         });
         self.by_id.insert(node, idx);
         idx
+    }
+
+    /// Every SHACL-namespace property this compiler understands on a shape.
+    ///
+    /// The list is an allowlist and the check around it refuses everything else, which is
+    /// the whole point: a blocklist of constructs to reject goes stale the moment SHACL
+    /// grows one, and the failure of a stale blocklist is *silence* — the constraint is
+    /// dropped and the shape reports conformance it did not check.
+    ///
+    /// Two kinds of entry. Most are parameters this compiler reads. The rest —
+    /// `sh:name`, `sh:description`, `sh:order`, `sh:group`, `sh:defaultValue` — are
+    /// presentation properties with no effect on whether data conforms, so ignoring them
+    /// ignores nothing.
+    const KNOWN: &'static [&'static str] = &[
+        // Targets and shape structure.
+        "targetClass",
+        "targetNode",
+        "targetSubjectsOf",
+        "targetObjectsOf",
+        "targetWhere",
+        "path",
+        "property",
+        "node",
+        "deactivated",
+        "severity",
+        "message",
+        // Path expressions, which appear on path nodes rather than shapes but share a graph.
+        "inversePath",
+        "alternativePath",
+        "zeroOrMorePath",
+        "oneOrMorePath",
+        "zeroOrOnePath",
+        // Core constraint parameters.
+        "class",
+        "datatype",
+        "nodeKind",
+        "minCount",
+        "maxCount",
+        "minInclusive",
+        "maxInclusive",
+        "minExclusive",
+        "maxExclusive",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "flags",
+        "languageIn",
+        "uniqueLang",
+        "equals",
+        "disjoint",
+        "lessThan",
+        "lessThanOrEquals",
+        "not",
+        "and",
+        "or",
+        "xone",
+        "closed",
+        "ignoredProperties",
+        "hasValue",
+        "in",
+        "qualifiedValueShape",
+        "qualifiedMinCount",
+        "qualifiedMaxCount",
+        "qualifiedValueShapesDisjoint",
+        // SHACL 1.2 additions.
+        "minListLength",
+        "maxListLength",
+        "uniqueMembers",
+        "memberShape",
+        "singleLine",
+        "subsetOf",
+        "uniqueValuesFor",
+        "someValue",
+        "rootClass",
+        "nodeByExpression",
+        "reifierShape",
+        "reificationRequired",
+        // Presentation only.
+        "name",
+        "description",
+        "order",
+        "group",
+        "defaultValue",
+        // Not a constraint. SHACL-AF states that executing rules is a *separate operation*
+        // from validation, so a validator that ignores `sh:rule` is not skipping a check —
+        // it is doing what the specification says validation does. Refusing it here was too
+        // wide, and the cost showed up as soon as something needed it: a boundary carrying
+        // rules could not be validated at all, which made rules and the incremental write
+        // path mutually exclusive. Firing them is `holos_holon::Rules`'s job, and whether a
+        // pipeline that should have inferred did so is the pipeline's business.
+        "rule",
+    ];
+
+    /// Refuses a shape carrying a SHACL construct this validator cannot evaluate.
+    ///
+    /// `DESIGN.md` §8 records that the native evaluator covers SHACL Core while the adapted
+    /// engine covers more, and §9 makes this evaluator the one that gates a commit. Silently
+    /// dropping what it cannot check turns that gate into a gate that opens: the write path
+    /// answers *conforms* for data a full run rejects, with no error anywhere. A shapes
+    /// graph carrying `sh:sparql` did exactly that.
+    ///
+    /// So it fails closed. A caller that needs these constraints has
+    /// [`EngineRun`](crate::engine::EngineRun), which implements them; what it does not have
+    /// is incremental revalidation, and that trade is now visible instead of silent.
+    ///
+    /// The check is by namespace, so it cannot see a *custom* constraint component, whose
+    /// parameter lives in the shapes author's own namespace. Detecting those means reading
+    /// the `sh:parameter` declarations, and `sh:parameter` itself is refused here — a shapes
+    /// graph that declares a custom component is rejected before one can be used.
+    ///
+    /// What belongs on the list is anything whose absence changes an *answer*: a constraint
+    /// that would be silently dropped, or a target that would select different focus nodes.
+    /// `sh:rule` is on the allowlist for neither reason — see its entry.
+    fn refuse_unsupported(&self, node: TermId) -> Result<(), ShaclError> {
+        const SH: &str = "http://www.w3.org/ns/shacl#";
+        for predicate in self.graph.predicates_of(node)? {
+            let Some(Term::NamedNode(n)) = self.graph.term(predicate)? else {
+                continue;
+            };
+            let Some(local) = n.as_str().strip_prefix(SH) else {
+                continue;
+            };
+            if !Self::KNOWN.contains(&local) {
+                return Err(ShaclError::Unsupported(format!(
+                    "sh:{local} is not implemented by the incremental evaluator; validate                      through holos_shacl::engine::EngineRun instead"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn build(&mut self, node: TermId, _idx: ShapeIdx) -> Result<Shape, ShaclError> {
@@ -555,11 +865,18 @@ impl<'a> Compiler<'a> {
         for p in g.objects(node, sh.target_objects_of)? {
             targets.push(Target::ObjectsOf(p));
         }
+        for n in g.objects(node, sh.target_where)? {
+            let idx = self.shape_for(n)?;
+            targets.push(Target::Where(idx));
+        }
         // Implicit class target: a shape that is also an rdfs:Class targets its instances.
-        if g.has(node, sh.rdf_type, sh.rdfs_class)?
-            && (g.has(node, sh.rdf_type, sh.node_shape)?
-                || g.has(node, sh.rdf_type, sh.property_shape)?)
-        {
+        //
+        // `sh:ShapeClass` is SHACL 1.2's shorthand for being both at once, so it satisfies
+        // the pair on its own rather than needing `rdfs:Class` stated as well.
+        let is_class = g.has(node, sh.rdf_type, sh.rdfs_class)?;
+        let is_shape = g.has(node, sh.rdf_type, sh.node_shape)?
+            || g.has(node, sh.rdf_type, sh.property_shape)?;
+        if (is_class && is_shape) || g.has(node, sh.rdf_type, sh.shape_class)? {
             targets.push(Target::Class(node));
         }
 
@@ -567,7 +884,9 @@ impl<'a> Compiler<'a> {
         let messages = g.objects(node, sh.message)?;
         let deactivated = matches!(g.object(node, sh.deactivated)?, Some(v) if self.is_true(v));
 
+        self.refuse_unsupported(node)?;
         let constraints = self.compile_constraints(node)?;
+        let annotations = self.annotations_for(node, &constraints)?;
 
         Ok(Shape {
             id: node,
@@ -575,6 +894,7 @@ impl<'a> Compiler<'a> {
             path_node,
             targets,
             constraints,
+            annotations,
             severity,
             messages,
             deactivated,
@@ -605,19 +925,165 @@ impl<'a> Compiler<'a> {
     }
 
     #[allow(clippy::too_many_lines)]
+    /// Reads `{| ... |}` annotations off the triples that declared `node`'s constraints.
+    ///
+    /// The parser has already turned the syntax into ordinary triples — a reifier, an
+    /// `rdf:reifies` pointing at a triple term, and whatever was said about it — so this
+    /// walks the reifiers rather than parsing anything.
+    ///
+    /// Annotations are matched back to constraints by the parameter they were written on,
+    /// and by the value where a constraint carries one that identifies it. That avoids
+    /// threading a source triple through all twenty-five places a constraint is pushed, at
+    /// the cost of not distinguishing two constraints from the same parameter with the same
+    /// value — which would be the same constraint written twice.
+    fn annotations_for(
+        &self,
+        node: TermId,
+        constraints: &[Constraint],
+    ) -> Result<Vec<Annotation>, ShaclError> {
+        let sh = self.sh;
+        let mut out = vec![Annotation::default(); constraints.len()];
+        for reifier in self.graph.subjects_of(sh.rdf_reifies)? {
+            for reified in self.graph.objects(reifier, sh.rdf_reifies)? {
+                let Some(oxrdf::Term::Triple(triple)) = self.graph.term(reified)? else {
+                    continue;
+                };
+                // Only annotations on *this* shape's own triples. The components come back
+                // as terms rather than ids, so each is looked up again — the alternative is
+                // reaching into the dictionary's triple-term table, which is L1's business
+                // and not this crate's.
+                let store = self.graph.store();
+                let subject = oxrdf::Term::from(triple.subject.clone());
+                let Some(subject) = store.lookup_term(subject.as_ref())? else {
+                    continue;
+                };
+                if subject != node {
+                    continue;
+                }
+                let predicate = oxrdf::Term::NamedNode(triple.predicate.clone());
+                let Some(parameter) = store.lookup_term(predicate.as_ref())? else {
+                    continue;
+                };
+                let value = store.lookup_term(triple.object.as_ref())?;
+
+                let messages = self.graph.objects(reifier, sh.message)?;
+                let severity = self.graph.object(reifier, sh.severity)?;
+                let deactivated = matches!(self.graph.object(reifier, sh.deactivated)?, Some(v) if self.is_true(v));
+                if messages.is_empty() && severity.is_none() && !deactivated {
+                    continue;
+                }
+
+                for (i, constraint) in constraints.iter().enumerate() {
+                    if !self.declared_by(constraint, parameter, value) {
+                        continue;
+                    }
+                    out[i].messages.clone_from(&messages);
+                    out[i].severity = severity;
+                    out[i].deactivated |= deactivated;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether a constraint came from `(parameter, value)`.
+    fn declared_by(
+        &self,
+        constraint: &Constraint,
+        parameter: TermId,
+        value: Option<TermId>,
+    ) -> bool {
+        let sh = self.sh;
+        match constraint {
+            Constraint::Datatype(_) => parameter == sh.datatype,
+            Constraint::Class(_) => parameter == sh.class,
+            Constraint::NodeKind(_) => parameter == sh.node_kind,
+            Constraint::MinCount(_) => parameter == sh.min_count,
+            Constraint::MaxCount(_) => parameter == sh.max_count,
+            Constraint::Pattern(_) => parameter == sh.pattern,
+            Constraint::MinInclusive(v) => parameter == sh.min_inclusive && value == Some(*v),
+            Constraint::MaxInclusive(v) => parameter == sh.max_inclusive && value == Some(*v),
+            Constraint::MinExclusive(v) => parameter == sh.min_exclusive && value == Some(*v),
+            Constraint::MaxExclusive(v) => parameter == sh.max_exclusive && value == Some(*v),
+            Constraint::MinLength(_) => parameter == sh.min_length,
+            Constraint::MaxLength(_) => parameter == sh.max_length,
+            Constraint::HasValue(v) => parameter == sh.has_value && value == Some(*v),
+            Constraint::In(_) => parameter == sh.r#in,
+            Constraint::LanguageIn(_) => parameter == sh.language_in,
+            Constraint::UniqueLang => parameter == sh.unique_lang,
+            Constraint::Closed { .. } => parameter == sh.closed,
+            Constraint::SingleLine => parameter == sh.single_line,
+            // Shape-valued constraints identify themselves by the shape they name.
+            Constraint::Property(i)
+            | Constraint::Node(i)
+            | Constraint::Not(i)
+            | Constraint::MemberShape(i)
+            | Constraint::SomeValue(i) => {
+                let named = Some(self.shapes[i.0 as usize].id);
+                value == named
+                    && matches!(
+                        parameter,
+                        p if p == sh.property
+                            || p == sh.node
+                            || p == sh.not
+                            || p == sh.member_shape
+                            || p == sh.some_value
+                    )
+            }
+            _ => false,
+        }
+    }
+
     fn compile_constraints(&mut self, node: TermId) -> Result<Vec<Constraint>, ShaclError> {
         let g = self.graph;
         let sh = self.sh;
         let mut out = Vec::new();
 
         for c in g.objects(node, sh.class)? {
-            out.push(Constraint::Class(c));
+            let classes = if g.object(c, sh.rdf_first)?.is_some() {
+                self.list(c)?
+            } else {
+                vec![c]
+            };
+            if !classes.is_empty() {
+                out.push(Constraint::Class(classes));
+            }
         }
         for d in g.objects(node, sh.datatype)? {
-            out.push(Constraint::Datatype(d));
+            let datatypes = if g.object(d, sh.rdf_first)?.is_some() {
+                self.list(d)?
+            } else {
+                vec![d]
+            };
+            if !datatypes.is_empty() {
+                out.push(Constraint::Datatype(datatypes));
+            }
         }
         for k in g.objects(node, sh.node_kind)? {
-            if let Some(spec) = self.node_kind_spec(k) {
+            // SHACL 1.2 allows a *list* of kinds — `sh:nodeKind ( sh:BlankNode sh:IRI )` —
+            // as well as a single one. The list is a union: a value satisfying any of them
+            // satisfies the constraint, which is why the flags are or-ed rather than one
+            // constraint being pushed per member.
+            let kinds = if g.object(k, sh.rdf_first)?.is_some() {
+                self.list(k)?
+            } else {
+                vec![k]
+            };
+            let mut spec = NodeKindSpec {
+                iri: false,
+                blank: false,
+                literal: false,
+            };
+            let mut any = false;
+            for kind in kinds {
+                if let Some(one) = self.node_kind_spec(kind) {
+                    spec.iri |= one.iri;
+                    spec.blank |= one.blank;
+                    spec.literal |= one.literal;
+                    any = true;
+                }
+            }
+            if any {
                 out.push(Constraint::NodeKind(spec));
             }
         }
@@ -628,18 +1094,34 @@ impl<'a> Compiler<'a> {
             out.push(Constraint::MaxCount(v));
         }
         for (parameter, make) in [
-            (sh.min_inclusive, Constraint::MinInclusive as fn(TermId) -> Constraint),
+            (
+                sh.min_inclusive,
+                Constraint::MinInclusive as fn(TermId) -> Constraint,
+            ),
             (sh.max_inclusive, Constraint::MaxInclusive),
             (sh.min_exclusive, Constraint::MinExclusive),
             (sh.max_exclusive, Constraint::MaxExclusive),
             (sh.has_value, Constraint::HasValue),
-            (sh.equals, Constraint::Equals),
-            (sh.disjoint, Constraint::Disjoint),
-            (sh.less_than, Constraint::LessThan),
-            (sh.less_than_or_equals, Constraint::LessThanOrEquals),
         ] {
             for v in g.objects(node, parameter)? {
                 out.push(make(v));
+            }
+        }
+        // `sh:lessThan` and `sh:lessThanOrEquals` take a *path* in SHACL 1.2, not just a
+        // predicate — `sh:lessThan ( ex:a ex:b )`. Read as an IRI a sequence path finds
+        // nothing to compare against, and the constraint silently passes.
+        for (parameter, make) in [
+            (
+                sh.less_than,
+                Constraint::LessThan as fn(PathIdx) -> Constraint,
+            ),
+            (sh.less_than_or_equals, Constraint::LessThanOrEquals),
+            (sh.equals, Constraint::Equals),
+            (sh.disjoint, Constraint::Disjoint),
+        ] {
+            for v in g.objects(node, parameter)? {
+                let path = self.compile_path(v, 0)?;
+                out.push(make(path));
             }
         }
         if let Some(v) = g.object(node, sh.min_length)?.and_then(|v| self.integer(v)) {
@@ -649,7 +1131,9 @@ impl<'a> Compiler<'a> {
             out.push(Constraint::MaxLength(v));
         }
         for p in g.objects(node, sh.pattern)? {
-            let Some(source) = self.string(p) else { continue };
+            let Some(source) = self.string(p) else {
+                continue;
+            };
             let flags = g.object(node, sh.flags)?.and_then(|f| self.string(f));
             let mut builder = RegexBuilder::new(&source);
             if let Some(flags) = &flags {
@@ -684,11 +1168,75 @@ impl<'a> Compiler<'a> {
         if let Some(list) = g.object(node, sh.r#in)? {
             out.push(Constraint::In(self.list(list)?));
         }
+        if let Some(v) = g
+            .object(node, sh.min_list_length)?
+            .and_then(|v| self.integer(v))
+        {
+            out.push(Constraint::MinListLength(v));
+        }
+        if let Some(v) = g
+            .object(node, sh.max_list_length)?
+            .and_then(|v| self.integer(v))
+        {
+            out.push(Constraint::MaxListLength(v));
+        }
+        if matches!(g.object(node, sh.unique_members)?, Some(v) if self.is_true(v)) {
+            out.push(Constraint::UniqueMembers);
+        }
+        if matches!(g.object(node, sh.single_line)?, Some(v) if self.is_true(v)) {
+            out.push(Constraint::SingleLine);
+        }
+        for p in g.objects(node, sh.subset_of)? {
+            let path = self.compile_path(p, 0)?;
+            out.push(Constraint::SubsetOf(path));
+        }
+        for k in g.objects(node, sh.unique_values_for)? {
+            // A list is a composite key; a bare IRI is a key of one. Detected by looking for
+            // `rdf:first` rather than by trying to read a list and seeing what happens,
+            // because a property IRI that happens to have an `rdf:first` in the shapes graph
+            // is not a thing that occurs and a silent empty key would be.
+            let properties = if g.object(k, sh.rdf_first)?.is_some() {
+                self.list(k)?
+            } else {
+                vec![k]
+            };
+            if !properties.is_empty() {
+                out.push(Constraint::UniqueValuesFor(properties));
+            }
+        }
 
         // Logical constraints and nested shapes.
         for n in g.objects(node, sh.not)? {
             let idx = self.shape_for(n)?;
             out.push(Constraint::Not(idx));
+        }
+        for n in g.objects(node, sh.member_shape)? {
+            let idx = self.shape_for(n)?;
+            out.push(Constraint::MemberShape(idx));
+        }
+        for n in g.objects(node, sh.some_value)? {
+            let idx = self.shape_for(n)?;
+            out.push(Constraint::SomeValue(idx));
+        }
+        for e in g.objects(node, sh.node_by_expression)? {
+            // Only a constant IRI is a node expression this can evaluate. Anything else is
+            // left uncompiled rather than guessed at.
+            if matches!(self.graph.term(e)?, Some(Term::NamedNode(_))) {
+                let shape = self.shape_for(e)?;
+                out.push(Constraint::NodeByExpression {
+                    shape,
+                    expression: e,
+                });
+            }
+        }
+        for c in g.objects(node, sh.root_class)? {
+            out.push(Constraint::RootClass(c));
+        }
+        for n in g.objects(node, sh.reifier_shape)? {
+            let shape = self.shape_for(n)?;
+            let required =
+                matches!(g.object(node, sh.reification_required)?, Some(v) if self.is_true(v));
+            out.push(Constraint::ReifierShape { shape, required });
         }
         for (parameter, make) in [
             (sh.and, Constraint::And as fn(Vec<ShapeIdx>) -> Constraint),
@@ -722,8 +1270,7 @@ impl<'a> Compiler<'a> {
             let max = g
                 .object(node, sh.qualified_max_count)?
                 .and_then(|v| self.integer(v));
-            let disjoint =
-                matches!(g.object(node, sh.qualified_value_shapes_disjoint)?, Some(v) if self.is_true(v));
+            let disjoint = matches!(g.object(node, sh.qualified_value_shapes_disjoint)?, Some(v) if self.is_true(v));
             let siblings = if disjoint {
                 self.sibling_qualified_shapes(node)?
             } else {
@@ -754,12 +1301,15 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        if matches!(g.object(node, sh.closed)?, Some(v) if self.is_true(v)) {
-            let mut ignored = Vec::new();
-            if let Some(list) = g.object(node, sh.ignored_properties)? {
-                ignored = self.list(list)?;
+        if let Some(closed) = g.object(node, sh.closed)? {
+            let by_types = closed == sh.by_types;
+            if by_types || self.is_true(closed) {
+                let mut ignored = Vec::new();
+                if let Some(list) = g.object(node, sh.ignored_properties)? {
+                    ignored = self.list(list)?;
+                }
+                out.push(Constraint::Closed { ignored, by_types });
             }
-            out.push(Constraint::Closed(ignored));
         }
 
         Ok(out)
@@ -788,7 +1338,13 @@ impl<'a> Compiler<'a> {
 
     fn node_kind_spec(&self, kind: TermId) -> Option<NodeKindSpec> {
         let sh = self.sh;
-        let spec = |iri, blank, literal| Some(NodeKindSpec { iri, blank, literal });
+        let spec = |iri, blank, literal| {
+            Some(NodeKindSpec {
+                iri,
+                blank,
+                literal,
+            })
+        };
         match kind {
             k if k == sh.iri => spec(true, false, false),
             k if k == sh.blank_node => spec(false, true, false),
@@ -824,6 +1380,24 @@ impl<'a> Compiler<'a> {
             return Ok(self.push_path(Path::Predicate(node)));
         }
 
+        // A blank node bearing `rdf:first` is a sequence path, and this is checked before
+        // the keyed forms rather than after.
+        //
+        // It only matters for a node that says two things at once — `[ rdf:first ex:p ;
+        // rdf:rest ( ex:q ) ; sh:inversePath ex:p ]` is both a list and an inverse, and
+        // SHACL's grammar admits exactly one reading per node, so such a shapes graph is
+        // ill-formed and a processor has to pick. Being a list is a property of the node's
+        // *structure*, not a SHACL keyword written on it, so it is the stronger signal; and
+        // it is the reading the test suite settled on for this case.
+        if g.object(node, sh.rdf_first)?.is_some() {
+            let members = self.list(node)?;
+            let mut compiled = Vec::with_capacity(members.len());
+            for m in members {
+                compiled.push(self.compile_path(m, depth + 1)?);
+            }
+            return Ok(self.push_path(Path::Sequence(compiled)));
+        }
+
         for (parameter, make) in [
             (sh.inverse_path, 0u8),
             (sh.zero_or_more_path, 1),
@@ -847,15 +1421,6 @@ impl<'a> Compiler<'a> {
                 compiled.push(self.compile_path(m, depth + 1)?);
             }
             return Ok(self.push_path(Path::Alternative(compiled)));
-        }
-        // Anything else that is a blank node with rdf:first is a sequence path.
-        if g.object(node, sh.rdf_first)?.is_some() {
-            let members = self.list(node)?;
-            let mut compiled = Vec::with_capacity(members.len());
-            for m in members {
-                compiled.push(self.compile_path(m, depth + 1)?);
-            }
-            return Ok(self.push_path(Path::Sequence(compiled)));
         }
         Err(ShaclError::IllFormedShape(
             "sh:path is a blank node with no recognised path expression".to_owned(),

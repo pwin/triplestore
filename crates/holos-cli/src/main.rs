@@ -5,11 +5,11 @@
 
 use anyhow::{bail, Context, Result};
 use holos_engine::Engine;
-use holos_shacl::{CompiledShapes, Options as ShaclOptions};
 use holos_security::{
     CollectingSink, Label, Modes, Policy, Principal, PrincipalMatch, Rule, Scope, Semantics,
     Session,
 };
+use holos_shacl::{CompiledShapes, Options as ShaclOptions};
 use holos_store::GraphFilter;
 use oxrdf::{GraphName, NamedNode, Quad};
 use oxrdfio::{RdfFormat, RdfSerializer};
@@ -28,6 +28,9 @@ USAGE
     holos stats    --data <FILE>...
     holos dump     --data <FILE>... [POLICY]
     holos validate --data <FILE>... [--shapes <FILE>]
+    holos backup   --store <DIR> --to <DIR>
+    holos compact  --store <DIR> --to <DIR>
+    holos entail   --store <DIR> [--entail-graph <IRI>] [--entail-budget <N>]
 
 DATA
     --data <FILE>            Load a file. Repeatable. Format is taken from the extension:
@@ -40,6 +43,22 @@ DATA
                              is in memory and is discarded on exit.
     --bulk                   Buffer writes and skip the write-ahead log while loading. Much
                              faster; a load interrupted part-way must be discarded.
+
+MAINTENANCE
+    --entail-graph <IRI>     Where `entail` writes. Its own graph so it can be dropped again
+                             and told apart from what was asserted. Default
+                             <https://holos.dev/ns#entailed> -- an absolute IRI, because
+                             `DROP GRAPH` needs the name the store actually holds.
+    --entail-budget <N>      Refuse a closure larger than N new triples. Default 10,000,000.
+    --to <DIR>               Destination for `backup` and `compact`. Must not exist.
+                             `backup` writes a RocksDB checkpoint: near-instant, hard-linked,
+                             and it preserves the store exactly — including the dictionary
+                             entries left behind by deleted quads.
+                             `compact` writes a fresh store containing only the live data,
+                             which is the only thing that reclaims those. It reads the store
+                             directly rather than through a policy, so it copies everything;
+                             it needs room for both stores; and it does not copy writes that
+                             arrive while it runs.
 
 QUERY
     --query <SPARQL>         Query text.
@@ -89,8 +108,12 @@ VALIDATE
                              Without it the shapes are expected in the data itself.
     --report                 Print the validation report as N-Triples.
     --engine <NAME>          native (default) or adapted. 'native' reads the live store and
-                             supports incremental revalidation; 'adapted' bridges the store
-                             into the adapted SHACL_Engine, which covers far more of SHACL.
+                             revalidates a delta; 'adapted' bridges the store into the
+                             adapted SHACL_Engine, which covers far more of SHACL.
+                             'native' refuses a shapes graph using anything it cannot check
+                             -- sh:sparql, SHACL-AF rules, node expressions -- rather than
+                             dropping the constraint and reporting conformance. Use
+                             'adapted' for those.
 
 OPTIONS
     -h, --help               This text.
@@ -109,7 +132,7 @@ fn main() -> Result<()> {
     if !opts.data.is_empty() {
         let started = std::time::Instant::now();
         let mut total = 0;
-        opts.begin_bulk(&mut engine);
+        opts.begin_bulk(&mut engine)?;
         for path in &opts.data {
             let format = format_for(path)?;
             total += engine
@@ -131,6 +154,9 @@ fn main() -> Result<()> {
         "dump" => dump(&engine, &opts),
         "update" => update_command(&mut engine, &opts),
         "validate" => validate(&mut engine, &opts),
+        "backup" => backup(&engine, &opts),
+        "compact" => compact(&engine, &opts),
+        "entail" => entail(&mut engine, &opts),
         other => bail!("unknown command `{other}`\n\n{USAGE}"),
     }
 }
@@ -218,6 +244,231 @@ fn write_results(results: QueryResults<'_>, format: QueryResultsFormat) -> Resul
     Ok(())
 }
 
+/// Writes a consistent snapshot of a persistent store to a new directory.
+///
+/// Works on a store another process has open and is writing to, which is what makes it a
+/// backup rather than a maintenance window. RocksDB flushes its log and hard-links the SST
+/// files, so it is near-instant and initially costs almost no disk.
+///
+/// Two things worth knowing, both printed rather than buried:
+///
+/// * Hard links need the **same filesystem**. To another mount RocksDB copies instead —
+///   still correct, no longer instant. Back up locally, then move or replicate the result.
+/// * A checkpoint **pins the files it links**, so it cannot be deleted by compaction. Disk
+///   use climbs as the snapshot and the live store diverge; old checkpoints need removing.
+fn backup(engine: &Engine, opts: &Options) -> Result<()> {
+    let destination = opts
+        .to
+        .as_deref()
+        .context("--to <DIR> says where to write the snapshot")?;
+    let destination = Path::new(destination);
+    anyhow::ensure!(
+        !destination.exists(),
+        "{} already exists; a checkpoint needs a directory that does not, which is why          timestamped names are the usual pattern",
+        destination.display()
+    );
+    if let Some(parent) = destination.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+    }
+
+    let quads = engine.store().len();
+    engine
+        .store()
+        .checkpoint(destination)
+        .with_context(|| format!("checkpointing to {}", destination.display()))?;
+
+    println!(
+        "wrote a checkpoint of {quads} quads to {}",
+        destination.display()
+    );
+    println!();
+    println!("restore by pointing --store at it, or by copying it back over the original");
+    println!("note: it hard-links the live store's files where it can, so it is not an");
+    println!("      off-machine backup until it is copied somewhere else");
+    Ok(())
+}
+
+/// Rewrites the store into a fresh one, reclaiming everything the dictionary is holding on
+/// to.
+///
+/// # What accumulates, and why nothing else clears it
+///
+/// The term dictionary is **append-only** — §5 depends on that, and so does everything
+/// derived from it. Deleting quads therefore reclaims their index entries and nothing else:
+/// the terms they used stay interned for ever. A store that has churned carries a dictionary
+/// sized by every term it has *ever* seen.
+///
+/// Neither backup nor restart helps. A backup is a RocksDB checkpoint — the SST files are
+/// hard-linked, so a restore hands back the same dictionary, dead entries included.
+///
+/// # Why this is a copy and not an edit
+///
+/// Reclaiming a dictionary slot in place means proving nothing refers to it, and that is
+/// harder than it looks. An RDF 1.2 triple term holds its components by id, so a term can be
+/// referenced while **no quad mentions it at all**:
+///
+/// ```text
+/// <claim> <says> <<( <a> <p> "v" )>> .
+///
+/// <a> and <p> are interned IRIs that appear in no quad.
+/// ```
+///
+/// A reference check that looked only at quads would free them and leave the triple term
+/// pointing at nothing. Copying has no such failure mode: it writes only terms it has just
+/// read, so anything reachable comes with its referents, and anything unreachable is left
+/// behind by construction rather than by analysis.
+///
+/// # This is not a dump
+///
+/// [`dump`] goes through the policy-filtered view and writes what the *principal* may see.
+/// Compaction reads the store directly and copies **everything**, because a maintenance
+/// operation that silently dropped the quads the operator happens not to be cleared for
+/// would be a data-loss bug wearing a security feature's clothes.
+///
+/// # Cost
+///
+/// Time and disk proportional to the live data, and the result is a second store — so the
+/// machine needs room for both. It is an offline operation: writes to the source while this
+/// runs are not copied.
+fn compact(engine: &Engine, opts: &Options) -> Result<()> {
+    let destination = opts
+        .to
+        .as_deref()
+        .context("--to <DIR> says where to write the compacted store")?;
+    let destination = Path::new(destination);
+    anyhow::ensure!(
+        !destination.exists(),
+        "{} already exists; compaction writes a new store rather than editing one in place,          so that a failure leaves the original untouched",
+        destination.display()
+    );
+
+    let source = engine.store();
+    let quads_before = source.len();
+    let terms_before = source.dictionary_len();
+    let graphs_before = source.named_graphs()?.len();
+
+    let mut fresh = opts.open_store_at(destination)?;
+    fresh.begin_bulk_load()?;
+
+    // Empty named graphs first: a graph with no quads exists in the store and would
+    // otherwise vanish, which the Graph Store Protocol can tell the difference between.
+    for id in source.named_graphs()? {
+        let Some(term) = source.decode_term(id)? else {
+            continue;
+        };
+        let name = match term {
+            oxrdf::Term::NamedNode(n) => oxrdf::GraphName::NamedNode(n),
+            oxrdf::Term::BlankNode(b) => oxrdf::GraphName::BlankNode(b),
+            _ => continue,
+        };
+        fresh.insert_named_graph(&name)?;
+    }
+
+    let mut copied = 0usize;
+    for quad in source.iter() {
+        fresh.insert(quad?.as_ref())?;
+        copied += 1;
+    }
+
+    fresh.end_bulk_load()?;
+    fresh.flush()?;
+
+    let quads_after = fresh.len();
+    let terms_after = fresh.dictionary_len();
+    let graphs_after = fresh.named_graphs()?.len();
+
+    // Checked rather than reported. A compaction that quietly lost quads would be the worst
+    // possible outcome of a maintenance command, so it fails loudly instead of printing a
+    // reassuring summary.
+    anyhow::ensure!(
+        copied == quads_before && quads_after == quads_before,
+        "compaction did not preserve the data: {quads_before} quads in, {copied} copied,          {quads_after} in the result. {} has been left in place for inspection.",
+        destination.display()
+    );
+    anyhow::ensure!(
+        graphs_after == graphs_before,
+        "compaction lost named graphs: {graphs_before} before, {graphs_after} after"
+    );
+
+    let reclaimed = terms_before.saturating_sub(terms_after);
+    println!(
+        "compacted {quads_before} quads into {}",
+        destination.display()
+    );
+    println!("  dictionary  {terms_before} -> {terms_after}  ({reclaimed} reclaimed)");
+    println!("  graphs      {graphs_before}");
+    println!();
+    println!("the source is untouched. swap by stopping the server, moving the old store");
+    println!("aside, and pointing --store at the new one; keep the old until a query or two");
+    println!("has confirmed the new one, since this is the operation you least want to");
+    println!("discover was wrong a week later");
+    Ok(())
+}
+
+/// Materialises the RDFS closure of the store.
+///
+/// # What it is for
+///
+/// A store answers what is *in* it. `ex:father rdfs:subPropertyOf ex:parent` says that every
+/// use of the first is a use of the second, and no query acts on that — so a query for
+/// `ex:parent` misses everyone who only has an `ex:father`. The most concrete instance is
+/// GeoSPARQL: the OGC example attaches geometries with a sub-property of `geo:hasGeometry`,
+/// and §17's rewrite looks for `geo:hasGeometry`, so a feature-level query returns the
+/// geometries rather than the features they belong to.
+///
+/// # It writes to its own graph
+///
+/// Not into the data. An inference can then be dropped again with `DROP GRAPH`, a reader can
+/// tell it from something somebody asserted, and access policy has something to name. The
+/// cost is that queries see it only under the union default graph or by naming it, which is
+/// the trade rather than an oversight.
+///
+/// Running it twice adds nothing the second time.
+fn entail(engine: &mut Engine, opts: &Options) -> Result<()> {
+    let iri = opts
+        .entail_graph
+        .as_deref()
+        .unwrap_or(holos_engine::entailment::DEFAULT_GRAPH_IRI);
+    let budget = if opts.entail_budget == 0 {
+        holos_engine::entailment::DEFAULT_BUDGET
+    } else {
+        opts.entail_budget
+    };
+
+    // The graph name has to be a term id, and interning it is the only way to get one.
+    let graph = engine
+        .store_mut()
+        .encode_quad(
+            oxrdf::Quad {
+                subject: oxrdf::NamedNode::new(iri)?.into(),
+                predicate: oxrdf::NamedNode::new_unchecked(
+                    "https://holos.dev/ns#entailmentGraphMarker",
+                ),
+                object: oxrdf::Term::NamedNode(oxrdf::NamedNode::new(iri)?),
+                graph_name: oxrdf::GraphName::DefaultGraph,
+            }
+            .as_ref(),
+        )?
+        .object;
+
+    let mut session = opts.session(engine)?;
+    let before = engine.store().len();
+    let report = holos_engine::entailment::materialise(engine, &mut session, Some(graph), budget)?;
+    engine.store_mut().flush()?;
+
+    println!("entailed {} triple(s) into <{iri}>", report.added);
+    println!("  rounds  {}", report.rounds);
+    println!("  store   {before} -> {} quads", engine.store().len());
+    println!();
+    println!("they are in a graph of their own, so a query sees them only with");
+    println!("--default-graph <{iri}> alongside the default one, and");
+    println!("`DROP GRAPH <{iri}>` undoes this exactly");
+    Ok(())
+}
+
 fn stats(engine: &Engine) -> Result<()> {
     let store = engine.store();
     println!("quads            {}", store.len());
@@ -262,11 +513,8 @@ fn dump(engine: &Engine, opts: &Options) -> Result<()> {
     let mut written = 0_u64;
     for solution in solutions {
         let solution = solution?;
-        let (Some(s), Some(p), Some(o)) = (
-            solution.get("s"),
-            solution.get("p"),
-            solution.get("o"),
-        ) else {
+        let (Some(s), Some(p), Some(o)) = (solution.get("s"), solution.get("p"), solution.get("o"))
+        else {
             continue;
         };
         let subject = match s {
@@ -372,13 +620,21 @@ fn validate(engine: &mut Engine, opts: &Options) -> Result<()> {
         let started = std::time::Instant::now();
         let mut run = holos_shacl::engine::EngineRun::prepare(
             engine.store(),
-            ShaclOptions { data_graph: GraphFilter::Default, shapes_graph },
+            ShaclOptions {
+                data_graph: GraphFilter::Default,
+                shapes_graph,
+            },
         )?;
         let prepared = started.elapsed();
         let started = std::time::Instant::now();
         let report = run.validate()?;
         let validated = started.elapsed();
-        println!("bridged+compiled  {} triples, {} shapes in {:.3}s", run.triples(), run.shapes(), prepared.as_secs_f64());
+        println!(
+            "bridged+compiled  {} triples, {} shapes in {:.3}s",
+            run.triples(),
+            run.shapes(),
+            prepared.as_secs_f64()
+        );
         println!("validated         {:.3}s", validated.as_secs_f64());
         println!("conforms          {}", run.conforms(&report));
         println!("results           {}", report.results.len());
@@ -406,7 +662,11 @@ fn validate(engine: &mut Engine, opts: &Options) -> Result<()> {
     let report = shapes.validate(engine.store())?;
     let validated = started.elapsed();
 
-    println!("shapes compiled   {} shapes in {:.3}s", shapes.shapes().len(), compiled.as_secs_f64());
+    println!(
+        "shapes compiled   {} shapes in {:.3}s",
+        shapes.shapes().len(),
+        compiled.as_secs_f64()
+    );
     println!("validated         {:.3}s", validated.as_secs_f64());
     println!("conforms          {}", report.conforms);
     println!("results           {}", report.results.len());
@@ -415,11 +675,15 @@ fn validate(engine: &mut Engine, opts: &Options) -> Result<()> {
         let quads = shapes.report_to_quads(engine.store(), &report)?;
         let mut out = stdout().lock();
         for quad in quads {
-            writeln!(out, "{} .", oxrdf::Triple {
-                subject: quad.subject,
-                predicate: quad.predicate,
-                object: quad.object,
-            })?;
+            writeln!(
+                out,
+                "{} .",
+                oxrdf::Triple {
+                    subject: quad.subject,
+                    predicate: quad.predicate,
+                    object: quad.object,
+                }
+            )?;
         }
     }
     Ok(())
@@ -440,6 +704,12 @@ fn open_data(path: &str) -> Result<Box<dyn std::io::BufRead + Send>> {
 #[derive(Debug, Default)]
 struct Options {
     data: Vec<String>,
+    /// Destination for `holos backup`.
+    to: Option<String>,
+    /// Where `holos entail` writes its conclusions.
+    entail_graph: Option<String>,
+    /// How many new triples `holos entail` may add before it refuses.
+    entail_budget: usize,
     base: Option<String>,
     query: Option<String>,
     query_file: Option<String>,
@@ -570,19 +840,39 @@ impl Options {
                 "--role" => o.roles.push(value(&mut i)?),
                 "--except-role" => o.except_role = Some(value(&mut i)?),
                 "--store" => o.store = Some(value(&mut i)?),
+                "--to" => o.to = Some(value(&mut i)?),
+                "--entail-graph" => o.entail_graph = Some(value(&mut i)?),
+                "--entail-budget" => o.entail_budget = value(&mut i)?.parse()?,
                 "--bulk" => o.bulk = true,
                 "--shapes" => o.shapes = Some(value(&mut i)?),
                 "--report" => o.report = true,
                 "--engine" => o.engine = Some(value(&mut i)?),
                 "--fail-closed" => o.fail_closed = true,
                 "--audit" => o.audit = true,
-                other => bail!("unknown flag `{other}`
+                other => bail!(
+                    "unknown flag `{other}`
 
-{USAGE}"),
+{USAGE}"
+                ),
             }
             i += 1;
         }
         Ok(o)
+    }
+
+    /// Opens a second, empty store at `path`, on the same backend as `--store`.
+    fn open_store_at(&self, path: &Path) -> Result<holos_store::Store> {
+        #[cfg(feature = "rocksdb")]
+        {
+            let storage = holos_store::RocksStorage::open(path)
+                .with_context(|| format!("creating a store at {}", path.display()))?;
+            Ok(holos_store::Store::with_storage(storage))
+        }
+        #[cfg(not(feature = "rocksdb"))]
+        {
+            let _ = path;
+            bail!("this build has no persistent backend: rebuild with --features rocksdb")
+        }
     }
 
     /// Opens the engine over the requested backend.
@@ -593,17 +883,22 @@ impl Options {
             Some(path) => {
                 let storage = holos_store::RocksStorage::open(path)
                     .with_context(|| format!("opening the store at {path}"))?;
-                Ok(Engine::with_store(holos_store::Store::with_storage(storage)))
+                Ok(Engine::with_store(holos_store::Store::with_storage(
+                    storage,
+                )))
             }
             #[cfg(not(feature = "rocksdb"))]
-            Some(_) => bail!("this build has no persistent backend: rebuild with --features rocksdb"),
+            Some(_) => {
+                bail!("this build has no persistent backend: rebuild with --features rocksdb")
+            }
         }
     }
 
-    fn begin_bulk(&self, engine: &mut Engine) {
+    fn begin_bulk(&self, engine: &mut Engine) -> Result<()> {
         if self.bulk {
-            engine.store_mut().begin_bulk_load();
+            engine.store_mut().begin_bulk_load()?;
         }
+        Ok(())
     }
 
     fn has_policy(&self) -> bool {

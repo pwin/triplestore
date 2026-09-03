@@ -1,0 +1,66 @@
+# The commits the tour applies, each in its own named graph.
+#
+# A delta is not RDF that goes anywhere — it is the *argument* to a tick. Keeping the four of
+# them in one file, one graph each, means the tour can name a commit and you can read exactly
+# what it proposes without running anything.
+#
+# They are ordered so that each one shows a different way a boundary can answer.
+
+@prefix wo:   <https://example.org/workorders#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix d:    <https://example.org/deltas#> .
+
+# 1. An ordinary, conforming commit: raise a new order. Accepted.
+d:raise-1002 {
+    wo:WO-1002
+        a wo:WorkOrder ;
+        wo:asset wo:compressor-3 ;
+        wo:status wo:Raised ;
+        wo:raisedOn "2026-09-02"^^xsd:date ;
+        wo:summary "Annual service due." .
+}
+
+# 2. A commit the boundary refuses: a status the vocabulary does not have. Everything about
+#    this order is otherwise fine, which is the point — the tick is refused whole, and the
+#    scene does not end up holding the good half.
+d:raise-1003-bad {
+    wo:WO-1003
+        a wo:WorkOrder ;
+        wo:asset wo:pump-27 ;
+        wo:status wo:Awaiting-Parts ;
+        wo:raisedOn "2026-09-02"^^xsd:date ;
+        wo:summary "Bearing noise on start-up." .
+}
+
+# 3. A commit that fires a rule, and the only one here that takes something away.
+#
+#    A delta is a pair of sets, and the tour reads the removals from a graph named after the
+#    addition graph. Moving the status from InProgress to Closed means both: RDF has no
+#    notion of updating a value in place, so the old statement has to go or the order ends up
+#    holding two statuses and failing its own `sh:maxCount 1`.
+#
+#    The sign-off is what makes the boundary's rule fire, deriving `wo:ClosedOrder`; the
+#    completion date is what that classification then requires. Both halves are here, so the
+#    commit is accepted.
+d:signoff-1001 {
+    wo:WO-1001
+        wo:signedOffBy wo:eng-mahmoud ;
+        wo:completedOn "2026-09-03"^^xsd:date ;
+        wo:status wo:Closed .
+}
+
+d:signoff-1001-remove {
+    wo:WO-1001 wo:status wo:InProgress .
+}
+
+# 4. A commit where the rule is what causes the refusal. The same sign-off, on the order
+#    raised in commit 1, but with no completion date. The rule derives `wo:ClosedOrder`; the
+#    boundary then sees a closed order with nothing recording when it was completed, and
+#    refuses the whole commit.
+#
+#    This is the case that shows why rules run *before* validation rather than after. Run
+#    afterwards, this would already have been written when it was found to be wrong.
+d:signoff-1002-incomplete {
+    wo:WO-1002 wo:signedOffBy wo:eng-mahmoud .
+}

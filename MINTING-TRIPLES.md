@@ -1,18 +1,17 @@
 # Getting data in: every way to mint triples
 
 Six routes into a graph or a holon, what each is for, and how each behaves when the target
-is governed. If you only read one thing, read [§7](#7-what-changes-when-the-target-is-a-holon)
+is governed. If you only read one thing, read [§7](#6-what-changes-when-the-target-is-a-holon)
 — it is the part that is different here.
 
 | | Route | Use it when |
 |---|---|---|
 | [1](#1-load-a-file) | **Load a file** | You already have RDF |
 | [2](#2-sparql-update) | **SPARQL Update** | You want to write from a query |
-| [3](#3-tabular-data-csv-tsv-dataframes) | **CSV / TSV / dataframe + mapping** | Your data is a spreadsheet |
-| [4](#4-the-api) | **The API** | You are writing a program |
-| [5](#5-python) | **Python** | You are in a notebook |
-| [6](#6-rdf-12-triple-terms) | **RDF 1.2 triple terms** | You need to say something *about* a statement |
-| [7](#7-what-changes-when-the-target-is-a-holon) | **Into a holon** | The graph has invariants to defend |
+| [3](#3-the-api) | **The API** | You are writing a program |
+| [4](#4-python) | **Python** | You are in a notebook |
+| [5](#5-rdf-12-triple-terms) | **RDF 1.2 triple terms** | You need to say something *about* a statement |
+| [6](#6-what-changes-when-the-target-is-a-holon) | **Into a holon** | The graph has invariants to defend |
 
 ---
 
@@ -73,63 +72,7 @@ WHERE  { ?s ex:given ?g ; ex:family ?f BIND(CONCAT(?g, " ", ?f) AS ?full) }
 
 ---
 
-## 3. Tabular data: CSV, TSV, dataframes
-
-Most RDF starts life as a spreadsheet. Write a `CONSTRUCT` whose variables are the column
-headers, in the [TARQL](https://tarql.github.io/) style:
-
-```sparql
-# people.rq
-PREFIX ex: <http://example.org/>
-CONSTRUCT {
-  ?person a ex:Person ;
-          ex:name  ?name ;
-          ex:email ?email ;
-          ex:sourceRow ?ROWNUM .
-}
-WHERE {
-  BIND(IRI(CONCAT("http://example.org/person/", ?id)) AS ?person)
-}
-```
-
-```rust
-use holos_tabular::{load, source::{Csv, CsvOptions}, LoadOptions, Mapping};
-
-let mapping = Mapping::from_path(Path::new("people.rq"))?;
-let mut rows = Csv::from_reader(File::open("people.csv")?, &CsvOptions::default())?;
-let report = load(&mut engine, &mut session, &mut rows, &mapping,
-                  Some(&NamedNode::new("http://example.org/people")?),
-                  &LoadOptions::default())?;
-```
-
-**An empty cell becomes `UNDEF`, not `""`.** Bob with no email gets no `ex:email` triple
-rather than one with an empty string in it. That is TARQL's semantics and it is the one
-people rely on.
-
-`?ROWNUM` is the one-based row number. Headers that are not valid SPARQL variables —
-`First Name`, `total (£)` — are rewritten by `CsvOptions { normalize: true, .. }`.
-
-A dataframe uses the same mapping through `Frame`:
-
-```rust
-let frame = Frame::from_columns(vec![
-    ("id".into(),   vec!["1".into(), "2".into()]),
-    ("name".into(), vec!["Alice".into(), "Bob".into()]),
-])?;
-```
-
-With the `polars` feature, `Frame::from_polars(&df)` converts a `DataFrame` directly. Every
-column is rendered to its string form — the same thing a CSV export would do — so a load
-from a frame and a load from the CSV of that frame produce identical triples. **Typing is
-the mapping's job**: `xsd:integer(?age)` says what a column means, and guessing here would
-turn a column of postcodes into integers.
-
-The approach comes from [oxi-gen](https://github.com/semanticarts/oxi-gen). Its code is not
-used; see [THIRD-PARTY.md](THIRD-PARTY.md).
-
----
-
-## 4. The API
+## 3. The API
 
 ```rust
 engine.insert(&mut session, Quad {
@@ -146,7 +89,7 @@ writes without one. For bulk work, `engine.bulk_load(reader, format, base)` and
 
 ---
 
-## 5. Python
+## 4. Python
 
 ```python
 from holosdb import Store
@@ -164,7 +107,7 @@ store.update("INSERT DATA { <urn:a> <urn:b> <urn:c> }")
 
 ---
 
-## 6. RDF 1.2 triple terms
+## 5. RDF 1.2 triple terms
 
 The reason to care: **saying something about a statement** — who asserted it, when, with
 what confidence — without the four-triple reification dance RDF 1.1 required and gave no
@@ -218,7 +161,7 @@ one with variables. All are listed in [SPARQL-SURFACE.md](SPARQL-SURFACE.md).
 
 ---
 
-## 7. What changes when the target is a holon
+## 6. What changes when the target is a holon
 
 Everything above writes into an ordinary named graph. Point any of it at a **holon's
 scene** instead and one thing changes: the data has to get past the boundary.
@@ -300,11 +243,10 @@ same SPARQL, under the same access policy.
 | If you have | Use |
 |---|---|
 | RDF files | [Load a file](#1-load-a-file), with `--bulk` |
-| A spreadsheet or dataframe | [A mapping](#3-tabular-data-csv-tsv-dataframes) |
 | Data already in the store to transform | [`INSERT … WHERE`](#2-sparql-update) |
-| A program generating triples | [The API](#4-the-api) or [Python](#5-python) |
-| Statements to annotate | [Triple terms](#6-rdf-12-triple-terms) |
-| A graph with rules that must hold | [A holon](#7-what-changes-when-the-target-is-a-holon) |
+| A program generating triples | [The API](#3-the-api) or [Python](#4-python) |
+| Statements to annotate | [Triple terms](#5-rdf-12-triple-terms) |
+| A graph with rules that must hold | [A holon](#6-what-changes-when-the-target-is-a-holon) |
 
 Reference: [SPARQL-SURFACE.md](SPARQL-SURFACE.md) ·
 [ACCESS-CONTROL.md](ACCESS-CONTROL.md) · [OPERATIONS.md](OPERATIONS.md) ·

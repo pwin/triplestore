@@ -869,7 +869,7 @@ P0 and the security layer are built. <strong>3,145 of 3,284 W3C tests pass, and 
     <div class="st part"><span class="k">L3 Query</span><span class="v"><span class="mk">&#9681;</span>evaluates, measured</span></div>
     <div class="st on"><span class="k">Security</span><span class="v"><span class="mk">&#9679;</span>built</span></div>
     <div class="st on"><span class="k">L4 SHACL</span><span class="v"><span class="mk">&#9679;</span>engine adapted</span></div>
-    <div class="st on"><span class="k">GeoSPARQL</span><span class="v"><span class="mk">&#9679;</span>43 functions</span></div>
+    <div class="st on"><span class="k">GeoSPARQL</span><span class="v"><span class="mk">&#9679;</span>45 functions</span></div>
     <div class="st part"><span class="k">L6 Server</span><span class="v"><span class="mk">&#9681;</span>SPARQL + UI</span></div>
     <div class="st part"><span class="k">L5 Holon</span><span class="v"><span class="mk">&#9681;</span>ticks</span></div>
     <div class="st off"><span class="k">Tier B trie</span><span class="v"><span class="mk">&#9675;</span>gated on P2</span></div>
@@ -2101,9 +2101,14 @@ P0 and the security layer are built. <strong>3,145 of 3,284 W3C tests pass, and 
     them than they added of their own.</p>
 
     <h3>GeoSPARQL</h3>
-    <p><code>spargeo</code> supplies 43 GeoSPARQL functions &mdash; the topological relations
-    of all three families (Simple Features, Egenhofer, RCC8), plus distance, buffer, convex
-    hull, envelope, boundary and the WKT/GeoJSON accessors. Registered on the evaluator, so
+    <p><code>spargeo</code> supplies <b>43</b> GeoSPARQL functions &mdash; the topological
+    relations of all three families (Simple Features, Egenhofer, RCC8), plus distance, area,
+    length, centroid, convex hull, envelope, the set operations and the GeoJSON accessor.
+    HOLOS adds <b>2 more</b>, <code>geof:buffer</code> and <code>geof:boundary</code>, in
+    <code>holos-engine</code>'s <code>geo_ext</code> &mdash; <b>45 in total</b>. An earlier
+    draft of this paragraph listed buffer and boundary as though <code>spargeo</code>
+    provided them; it does not, and nothing had checked until a probe against a live endpoint
+    returned two unknown names. Registered on the evaluator, so
     they compose with the rest of SPARQL and with everything underneath: a WKT literal is a
     typed literal taking the dictionary path like any other, and <strong>access policy
     applies to geometry</strong> &mdash; denying <code>geo:asWKT</code> makes a spatial join

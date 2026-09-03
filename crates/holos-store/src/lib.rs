@@ -89,6 +89,18 @@ impl Store {
         self.inner.dictionary_len()
     }
 
+    /// How many ids have been issued for one dictionary-backed tag.
+    ///
+    /// Each kind has its own dense index space, so this is an enumeration bound as well as a
+    /// count: `TermId::new(tag, i)` for `i` in `0..dictionary_count_for(tag)` is every id
+    /// issued for that tag, in issue order. Something that has examined the first `n` can
+    /// find everything added since by walking from `n` — which is how the spatial index
+    /// catches up with a write without rescanning the store.
+    #[must_use]
+    pub fn dictionary_count_for(&self, tag: holos_core::Tag) -> usize {
+        self.inner.dictionary_count_for(tag)
+    }
+
     /// How many quads use a given predicate.
     #[must_use]
     pub fn predicate_count(&self, predicate: TermId) -> u64 {
@@ -217,9 +229,71 @@ impl Store {
         self.inner.flush()
     }
 
+    /// Writes a consistent snapshot of the store to `destination`.
+    ///
+    /// Works on an open store being written to, which is the whole point: copying the
+    /// directory instead requires stopping the service, because an LSM tree in mid-flight is
+    /// not a set of files that can be copied one at a time.
+    ///
+    /// `destination` must not already exist. Backends that link rather than copy require it
+    /// to be on the same filesystem as the store to stay cheap.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unsupported`] for an in-memory store, which has no files to snapshot,
+    /// and while a bulk load is running. Otherwise the backend's own failure.
+    pub fn checkpoint(&self, destination: &std::path::Path) -> Result<()> {
+        self.inner.checkpoint(destination)
+    }
+
+    /// Opens a commit scope: everything written until [`Store::commit`] lands together.
+    ///
+    /// A single quad write is already atomic — every index order for it goes into one
+    /// batch — so what this adds is atomicity across *several*. A SPARQL update or a holon
+    /// tick is a sequence of quad writes, and without a scope a crash between two of them
+    /// leaves half a commit behind.
+    ///
+    /// Reads inside the scope see the scope's own writes, which is what lets an update's
+    /// later operations see what its earlier ones did. What the scope does **not** give is
+    /// isolation from *other* holders of the store; see [`Storage::begin`].
+    ///
+    /// # Errors
+    ///
+    /// A scope already open, or a bulk load running.
+    pub fn begin(&mut self) -> Result<()> {
+        self.inner.begin()
+    }
+
+    /// Commits a scope opened by [`Store::begin`].
+    ///
+    /// # Errors
+    ///
+    /// A write failure, or no scope open.
+    pub fn commit(&mut self) -> Result<()> {
+        self.inner.commit()
+    }
+
+    /// Abandons a scope, leaving the store as it was when [`Store::begin`] was called.
+    ///
+    /// Infallible on purpose: it is the failure path, and a rollback that can itself fail
+    /// leaves a state nobody can describe.
+    pub fn rollback(&mut self) {
+        self.inner.rollback();
+    }
+
+    /// Whether a commit scope is open.
+    #[must_use]
+    pub fn in_scope(&self) -> bool {
+        self.inner.in_scope()
+    }
+
     /// Announces a bulk load, so the backend can buffer writes and skip its log.
-    pub fn begin_bulk_load(&mut self) {
-        self.inner.begin_bulk_load();
+    ///
+    /// # Errors
+    ///
+    /// A commit scope open: see [`Storage::begin_bulk_load`].
+    pub fn begin_bulk_load(&mut self) -> Result<()> {
+        self.inner.begin_bulk_load()
     }
 
     /// Ends a bulk load, writing anything buffered and making it durable.

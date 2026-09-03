@@ -18,8 +18,12 @@ use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let data = args.next().ok_or("usage: incremental <data.nt> <shapes.ttl>")?;
-    let shapes_file = args.next().ok_or("usage: incremental <data.nt> <shapes.ttl>")?;
+    let data = args
+        .next()
+        .ok_or("usage: incremental <data.nt> <shapes.ttl>")?;
+    let shapes_file = args
+        .next()
+        .ok_or("usage: incremental <data.nt> <shapes.ttl>")?;
 
     let mut store = Store::new();
     let started = Instant::now();
@@ -81,7 +85,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("dictionary terms   {}", store.dictionary_len());
     println!("load               {:.3}s", load.as_secs_f64());
     println!("compile shapes     {:.4}s", compile.as_secs_f64());
-    println!("full validation    {:.3}s  ({} results)", full_time.as_secs_f64(), full.results.len());
+    println!(
+        "full validation    {:.3}s  ({} results)",
+        full_time.as_secs_f64(),
+        full.results.len()
+    );
     println!(
         "full, after change {:.3}s  ({} results)",
         full_again_time.as_secs_f64(),

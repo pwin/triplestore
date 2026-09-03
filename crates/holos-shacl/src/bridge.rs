@@ -61,6 +61,16 @@ impl Bridged {
         self.forward.get(&id).copied()
     }
 
+    /// Translates a HOLOS id, interning it if the bridge has not seen it.
+    ///
+    /// The read-only [`Self::engine_id`] answers `None` for an unknown term, which is right
+    /// for planning — nothing in the engine's world refers to it. Applying a delta is the
+    /// other case: a newly written triple names terms the bridge could not have seen, and
+    /// refusing them would silently drop the change.
+    pub fn intern_id(&mut self, store: &Store, id: HolosId) -> Result<EngineId, ShaclError> {
+        intern(store, &mut self.terms, &mut self.forward, id)
+    }
+
     /// How many triples were bridged.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -111,8 +121,18 @@ pub fn bridge_pair(
     let mut builder = GraphBuilder::new();
     for quad in store.quads_for_pattern(None, None, None, shapes_graph) {
         let quad = quad?;
-        let s = intern(store, &mut bridged.terms, &mut bridged.forward, quad.subject)?;
-        let p = intern(store, &mut bridged.terms, &mut bridged.forward, quad.predicate)?;
+        let s = intern(
+            store,
+            &mut bridged.terms,
+            &mut bridged.forward,
+            quad.subject,
+        )?;
+        let p = intern(
+            store,
+            &mut bridged.terms,
+            &mut bridged.forward,
+            quad.predicate,
+        )?;
         let o = intern(store, &mut bridged.terms, &mut bridged.forward, quad.object)?;
         builder.push(s, p, o);
     }
@@ -249,12 +269,21 @@ mod tests {
             .unwrap();
         let engine_person = bridged.engine_id(person).expect("bridged");
         // The same integer appears on both sides.
-        assert!(shapes.objects_of(bridged.vocab.sh_targetClass).any(|t| t == engine_person));
+        assert!(shapes
+            .objects_of(bridged.vocab.sh_targetClass)
+            .any(|t| t == engine_person));
         assert!(bridged
             .graph
-            .objects_of(bridged.engine_id(
-                store.lookup_term(oxrdf::vocab::rdf::TYPE.into()).unwrap().unwrap()
-            ).unwrap())
+            .objects_of(
+                bridged
+                    .engine_id(
+                        store
+                            .lookup_term(oxrdf::vocab::rdf::TYPE.into())
+                            .unwrap()
+                            .unwrap()
+                    )
+                    .unwrap()
+            )
             .any(|t| t == engine_person));
     }
 }

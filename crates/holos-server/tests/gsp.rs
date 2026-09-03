@@ -9,8 +9,8 @@
 //! server; what is checked here is that `PUT` replaces where `POST` merges, that `DELETE`
 //! removes the graph rather than emptying it, and that policy is not bypassable.
 
-use holos_security::{Modes, Policy, Principal, PrincipalMatch, Rule, Scope, Session};
 use holos_engine::Engine;
+use holos_security::{Modes, Policy, Principal, PrincipalMatch, Rule, Scope, Session};
 use oxrdf::{GraphNameRef, NamedNode};
 use oxrdfio::RdfFormat;
 
@@ -58,17 +58,155 @@ fn post_merges_and_put_replaces() {
     let (mut engine, mut session) = setup();
     let target = graph();
 
-    gsp::merge(&mut engine, &mut session, &target, &turtle("a", "1"), RdfFormat::NTriples, None)
-        .expect("merge");
-    gsp::merge(&mut engine, &mut session, &target, &turtle("b", "2"), RdfFormat::NTriples, None)
-        .expect("merge");
-    assert_eq!(triples_in(&engine, &session, &target), 2, "POST accumulates");
+    gsp::merge(
+        &mut engine,
+        &mut session,
+        &target,
+        &turtle("a", "1"),
+        RdfFormat::NTriples,
+        None,
+    )
+    .expect("merge");
+    gsp::merge(
+        &mut engine,
+        &mut session,
+        &target,
+        &turtle("b", "2"),
+        RdfFormat::NTriples,
+        None,
+    )
+    .expect("merge");
+    assert_eq!(
+        triples_in(&engine, &session, &target),
+        2,
+        "POST accumulates"
+    );
 
-    // PUT is clear-then-merge.
-    gsp::clear(&mut engine, &mut session, &target).expect("clear");
-    gsp::merge(&mut engine, &mut session, &target, &turtle("z", "9"), RdfFormat::NTriples, None)
-        .expect("merge");
+    // PUT through the function the handler actually calls, rather than by hand. Simulating
+    // it here with a `clear` and a `merge` is what let the sequencing bug below hide: two
+    // `.expect()` calls only ever exercise the happy path.
+    gsp::write(
+        &mut engine,
+        &mut session,
+        &target,
+        &[(turtle("z", "9"), RdfFormat::NTriples)],
+        true,
+    )
+    .expect("PUT");
     assert_eq!(triples_in(&engine, &session, &target), 1, "PUT replaces");
+}
+
+/// A `PUT` that fails must leave the graph it was replacing exactly as it was.
+///
+/// The failure this pins is data loss, not a wrong answer. A replace is a clear followed by a
+/// merge, and the body is not parsed until the merge — so a malformed body used to empty the
+/// graph, fail, and return the client a 400 saying the request had not happened. The graph
+/// was gone and nothing said so.
+///
+/// Two ways in, because they fail at different points and a fix for one is not a fix for the
+/// other: a body that will not parse, and a body that parses into a quad the principal is not
+/// allowed to write.
+#[test]
+fn a_failed_put_does_not_destroy_what_it_was_replacing() {
+    let (mut engine, mut session) = setup();
+    let target = graph();
+
+    gsp::write(
+        &mut engine,
+        &mut session,
+        &target,
+        &[(turtle("keep", "1"), RdfFormat::NTriples)],
+        true,
+    )
+    .expect("the graph to replace");
+    assert_eq!(triples_in(&engine, &session, &target), 1);
+
+    // 1. A body that does not parse. The valid first line makes it past the point where a
+    //    parser could refuse the document before reading any of it.
+    let half_bad = b"<http://example.org/a> <http://example.org/p> \"ok\" .\nthis is not turtle";
+    assert!(gsp::write(
+        &mut engine,
+        &mut session,
+        &target,
+        &[(half_bad.to_vec(), RdfFormat::NTriples)],
+        true,
+    )
+    .is_err());
+    assert_eq!(
+        triples_in(&engine, &session, &target),
+        1,
+        "a PUT with an unparseable body emptied the graph and did not replace it"
+    );
+
+    // 2. A multipart upload whose second part is bad. The first part parses and writes, so
+    //    this fails later than case 1 — after the clear *and* after some of the replacement.
+    assert!(gsp::write(
+        &mut engine,
+        &mut session,
+        &target,
+        &[
+            (turtle("new", "2"), RdfFormat::NTriples),
+            (half_bad.to_vec(), RdfFormat::NTriples),
+        ],
+        true,
+    )
+    .is_err());
+    assert_eq!(
+        triples_in(&engine, &session, &target),
+        1,
+        "a PUT whose second document failed left the first one behind"
+    );
+}
+
+/// The same, for a body that parses but that policy will not let through.
+///
+/// Different code path from a parse failure — the refusal comes from the store rather than
+/// the parser, and lands partway through writing rather than before any of it.
+#[test]
+fn a_put_refused_by_policy_does_not_destroy_what_it_was_replacing() {
+    let (mut engine, mut session) = setup();
+    let target = graph();
+    gsp::write(
+        &mut engine,
+        &mut session,
+        &target,
+        &[(turtle("keep", "1"), RdfFormat::NTriples)],
+        true,
+    )
+    .expect("the graph to replace");
+
+    // A principal that may read and write everything except `ex:secret`. The document's
+    // first triple is allowed and its second is not, so the refusal lands mid-write.
+    let policy = Policy::default()
+        .with_rule(Rule::allow(
+            Modes::ALL,
+            Scope::Everything,
+            PrincipalMatch::Everyone,
+        ))
+        .with_rule(Rule::deny(
+            Modes::WRITE,
+            Scope::Predicate(NamedNode::new_unchecked(format!("{EX}secret"))),
+            PrincipalMatch::Everyone,
+        ));
+    let mut limited =
+        Session::open(engine.store(), Principal::anonymous(), policy).expect("session");
+
+    let mixed =
+        format!("<{EX}a> <{EX}p> \"fine\" .\n<{EX}a> <{EX}secret> \"nope\" .\n").into_bytes();
+    assert!(gsp::write(
+        &mut engine,
+        &mut limited,
+        &target,
+        &[(mixed, RdfFormat::NTriples)],
+        true,
+    )
+    .is_err());
+
+    assert_eq!(
+        triples_in(&engine, &session, &target),
+        1,
+        "a PUT refused by policy emptied the graph and did not replace it"
+    );
 }
 
 #[test]
@@ -78,8 +216,15 @@ fn delete_removes_the_graph_not_just_its_contents() {
     let (mut engine, mut session) = setup();
     let target = graph();
 
-    gsp::merge(&mut engine, &mut session, &target, &turtle("a", "1"), RdfFormat::NTriples, None)
-        .expect("merge");
+    gsp::merge(
+        &mut engine,
+        &mut session,
+        &target,
+        &turtle("a", "1"),
+        RdfFormat::NTriples,
+        None,
+    )
+    .expect("merge");
     gsp::create(&mut engine, &target).expect("create");
     assert!(gsp::exists(&engine, &session, &target).expect("exists"));
 
@@ -102,8 +247,15 @@ fn clear_leaves_the_graph_existing_but_empty() {
     // SPARQL Update exposes both.
     let (mut engine, mut session) = setup();
     let target = graph();
-    gsp::merge(&mut engine, &mut session, &target, &turtle("a", "1"), RdfFormat::NTriples, None)
-        .expect("merge");
+    gsp::merge(
+        &mut engine,
+        &mut session,
+        &target,
+        &turtle("a", "1"),
+        RdfFormat::NTriples,
+        None,
+    )
+    .expect("merge");
     gsp::create(&mut engine, &target).expect("create");
 
     gsp::clear(&mut engine, &mut session, &target).expect("clear");
@@ -177,8 +329,15 @@ fn a_graph_the_principal_cannot_read_is_absent_to_them() {
     let mut writer = Session::open(engine.store(), Principal::anonymous(), Policy::permit_all())
         .expect("session");
     let target = graph();
-    gsp::merge(&mut engine, &mut writer, &target, &turtle("a", "1"), RdfFormat::NTriples, None)
-        .expect("merge");
+    gsp::merge(
+        &mut engine,
+        &mut writer,
+        &target,
+        &turtle("a", "1"),
+        RdfFormat::NTriples,
+        None,
+    )
+    .expect("merge");
     gsp::create(&mut engine, &target).expect("create");
 
     let hidden = Policy::permit_all().with_rule(Rule::deny(
@@ -201,8 +360,15 @@ fn a_graph_the_principal_cannot_read_is_absent_to_them() {
 fn the_default_graph_is_addressable() {
     let (mut engine, mut session) = setup();
     let target = gsp::Target::Default;
-    gsp::merge(&mut engine, &mut session, &target, &turtle("d", "0"), RdfFormat::NTriples, None)
-        .expect("merge");
+    gsp::merge(
+        &mut engine,
+        &mut session,
+        &target,
+        &turtle("d", "0"),
+        RdfFormat::NTriples,
+        None,
+    )
+    .expect("merge");
     assert_eq!(triples_in(&engine, &session, &target), 1);
     assert!(gsp::exists(&engine, &session, &target).expect("exists"));
 }
@@ -213,11 +379,21 @@ fn a_graph_is_served_as_triples_not_quads() {
     // name in the body where a client asked for a document.
     let (mut engine, mut session) = setup();
     let target = graph();
-    gsp::merge(&mut engine, &mut session, &target, &turtle("a", "1"), RdfFormat::NTriples, None)
-        .expect("merge");
+    gsp::merge(
+        &mut engine,
+        &mut session,
+        &target,
+        &turtle("a", "1"),
+        RdfFormat::NTriples,
+        None,
+    )
+    .expect("merge");
     let body = String::from_utf8(
         gsp::read(&engine, &session, &target, RdfFormat::NTriples).expect("read"),
     )
     .expect("utf8");
-    assert!(!body.contains("g1"), "the graph name must not appear: {body}");
+    assert!(
+        !body.contains("g1"),
+        "the graph name must not appear: {body}"
+    );
 }

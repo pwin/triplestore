@@ -1,0 +1,133 @@
+# The boundary of the `wo:orders` holon.
+#
+# Everything in this file is a precondition for a write landing, not a report run
+# afterwards. A commit that would leave the scene violating any of it is refused, and the
+# scene keeps the state it had.
+#
+# Two kinds of thing live here and they run in a fixed order:
+#
+#   1. `sh:rule` — inferences. They fire first, to a fixpoint, and what they write joins the
+#      commit: validated with everything else, recorded in the event log, and undone with
+#      everything else if the commit is refused.
+#   2. `sh:NodeShape` constraints — the invariants. They judge the scene the rules produced.
+#
+# That order is the point. A rule cannot be used to smuggle something past the boundary,
+# because the boundary sees what the rule wrote.
+
+@prefix wo:   <https://example.org/workorders#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+# --------------------------------------------------------------------------- rules
+
+# A work order that carries a sign-off *is* a closed order. Stated once, here, rather than
+# left to every writer to remember — which is how a scene ends up with orders that have a
+# signature and a status of `InProgress` and no way to tell which of the two is wrong.
+#
+# Note what the rule infers: a **class**, not a value for `wo:status`. A `sh:TripleRule` adds
+# a triple, it does not replace one, so a rule writing `wo:status wo:Closed` onto an order
+# that already says `wo:status wo:InProgress` gives it two statuses and trips its own
+# `sh:maxCount 1`. Deriving a class is additive and says the same thing. Getting this wrong is
+# the first mistake to make here, and it fails loudly rather than quietly.
+wo:SignOffClosesTheOrder
+    a sh:NodeShape ;
+    sh:targetClass wo:WorkOrder ;
+    sh:rule [
+        a sh:TripleRule ;
+        sh:subject sh:this ;
+        sh:predicate rdf:type ;
+        sh:object wo:ClosedOrder ;
+        # Only for orders that actually carry a sign-off.
+        sh:condition wo:HasSignOff ;
+    ] .
+
+wo:HasSignOff
+    a sh:NodeShape ;
+    sh:property [ sh:path wo:signedOffBy ; sh:minCount 1 ] .
+
+# --------------------------------------------------------------------------- invariants
+
+wo:WorkOrderShape
+    a sh:NodeShape ;
+    sh:targetClass wo:WorkOrder ;
+
+    # Exactly one asset. An order against two pumps is two orders.
+    sh:property [
+        sh:path wo:asset ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:class wo:Asset ;
+        sh:message "a work order is against exactly one asset" ;
+    ] ;
+
+    # Exactly one status, from the closed vocabulary. `sh:in` is what stops a typo becoming
+    # a new state that no query knows to look for.
+    sh:property [
+        sh:path wo:status ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:in ( wo:Raised wo:InProgress wo:Closed ) ;
+        sh:message "status must be one of Raised, InProgress, Closed" ;
+    ] ;
+
+    sh:property [
+        sh:path wo:raisedOn ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:date ;
+    ] ;
+
+    # A meter reading is a physical quantity: not negative, and not absurd.
+    sh:property [
+        sh:path wo:meterHours ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:decimal ;
+        sh:minInclusive 0 ;
+        sh:maxInclusive 200000 ;
+        sh:message "meter hours must be between 0 and 200000" ;
+    ] ;
+
+    # The one that earns the boundary its keep. A closed order without a completion date is
+    # the record of a job nobody can prove happened.
+    sh:property [
+        sh:path wo:completedOn ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:date ;
+    ] .
+
+# A closed order must be complete.
+#
+# Targeted at `wo:ClosedOrder` — the class the rule above derives — so this is the invariant
+# that judges what the rule inferred. That is the whole shape of the arrangement: the rule
+# says what something *is*, and the boundary says what a thing of that kind must have.
+#
+# A `sh:SPARQLTarget` selecting closed orders directly would read more naturally, and is what
+# a SHACL author reaches for first. It is not used, because only the adapted engine implements
+# it and the native incremental validator that runs inside a tick *refuses* what it cannot
+# check rather than passing it. That refusal is the feature; staying inside Core is the price.
+# See HOLONS.md, "what the boundary refuses to accept".
+wo:ClosedOrderShape
+    a sh:NodeShape ;
+    sh:targetClass wo:ClosedOrder ;
+    sh:property [
+        sh:path wo:completedOn ;
+        sh:minCount 1 ;
+        sh:message "a closed work order must record when it was completed" ;
+    ] .
+
+wo:AssetShape
+    a sh:NodeShape ;
+    sh:targetClass wo:Asset ;
+    sh:property [
+        sh:path rdfs:label ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+    ] ;
+    sh:property [
+        sh:path wo:site ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+    ] .

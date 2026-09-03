@@ -184,14 +184,34 @@ But use the RocksDB features Oxigraph currently leaves on the table:
 
 - **Prefix extractor + prefix bloom filter per index CF.** A `?s :p :o` lookup becomes a
   bloom-filtered prefix seek instead of an iterator walk.
-- **`SstFileWriter` + `IngestExternalFile` for bulk load.** External-merge-sort the encoded quads,
-  write SSTs directly, ingest them. This is the difference between a billion triples in minutes and
-  in hours, and it is the only way the load-time problem that dominates SHACL_Engine's benchmarks
-  goes away.
+- **`SstFileWriter` + `IngestExternalFile` for bulk load.** **Built, in memory.** A load
+  holds the encoded quads, sorts them once per index order, writes one file per order and
+  hands them to RocksDB, which can adopt a non-overlapping file at the bottom level instead
+  of pushing every key through the memtable, the log and then the levels again. Measured at
+  **1.7× on a whole load** — 10.7 s to 6.4 s for 753k quads, interleaved, eight pairs.
+  `loadprofile` says why it is not more: the index writes were 55% of a load and are now
+  almost none, so what is left is parsing and the dictionary.
+  What is *not* built is the external merge sort. A load past `MAX_SST_QUADS` falls back to
+  the buffered-batch path rather than spilling sorted runs to disk and merging them, so the
+  win has a memory budget attached to it. That budget is what stands between this and the
+  billion triples; `RocksStorage::set_ingest_limit` is where it is set.
 - **Merge operators** for dictionary refcounts and for the statistics counters in §7 — no
   read-modify-write on the write path.
 - **Checkpoints** for consistent backups *and* for holon branching: a checkpoint is a cheap
-  hard-linked fork of a dataset.
+  hard-linked fork of a dataset. **Built.** `Store::checkpoint` takes one while the store is
+  open and being written to; `holos backup` and `POST /backup` expose it. Two refusals rather
+  than a wrong answer: during a bulk load, whose writes are buffered outside RocksDB, and on
+  an in-memory store, which has no files to snapshot. Holon branching is
+  `holos_holon::branch` — §9.
+- **One `WriteBatch` per commit.** **Built.** A single quad write was already atomic — all nine
+  or ten index-order puts go into one batch — but a SPARQL update or a holon tick is a
+  *sequence* of them, and a crash between two left half a commit. `Storage::begin` /
+  `commit` / `rollback` accumulate the whole sequence into one batch and write it once.
+  Buffering means every read inside the scope has to be answered from the buffer rather than
+  the database, so the scope carries an overlay for quads, named graphs and the dictionary;
+  a scope past a few hundred thousand quads is refused rather than silently split, because a
+  split batch would keep the interface and drop the guarantee. This is failure and crash
+  atomicity only — isolation is the timestamps below.
 - **User-defined timestamps** for MVCC and time travel. Caveat, stated plainly: UDT is still marked
   experimental upstream. Fallback if it disappoints — an explicit monotonic version suffix in the
   key, the TiKV approach, at the cost of writing your own GC.
@@ -261,6 +281,124 @@ semantics. Note that SPARQL 1.2 Query is still a Working Draft (20 Aug 2026) whi
 is a Candidate Recommendation (7 Apr 2026) — so pin to RDF 1.2 semantics and treat the SPARQL
 surface as movable until CR.
 
+### The one operator that exists so far
+
+Everything above is the plan. What is *built* is a single physical operator, `holos_engine::
+bindjoin`, because measurement said it was the one thing missing rather than the next thing on
+a list.
+
+`spareval` joins by building a hash table from the left input and scanning the right input in
+full. Knowing that `?s` is bound to two hundred values does not help it, because there is no
+operator that can use the binding. On a three-pattern star over 753,199 quads that costs 43.9
+ms against 0.072 ms hand-written — a factor of 611, rising with the data. It was also what
+stopped the spatial index of §17 from paying off: narrowing fifty thousand geometries to four
+changes nothing if the join then scans all fifty thousand anyway. One missing operator, felt
+from two directions.
+
+An index nested-loop join closes it: **0.535 ms on the query path, about 82×**. The remaining
+10× to hand-written is generality — per-step re-estimation, hashed bindings, dictionary
+decoding — not a missing operator.
+
+**The fragment started deliberately small and has grown.** `SELECT` over basic graph
+patterns, `JOIN`, `UNION`, `VALUES`, `FILTER`, `OPTIONAL`, `GRAPH`, `MINUS`, subqueries that
+hide nothing, blank nodes, and sequence, inverse and alternative property paths — with
+`DISTINCT`, `LIMIT`, `OFFSET` and a projection. Everything else is refused and falls back,
+which is what let it grow without the growth risking what already works.
+
+Each step is measured. `FILTER` bought **72×** on a selective filtered star, because the
+predicate prunes branches before the remaining patterns are scanned. `JOIN`, `UNION` and
+`VALUES` bought **2,408×** on a spatial query, for the reason below. `OPTIONAL` bought **41×**
+at 820,000 quads and `GRAPH ?g` **9×**, both flat where the evaluator grows with the store.
+
+Two constructs are refused on principle rather than pending work. **`ORDER BY`** needs a term
+comparator, and SPARQL leaves the relative order of incomparable terms to the implementation —
+so matching the evaluator's sequence means matching its tie-breaking, which is duplicating
+code rather than reusing it and creating two implementations that must agree exactly forever.
+**Aggregation** is the same argument over a larger surface. A fallback costs time; a second
+implementation that drifts costs answers.
+
+The refusals that are pending work rather than principle: closure paths (`*`, `+`, `?`) need a
+fixpoint traversal; a subquery hiding a variable needs that variable renamed before splicing;
+a nested `GRAPH` needs the inner-overrides-outer rule.
+
+**Filters are borrowed, not reimplemented.** The predicate is evaluated by `spareval`'s own
+expression evaluator through this engine's function registry, so `FILTER` semantics here are
+the evaluator's. SPARQL comparison is value-based with numeric promotion, and an independent
+`=` that mishandled `"1"^^xsd:integer` against `"1.0"^^xsd:decimal` would be exactly the
+silent wrong answer this module exists to avoid. Two classes are refused rather than
+approximated, because the borrowed evaluator has neither a dataset nor an evaluation context:
+`EXISTS`, which would answer `false` for every solution, and `NOW`/`RAND`/`UUID`/`STRUUID`/
+`BNODE`.
+
+**Ordering is chosen at each step, not once.** Once the first pattern binds `?s`, the others
+stop being predicate scans and become subject-and-predicate lookups — a different and far
+smaller estimate. Ordering once, before anything is bound, would miss exactly the effect the
+operator exists to exploit.
+
+**Policy is structural, per §14.1.** Scans go through the same `QueryableDataset` call
+`spareval` makes, so `decide_quad` runs on every quad. A fast path that read the store
+directly would be a way around the guarantee; this one has no such path available to it.
+
+**It may give up half way, and that is a feature.** This operator materialises where the
+evaluator streams. For the shapes it is for, the answer is small — that is the premise of the
+fragment. For a shape that slipped through and is not small, it is the difference between a
+slow query and a dead machine: `SELECT * WHERE { ?a ?b ?c . ?d ?e ?f }` over 20,000 triples is
+400 million rows, and it was found materialising 13.7 GB with its own 60 ms timeout unfired,
+because the cancellation token is consulted by the evaluator that had just been skipped. So
+evaluation now runs under a row budget and the deadline's token, and hitting either returns
+`None` — *ask the evaluator* — discarding the partial rows rather than returning them short.
+
+That bug is worth recording precisely, because nothing about it was *incorrect*. Given enough
+time and memory the answer would have been right. Being right eventually is a different
+property from being usable, and only the first was under test.
+
+**What the differential tests could not see.** Three bugs got past them, and they share a
+shape: the fast path took over a query carrying something it did not model. Comparing answers
+finds none of that directly, because two of the three do not change an answer. Besides the
+cross product, `QueryOptions::substitutions` was silently dropped — the gate read
+`touches_dataset`, which reports on the dataset, while a substitution changes the *query* —
+and `FROM` was ignored, which *did* return wrong rows: it lives in `Query::Select::dataset`,
+beside the pattern rather than inside it, so a check that reads only the pattern answers a
+different question over the store's default graph.
+
+**And the suites that should have caught them could not reach the code.** There are three
+ways into evaluation. The fast path was attached to `Engine::query_with`, reached by the HTTP
+server; the §15 conformance runner evaluates through `Engine::query_prepared_with_services`,
+and the Python binding and audited CLI path through `Engine::query` — both of which went
+straight to the evaluator. Roughly a thousand W3C queries appeared to cover this operator
+while executing none of it, and the most-used surface never received it.
+
+All three now share one `try_bind_join`, and a test compares their answers against the
+evaluator's so they cannot drift apart again. With the suites actually reaching it,
+`sparql10`, `sparql11` and `sparql12` are unchanged — the first real evidence the operator
+agrees with the evaluator on SPARQL nobody wrote for it.
+
+The general lesson is worth more than the operator: **a fast path attached to one entry point
+inherits the reputation of the test suites it never runs under.** Coverage is a property of
+the path taken, not of the tests that exist.
+
+**What it took to make the spatial index pay.** `FILTER` was expected to be enough and was
+not, which is worth recording because the mistake was a failure to look. A routed GeoSPARQL
+query does not reach the planner as a filtered BGP: §17's rewrite turns
+`?f geo:sfWithin <window>` into a geometry lookup joined in as a *union* of ordinary
+patterns, and the spatial index joins a `VALUES` of candidate geometries onto that, giving
+`Filter(Join(Join(Bgp, Union(Bgp, Union(Bgp, Bgp))), Values))`. All four node kinds had to be
+in the fragment before any of it could use a bind join.
+
+With them in, the spatial benchmark goes from **no measurable difference** — the state §17
+recorded, where narrowing fifty thousand geometries to four changed nothing because the join
+scanned all fifty thousand anyway — to **2,408×** at fifty thousand geometries. Two
+components, each individually correct and individually tested, that did not compose until a
+third existed.
+
+Two boundaries fell out of it, both about `UNION` making possibilities that a conjunctive
+plan never had. A filter can only be hoisted out of a join when its variables are *certainly*
+bound in the subtree it was written against — `{ ?a ?b ?c FILTER(?d = 1) } { ?d ?e ?f }`
+being the counter-example — so the plan tracks certainly-bound separately from
+possibly-bound. And a `VALUES` term absent from the dictionary sends the query back to the
+evaluator, because such a term still binds while having no term id, and interning one would
+be a write in the middle of a read.
+
 ---
 
 ## 8. L4 — SHACL as a subsystem, not a library
@@ -275,17 +413,25 @@ surface as movable until CR.
 > | | Adapted engine | Native evaluator |
 > |---|---|---|
 > | Coverage | SHACL Core, SPARQL constraints, node expressions, SHACL-AF rules, inference | SHACL Core |
-> | W3C SHACL 1.2 Core | **127/138** | 94/138 |
-> | W3C SHACL 1.0 Core | 90/98 | **92/97** |
-> | Reads | a bridged snapshot | the live store |
-> | Incremental revalidation | no | **yes, 161×** |
+> | W3C SHACL 1.2 Core | **138/138** | **138/138** |
+> | W3C SHACL 1.0 Core | **98/98** | **98/98** |
+> | Reads | a bridged graph, kept current by delta | the live store |
+> | Incremental revalidation | **yes** | **yes** |
 >
-> The split is forced by one fact: the adapted engine's `Graph` is immutable, so a delta
-> cannot be pushed into it cheaply and a validator that re-bridges on every commit is not
-> incremental however good its coverage. Hence **the engine for coverage, the native
-> evaluator for the write path** — and a named gap, since the write path then checks fewer
-> constraint components than a full run. Closing it means giving the engine's `Graph` a
-> merge-in-place, which is bounded work and is not done on spec.
+> **The split the first version of this section described is gone.** It rested on one fact —
+> the adapted engine's `Graph` was immutable, so a delta could not be pushed into it and a
+> validator that re-bridged on every commit was not incremental however good its coverage.
+> `Graph::apply` merges into the three sorted permutations in place, and `EngineRun::apply`
+> translates a store delta into it: **0.0009 ms at 250,000 quads, and flat** where re-bridging
+> cost 149 ms and grew with the store. `EngineRun::revalidate` then plans from the engine's own
+> dependency index, so both validators now take a delta.
+>
+> Two things remain true. The native evaluator **refuses** a shapes graph using anything it
+> cannot check — `sh:sparql`, SHACL-AF rules, node expressions — rather than dropping the
+> constraint and reporting conformance, which is what it used to do; that made the Boundary a
+> gate that failed open. And a SPARQL constraint whose query uses a variable predicate cannot
+> be indexed, so a shapes graph containing one falls back to a full run rather than being
+> guessed at.
 >
 > What follows is the design both were built to.
 
@@ -325,15 +471,30 @@ answers, which is the current failure mode.
 > so a commit costs the size of its own change: **165 commits/s on a 300k-triple scene, 41×
 > cheaper than a full pass** (§16).
 >
-> Three things are deliberately *not* there, and each is visible in the code rather than
+> Boundary rules fire: `tick_with_rules` runs a holon's SHACL-AF rules to a fixpoint over the
+> scene the delta leaves behind, and what they infer joins the commit — validated with
+> everything else, recorded in the event, and refused with everything else if the boundary
+> objects. That used to mean re-bridging the whole graph per tick, which is why it was not
+> done; `EngineRun::apply` made the bridge incremental and removed the reason.
+>
+> A tick is also **atomic**. The whole of it — the delta, the inferences, the event and the
+> version bump — runs inside one commit scope on the store: on the persistent backend the
+> writes accumulate into one `WriteBatch` and are written once, so a crash between applying
+> the delta and writing the event can no longer leave the two disagreeing. The same scope
+> carries a SPARQL update, replacing the hand-rolled undo log that used to roll back by
+> writing the inverse of each change — an unwind that could itself fail, which abandoning an
+> unwritten batch cannot. The cost of buffering is that every read inside the scope has to be
+> answered through the buffer; that overlay is in `crates/holos-store/src/rocks`, and
+> `tests/commit_scope.rs` checks it by running the same script inside a scope and outside and
+> requiring every read to agree at every step.
+>
+> Two things are still deliberately *not* there, and each is visible in the code rather than
 > quietly skipped:
 >
-> - **A tick is not atomic.** A refused commit is undone by a compensating write, not a
->   rollback, and a crash between applying the delta and writing the event leaves the two
->   disagreeing. Closing this is what §6.1's MVCC and checkpoints are for.
-> - **Boundary rules do not fire.** SHACL-AF fixpoint evaluation exists in the adapted
->   engine but only over a bridged snapshot, so firing rules per tick would mean re-bridging
->   per tick — the gap §8 names.
+> - **A tick is atomic but not isolated.** A concurrent reader with its own view sees the
+>   store before the commit or after it, and nothing promises which. That is §6.1's MVCC, and
+>   it is not built. The server and the Python binding hold the engine behind an `RwLock`, so
+>   in those two deployments a writer excludes readers and the question does not arise.
 > - **Projections recompute rather than maintain.** `Regime::Maintained` is *refused*, not
 >   silently downgraded: claiming a guarantee the build does not provide would be worse than
 >   declining it.
@@ -375,7 +536,28 @@ which regime a projection is in. Pretending otherwise would be the design's wors
 
 **Time travel and branching** fall out of the substrate: `AT VERSION n` / `AT TIME t` reads use
 RocksDB user-defined timestamps (or version-suffixed keys); a branch is a checkpoint plus a fresh
-event-log head. Auditability — which the Holon article flags as an explicit architectural choice —
+event-log head.
+
+> **Branching is built; time travel is not.** `holos_holon::branch` creates a holon starting
+> from another's scene and boundary, with a fresh event log opening on a `holos:branchedFrom`
+> record naming the parent and the version it diverged at. The two then move independently.
+>
+> The two halves of §6.1's sentence turn out to live in different places. The **checkpoint**
+> is `Store::checkpoint`, a hard-linked fork of the whole dataset — cheap, but a separate
+> store, so the branches cannot be queried together. The **fresh event-log head** is the
+> holon-level branch, inside one store, where they can. Which to reach for depends on the
+> question: forking a dataset to try a migration wants the first; comparing two futures of
+> one holon wants the second.
+>
+> A holon branch copies its scene rather than linking it, because nothing in RDF lets two
+> named graphs share storage and pretending otherwise would mean a write to one silently
+> changing the other. It therefore costs the size of the scene.
+>
+> Versions continue rather than restart: a branch taken at parent version 7 has version 7 and
+> its first tick is 8. Restarting at zero would make "version 3" ambiguous between two
+> lineages whose scenes are genuinely related.
+>
+> `AT VERSION n` still needs the MVCC substrate, which is not built. Auditability — which the Holon article flags as an explicit architectural choice —
 becomes a per-holon retention policy rather than a schema decision.
 
 **All holon metadata is RDF** in a system graph, queryable with ordinary SPARQL. No new model.
@@ -434,11 +616,11 @@ the measurement.
 | Phase | Deliverable | Exit criterion |
 |---|---|---|
 | **P0** ✅ | Oxigraph crates + store + evaluator | *Done, in-memory.* SPARQL 1.2 and RDF 1.2 triple terms evaluate end to end, and the W3C suites pass with no HOLOS-attributable failure (§15). Still owes the RocksDB substrate. |
-| **P1** ◐ | Dense `TermId` dictionary, order-preserving encodings, SST-ingest bulk loader | *Encoding and the RocksDB tier done.* Measured **41k quads/s** persistent, **208k/s** in memory (§16). Owes `SstFileWriter` ingestion and range filters compiled into index scans. **The original 500k/s exit criterion was written before any measurement and is withdrawn** — see §16 for what replaces it. |
-| **P2** ◐ | Characteristic-set statistics, cost-based optimizer, vectorized binary joins | *Statistics built and measured.* Characteristic sets estimate 6 of 7 query shapes exactly — mean q-error **1.1** against the reused optimiser's **2×10⁸** — and bad estimates cost a measured **3×** (§16). Owes the optimiser itself: the reused one has no injection point, so consuming these statistics means owning the planner. |
+| **P1** ◐ | Dense `TermId` dictionary, order-preserving encodings, SST-ingest bulk loader | *Encoding, the RocksDB tier and sorted ingestion done.* `SstFileWriter` + `IngestExternalFile` is built and worth **1.7× on a whole load**; `loadprofile` shows why not more, and where the remaining time is. Owes the external merge sort that would lift its memory budget, and range filters compiled into index scans. **The original 500k/s exit criterion was written before any measurement and is withdrawn** — see §16 for what replaces it. |
+| **P2** ◐ | Characteristic-set statistics, cost-based optimizer, vectorized binary joins | *Statistics built and measured, and consumed.* Characteristic sets estimate 6 of 7 query shapes exactly — mean q-error **1.1** against the reused optimiser's **2×10⁸** — and bad estimates cost a measured **3×** (§16). `bindjoin` is an owned planner over them for the fragment it accepts, re-estimating at each step. Owes the rest of the language: `ORDER BY` and aggregation are refused on principle (§7), the remainder for want of the work. |
 | **P3** | Hypertrie hot tier + WCO multi-join + hybrid planner | Wins on cyclic and join-heavy queries without regressing star and chain queries; memory overhead measured and within budget. **Gated on P2's planner**, not just its statistics — §13 Q2 compares against a *well-planned* binary join, which does not exist yet. |
-| **P4** ◐ | SHACL subsystem on native indexes + incremental revalidation | *Core built.* 92/97 W3C SHACL Core (§15). Revalidation measured at **161×** a full pass, so the cost does track the delta (§16). Owes SPARQL-based constraints, SHACL-AF rules, and the SHACL 1.2 additions. |
-| **P5** ◐ | Holon layer: versioned partitions, event log, IVM projections, time travel | *Walking skeleton built.* Scene, boundary, event log and the tick all work, validated incrementally at 41× a full pass (§16). Owes: atomicity (needs §6.1's MVCC), boundary rules to fixpoint, incrementally maintained projections, and time travel. |
+| **P4** ✅ | SHACL subsystem on native indexes + incremental revalidation | *Done.* **98/98** W3C SHACL 1.0 Core and **138/138** SHACL 1.2 Core, through both validators (§15). Both revalidate a delta: the native one at **161×** a full pass, the adapted one at **0.08 ms against 150 ms** to prepare and validate at 250,000 quads. SPARQL constraints, SHACL-AF rules and node expressions are the adapted engine's; the native evaluator refuses them rather than dropping them. |
+| **P5** ◐ | Holon layer: versioned partitions, event log, IVM projections, time travel | *Walking skeleton built.* Scene, boundary, event log and the tick all work, validated incrementally at 41× a full pass (§16). Boundary rules fire to a fixpoint per tick, and the whole tick is one atomic commit — both were owed here and both are done. Owes: isolation (needs §6.1's MVCC), incrementally maintained projections, and time travel. |
 | **P6** ◐ | HTTP protocol server, PyO3/WASM bindings, text + vector module | *Server built* — SPARQL 1.2 Protocol (**34/34**), Graph Store Protocol (**13/13**), SPARQL Update, YASGUI console, PyO3 bindings, policy enforced per request (§10). Owes WASM and the text/vector module. |
 
 P0–P2 is a conventional, low-risk, well-understood engine. P3–P5 is the research content. Structure
@@ -798,6 +980,20 @@ graph. Only blank nodes reachable through report-structural predicates belong th
 third was real: `"aldi"^^xsd:integer` is a well-formed RDF term and not an integer, and
 SHACL calls that a violation — a datatype IRI comparison alone is not enough.
 
+### The SPARQL 1.0 suite was on disk and never run
+
+Added late, and the reason is worth keeping. `FROM` and `FROM NAMED` had no coverage in this
+tree at all: the SPARQL 1.1 suite contains exactly two queries using `FROM`, and both are
+`CONSTRUCT`. The nineteen tests that exercise dataset specification live in the SPARQL 1.0
+suite, which `scripts/fetch-testsuites.sh` has always cloned and no ratchet ever read.
+
+It went unnoticed because the newer suite looks like it supersedes the older one. It does not
+— SPARQL 1.1's manifests test what 1.1 *added*. Anything 1.0 settled is tested in 1.0's
+manifests and nowhere else.
+
+`sparql10` is now a ratchet of its own at **262/263**, its single known failure a parser gap
+upstream in `spargebra`.
+
 ### The skips are not a hiding place
 
 101 SPARQL 1.1 tests are skipped, down from 304, and each skip names a roadmap item rather
@@ -1081,14 +1277,18 @@ available.
 
 It settles the **precondition** for §13 Q2: accurate estimates over RDF are cheap and
 available, and inaccurate ones cost real time. It does not yet answer Q2 itself, which asks
-whether the hypertrie beats a *well-planned* binary join. Answering that needs a planner that
-consumes these statistics — and there is no injection point:
-`Optimizer::optimize_graph_pattern` is a free function called internally by the evaluator, so
-using these numbers means owning the planner rather than configuring one.
+whether the hypertrie beats a *well-planned* binary join.
 
-That is now a decision with numbers attached rather than a preference, which is what P2 was
-for. It also moves §17's R-tree from "blocked on the optimiser" to "blocked on the same
-planner", and it is the same seam in both cases.
+The injection point this section said did not exist now does, for part of the language.
+`Optimizer::optimize_graph_pattern` is still a free function called inside the evaluator, so
+there is still no way to configure the reused planner — but `bindjoin` does not configure it,
+it replaces it for the fragment it accepts, and it consumes these statistics directly:
+`estimate_todo` reads the characteristic-set counts and re-estimates at every step, so a
+pattern whose subject an earlier step bound is costed as a lookup rather than a scan.
+
+So P2's "owning the planner" is done for a fragment and not for the language. What is still
+owed is the rest of it — and §17's R-tree, which was "blocked on the optimiser", is now
+blocked on the same fragment growing to reach it rather than on a seam that does not exist.
 
 **What is deliberately not claimed:** this measures estimation quality and one plan-order
 penalty. It is not an end-to-end query benchmark, and no claim about query throughput is made
@@ -1110,6 +1310,40 @@ hull, envelope, the set operations and the GeoJSON accessor. HOLOS adds **2 more
 > against a live endpoint and two of the names came back unknown. They are implemented now,
 > which is why the sentence above is true; it was not when it was first written.
 
+### The set operations are wrapped, not just registered
+
+`geof:union`, `geof:intersection`, `geof:difference` and `geof:symDifference` are
+`spargeo`'s implementations called through a wrapper in `geo_ext`, because their output
+needed correcting.
+
+`geo`'s boolean operations go through `i_overlay`, which works on an integer grid and
+converts back on the way out. Coordinates that are exactly representable survive; the rest
+come back shifted by around 1e-10. `-83.2` becomes `-83.20000000009313`.
+
+That is about 0.01 mm on the ground and harmless for anything measuring distance. It is
+**not** harmless for the exact topological predicates, which turn on whether two boundaries
+coincide:
+
+```text
+sfTouches(C, A)             → true
+sfTouches(C, union(A, D))   → false     ← the same shared edge, now 1e-10 apart
+```
+
+`sfTouches`, `sfEquals` and `sfCrosses` therefore stopped composing with any computed
+geometry, and did so silently — the answer was wrong, not merely imprecise. It was found by
+validating against Ontotext's GeoSPARQL example, not by a test here.
+
+**The fix is snapping, not rounding**, and the distinction is the whole design. Rounding
+every output coordinate to the inputs' decimal places would also move genuinely *new*
+vertices: two integer-coordinate edges crossing at x = 1.5 would round to 2, turning a
+correct intersection into a wrong one. Instead each output coordinate is compared against the
+coordinates that went in and replaced only when within 1e-9 of one — so a preserved vertex
+returns to its exact input value, while a computed intersection point, matching no input, is
+left exactly as produced.
+
+Wrapping `spargeo` rather than reimplementing keeps one implementation of the operation
+itself; only the coordinates are touched on the way out.
+
 The two additions match `spargeo`'s literal conventions exactly — CRS84 only, both
 `wktLiteral` and `geoJSONLiteral` accepted, output in whichever the arguments used, the same
 OGC unit IRIs — because a function that round-tripped literals differently from its
@@ -1126,21 +1360,206 @@ find nothing, because §14's property does not get a geospatial exemption.
 Reused rather than rewritten, for the same reason as the rest of L0 (§4): conformance-heavy
 geometry code that already exists and is already tested.
 
+### The index is updated, not rebuilt
+
+The R-tree earns 2,408× on reads, and was rebuilt in full on every write — which made that a
+property of a read-only store. One write to a 200,000-geometry store cost about four thousand
+probes' worth of work, and `is_current_for` correctly made every query in the meantime fall
+back to a full scan.
+
+Measuring where a rebuild's time went pointed at the answer. The quad scan is **7%**;
+decoding terms and parsing their WKT is **57%**; packing the tree is **36%**. Avoiding the
+decode and the parse was clearly the prize — but it turned out the scan could go too.
+
+**§5's dictionary makes the scan unnecessary.** Each dictionary-backed kind has its own
+dense, append-only index space, so every literal ever interned is `TermId::new(Tag::Literal,
+i)` for some `i` below the current count. An index that remembers how far it has read finds
+everything since by reading from there. No scan of the store, no set of terms already
+examined, and a cost proportional to what was interned rather than to what is held:
+**0.1–0.3 ms whether the store holds 50,000 geometries or 200,000**, against a 56–271 ms
+rebuild.
+
+**Why it may insert and never delete.** The index is a superset filter, and §17's rewrite
+joins the `VALUES` it produces back against the store — so a geometry the index still lists
+after its quads are gone fails to join and contributes no row. Omitting a geometry is a
+silently missing answer; keeping one that has left is invisible. So the index tracks the
+*dictionary* rather than the store, and the dictionary is append-only by construction. What
+it holds is bounded by how many distinct geometries have ever been interned, not by how many
+are currently reachable — the same growth §5 already accepts for the dictionary itself.
+
+That also made the staleness check **exact rather than heuristic**. It compared quad and term
+counts, which declared the index stale after any write whatsoever. Now the index holds a
+geometry for every literal below its watermark, and every geometry in the store is a literal
+in the dictionary, so a level watermark means nothing can be missing — and a write that adds
+quads over geometries already interned costs nothing at all.
+
+Past ten thousand one-at-a-time inserts the tree repacks itself from what it already holds,
+because `rstar` builds a far better tree from a bulk load than from repeated insertion. That
+pays the tree construction and none of the parsing.
+
+Two tests carry it: one asserts a refreshed index answers *identically* to a rebuilt one
+across several probe windows and rounds of writing; the other deletes every geometry quad and
+asserts the leftover entries produce no rows, which is what makes over-inclusion safe rather
+than merely convenient.
+
+### Reclaiming the dictionary: `holos compact`
+
+The dictionary is append-only, and §5 depends on that — so does everything derived from it,
+including the spatial index's watermark. Deleting quads therefore reclaims their index
+entries and nothing else: the terms they used stay interned for ever, and a store that has
+churned carries a dictionary sized by every term it has *ever* seen.
+
+Neither backup nor restart clears it. A backup is a RocksDB checkpoint — the SST files are
+hard-linked — so a restore hands back the same dictionary, dead entries included. That is the
+right behaviour for a backup and it is worth being explicit about, because "restore from
+backup" is the intuition people reach for.
+
+**Tombstoning was the plan and the evidence went against it.** Freeing a dictionary slot in
+place means proving nothing refers to it, and an RDF 1.2 triple term holds its components by
+id — so a term can be referenced while *no quad mentions it at all*:
+
+```text
+<claim> <says> <<( <a> <p> "v" )>> .
+```
+
+`<a>` and `<p>` are interned IRIs appearing in no quad. Measured, not assumed: both come back
+with zero direct references. A check that looked only at quads would free them and leave the
+triple term pointing at nothing. Tombstoning is also only a partial reclaim — the id is
+retired for ever and the slot remains — so the trade was *online but partial, with data
+corruption as the failure mode*.
+
+Copying has no such failure mode. It writes only terms it has just read, so anything
+reachable arrives with its referents and anything unreachable is left behind by construction
+rather than by analysis. It is offline, and it is complete.
+
+`holos compact --store <DIR> --to <DIR>` writes a fresh store beside the old one, never over
+it, so a failure leaves the original untouched. It reads the store **directly rather than
+through a policy**: `holos dump` writes what a principal may see, and a maintenance operation
+that silently dropped the quads the operator happens not to be cleared for would be a
+data-loss bug wearing a security feature's clothes.
+
+Three things it checks rather than reports, because a compaction that quietly lost data is
+the worst outcome a maintenance command can have: the quad count in, the quad count copied,
+and the quad count out must agree, and so must the named graph counts. Empty named graphs are
+copied explicitly — the Graph Store Protocol can tell an empty graph from an absent one.
+
+This is not RocksDB's own `compact_range`, which reclaims SST space from deleted keys and
+cannot renumber a dictionary. The two are complementary; only this one shrinks the term
+space.
+
+### Reclaiming what the index keeps: `POST /maintenance/purge`
+
+Tracking the dictionary rather than the store buys a refresh in a fraction of a millisecond,
+and costs entries for geometries whose quads have been deleted. Nothing is wrong while they
+sit there — a departed geometry fails to join and contributes no row — but the index grows
+with everything ever interned, and **a restart does not clear it**, because it is rebuilt
+from the dictionary. Reclaiming needs an explicit step.
+
+The trap is that a purge cannot simply forget what it drops. Re-inserting a quad over an
+already-interned literal interns nothing, so the literal count does not move and the
+dictionary walk would never revisit it — the geometry would be back in the store and absent
+from the index, which is a silently missing answer rather than a slow one. Verified rather
+than assumed: a delete followed by a re-insert leaves the literal count exactly where it was.
+
+So a purge converts an index entry into a **watchlist** entry: a bare term id instead of a
+bounding box in a tree, checked on each subsequent refresh for whether it has been referenced
+again, and skipped entirely unless the store has grown. That leaves the reclaim worthwhile —
+a term id against a tree node — and costs one index probe per watchlist entry on refreshes
+that follow a write. While the watchlist is non-empty, staleness falls back to comparing quad
+counts, which is the heuristic this design otherwise avoids, confined to the one case that
+needs it.
+
+**No timer.** The endpoint exists so that whatever already schedules work on the host — cron,
+a systemd timer, a Kubernetes CronJob — can call it, exactly as `deploy/backup.sh` calls
+`/backup`. A server that schedules its own maintenance is a server that does something
+surprising at three in the morning. The guard is the same three-way shape as `/backup`:
+absent unless `--purge-role` is set, the principal must hold that role, and identity is
+untrusted by default.
+
+### The spatial index was gated on an unrelated flag
+
+Found while testing the purge endpoint, and older than any of this work. `refresh_spatial()`
+at startup sat inside `if config.reorder`, so a server started **without** `--reorder` — the
+default — had no spatial index at all until its first write, and every GeoSPARQL query until
+then did a full scan. Reordering and spatial routing are unrelated features that happened to
+be refreshed in the same place.
+
+Worth recording because of how it survived: every test that exercised routing supplied the
+index directly through `QueryOptions`, and every server test that wrote to the store built
+one as a side effect. The only configuration that showed it was the default one, queried
+before anything was written.
+
+### `geof:distance` only worked between two points
+
+Found by re-running the OGC GeoSPARQL example dataset through a live server, query by query,
+rather than through the test suite. `geof:distance(?point, ?polygon, uom:metre)` came back
+with **no binding at all** — not an error, not a zero, an unbound variable that `ORDER BY`
+then sorted to the top. Against that dataset it was every Polygon and every LineString in it:
+five of the ten geometries.
+
+The cause is upstream. `spargeo`'s implementation reads both operands as points and returns
+`None` for anything else, and an extension function returning `None` is indistinguishable
+from one whose arguments were the wrong type. GeoSPARQL defines the function for any two
+geometries, as the shortest distance between a point of one and a point of the other.
+
+It is replaced in `geo_ext`, registered after `spargeo`'s so it wins, in the same way the set
+operations already are. Intersecting geometries are zero apart; otherwise the minimum is
+taken over every vertex of each geometry against its closest point on the other, in both
+directions. That is exact rather than a sample: for two straight segments that do not cross
+the closest pair is always attained at an endpoint of one of them, and a polyline or polygon
+boundary is a union of segments.
+
+The closest pair is located in planar degrees and then measured with the same Haversine
+formula `spargeo` uses, so **a point-to-point call returns exactly the number it returned
+before** — asserted by a test, and confirmed against the four point-to-point distances the
+example dataset produces, which are unchanged to the last digit.
+
 ### What is missing, and where it goes
 
 These are **filter** functions. They evaluate over whatever bindings reach them, so
 `geof:sfWithin(?point, ?region)` scans every candidate geometry rather than probing an
 index. On a small dataset that is fine; on a national gazetteer it is not.
 
-The missing piece is an **R-tree over geometry literals**, and the design already has a slot
-for it: §5 reserves term tags `0x9`–`0xF` for "geometry handles" among others, so a geometry
-can carry an index handle in its id rather than needing a side table. Making the planner
-*route* to that index is §7 work — it is a cost-based decision like any other, and it needs
-the optimiser that P2 will build. Doing the index without the planner would leave something
-nothing knows how to use.
+The missing piece is an **R-tree over geometry literals**. §5 reserved term tags `0x9`–`0xF`
+for "geometry handles" so a geometry could carry an index handle in its id rather than needing
+a side table, and routing was said to be blocked on the P2 optimiser.
 
-So: functions now, index when there is a planner to use it, and a measurement before either
-is called fast.
+> **The index is built, in memory.** `holos_engine::spatial::SpatialIndex` is an `rstar`
+> R-tree over every geometry literal in a store, keyed by bounding box. `rstar` was already
+> in the tree through `geo`, so it cost no new dependency.
+>
+> **Measured**, per §17's own instruction not to call anything fast without one. A point
+> cloud over a 1000 × 1000 extent, probed with a 10 × 10 window — about 0.01% of it, the
+> shape of a "what is near here" query:
+>
+> | Geometries | Build | Scan | Probe | Speed-up |
+> |---:|---:|---:|---:|---:|
+> | 10,000 | 24.9 ms | 17.3 ms | 35.1 µs | **492×** |
+> | 50,000 | 99.1 ms | 75.0 ms | 20.3 µs | **3,692×** |
+> | 200,000 | 550.0 ms | 371.6 ms | 135.7 µs | **2,738×** |
+>
+> `cargo run --release -p holos-bench --bin spatial`. The benchmark asserts that the scan and
+> the probe find the *same* matches rather than reporting both and trusting the reader; a
+> faster answer that is a different answer is not an optimisation.
+>
+> Three things the numbers do not say. **Build is a real cost** — 550 ms at 200,000 — paid
+> once and not yet incremental, so an `INSERT` currently invalidates it. **The speed-up is
+> not monotonic** because the probe times are near the clock's resolution and the match counts
+> differ; the shape is what matters, not the third digit. And **candidates equal matches here
+> only because points have degenerate bounding boxes** — over polygons the tree proposes more
+> than it should and refinement discards the rest, which is the normal case.
+>
+> **Refinement is not optional.** A bounding box says a geometry *may* qualify, never that it
+> does. The exact predicate still runs on every candidate; the index only decides which are
+> worth testing.
+>
+> **Disjointness is deliberately not routed.** `sfDisjoint`, `ehDisjoint` and `rcc8dc` are
+> true of nearly everything *outside* a probe, so bounding-box overlap is the wrong filter and
+> would discard almost every correct answer. `spatial::can_filter` is that boundary, and it is
+> about correctness rather than cost.
+>
+> Still to do: routing the [`topology`] rewrite through it when an operand is a constant
+> region, incremental maintenance, and persisting handles in the reserved tag.
 
 ---
 

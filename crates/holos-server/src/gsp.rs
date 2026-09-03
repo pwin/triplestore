@@ -168,13 +168,11 @@ pub fn read(
     let mut writer = RdfSerializer::from_format(format).for_writer(Vec::new());
     for quad in quads {
         // A graph is served as triples: the graph name is the request, not the payload.
-        writer.serialize_triple(
-            oxrdf::TripleRef {
-                subject: quad.subject.as_ref(),
-                predicate: quad.predicate.as_ref(),
-                object: quad.object.as_ref(),
-            },
-        )?;
+        writer.serialize_triple(oxrdf::TripleRef {
+            subject: quad.subject.as_ref(),
+            predicate: quad.predicate.as_ref(),
+            object: quad.object.as_ref(),
+        })?;
     }
     Ok(writer.finish()?)
 }
@@ -193,13 +191,15 @@ pub fn clear(engine: &mut Engine, session: &mut Session, target: &Target) -> Res
         let view = engine.view(session);
         view.visible_quads(Some(&target.graph_name()))?
     };
-    let mut removed = 0;
-    for quad in quads {
-        if engine.remove(session, quad.as_ref())? {
-            removed += 1;
+    in_commit(engine, |engine| {
+        let mut removed = 0;
+        for quad in quads {
+            if engine.remove(session, quad.as_ref())? {
+                removed += 1;
+            }
         }
-    }
-    Ok(removed)
+        Ok(removed)
+    })
 }
 
 /// Splits a `multipart/form-data` body into its typed parts.
@@ -283,9 +283,7 @@ pub fn multipart_boundary(content_type: &str) -> Option<String> {
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Mints a name for a graph the client asked the store to create.
@@ -298,11 +296,7 @@ pub fn mint_graph_name(base: &str, path: &str) -> NamedNode {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    NamedNode::new_unchecked(format!(
-        "{}{}/{stamp:x}",
-        base.trim_end_matches('/'),
-        path
-    ))
+    NamedNode::new_unchecked(format!("{}{}/{stamp:x}", base.trim_end_matches('/'), path))
 }
 
 /// Removes a graph entirely: its quads *and* its entry in the catalogue.
@@ -316,13 +310,38 @@ pub fn mint_graph_name(base: &str, path: &str) -> NamedNode {
 ///
 /// Propagates policy refusals and storage failures.
 pub fn drop_graph(engine: &mut Engine, session: &mut Session, target: &Target) -> Result<u64> {
-    let removed = clear(engine, session, target)?;
-    if let Target::Named(name) = target {
-        engine
-            .store_mut()
-            .remove_named_graph(GraphNameRef::NamedNode(name.as_ref()))?;
+    // Emptying the graph and removing its name are two writes, and between them the graph is
+    // in exactly the existing-but-empty state this function exists to avoid.
+    in_commit(engine, |engine| {
+        let removed = clear(engine, session, target)?;
+        if let Target::Named(name) = target {
+            engine
+                .store_mut()
+                .remove_named_graph(GraphNameRef::NamedNode(name.as_ref()))?;
+        }
+        Ok(removed)
+    })
+}
+
+/// Runs `f` inside a commit scope, joining the caller's if one is already open.
+///
+/// Joining rather than nesting is what lets the HTTP handler wrap a whole `PUT` — a clear
+/// and one merge per uploaded document — in a single commit while each of those functions
+/// stays atomic when called on its own.
+fn in_commit<T>(engine: &mut Engine, f: impl FnOnce(&mut Engine) -> Result<T>) -> Result<T> {
+    let owned = !engine.store().in_scope();
+    if owned {
+        engine.store_mut().begin()?;
     }
-    Ok(removed)
+    let result = f(engine);
+    if owned {
+        if result.is_ok() {
+            engine.store_mut().commit()?;
+        } else {
+            engine.store_mut().rollback();
+        }
+    }
+    result
 }
 
 /// Parses a body and merges it into a graph, subject to policy.
@@ -343,7 +362,9 @@ pub fn merge(
     let graph = target.graph_name();
     let mut parser = oxrdfio::RdfParser::from_format(format);
     if let Some(base) = base_iri {
-        parser = parser.with_base_iri(base).map_err(|e| anyhow::anyhow!("{e}"))?;
+        parser = parser
+            .with_base_iri(base)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
 
     // Parsed in full before anything is written, so a body that fails to parse half way
@@ -359,13 +380,61 @@ pub fn merge(
         });
     }
 
-    let mut added = 0;
-    for quad in quads {
-        if engine.insert(session, quad.as_ref())? {
-            added += 1;
+    // Parsing in full above stops a malformed body leaving half a graph. It does not stop a
+    // *policy* refusal doing the same: the quads are legal RDF and the five hundredth is the
+    // one the principal may not write. The scope covers both.
+    in_commit(engine, |engine| {
+        let mut added = 0;
+        for quad in quads {
+            if engine.insert(session, quad.as_ref())? {
+                added += 1;
+            }
         }
-    }
-    Ok(added)
+        Ok(added)
+    })
+}
+
+/// Applies the body of a `PUT` or a `POST`, atomically.
+///
+/// `PUT` replaces and `POST` merges, and that difference is the whole distinction between
+/// the two verbs. It lives here rather than in the HTTP handler because the interesting part
+/// is not the verb, it is that **replacing is two operations and must not be observable, or
+/// interruptible, between them**.
+///
+/// A `PUT` clears the graph and then parses. So a body that turns out to be malformed, or a
+/// quad the principal may not write, used to leave the graph emptied and unreplaced — with
+/// the client holding a 400 telling it the request had failed. Deleting someone's data is
+/// not an acceptable outcome of a request that failed. The scope makes the clear and the
+/// merges land together or not at all.
+///
+/// Several documents because a graph submitted as a file upload arrives as
+/// `multipart/form-data` with one per part. A `PUT` clears once, not once per part, or the
+/// parts would replace one another instead of accumulating.
+///
+/// # Errors
+///
+/// Propagates parse failures, policy refusals and storage failures — having left the graph
+/// as it was.
+pub fn write(
+    engine: &mut Engine,
+    session: &mut Session,
+    target: &Target,
+    documents: &[(Vec<u8>, RdfFormat)],
+    replace: bool,
+) -> Result<u64> {
+    in_commit(engine, |engine| {
+        if replace {
+            clear(engine, session, target)?;
+        }
+        let mut added = 0;
+        for (content, format) in documents {
+            added += merge(engine, session, target, content, *format, None)?;
+        }
+        // Registers the graph, so a `PUT` of an empty body still creates one and a later
+        // `DELETE` can answer 404 rather than "it was never here".
+        create(engine, target)?;
+        Ok(added)
+    })
 }
 
 /// Ensures a named graph exists even with nothing in it.
@@ -397,7 +466,9 @@ mod tests {
     fn a_graph_parameter_names_a_named_graph() {
         assert_eq!(
             target(&params(&[("graph", "http://example.org/g")]), "/gsp", None),
-            Ok(Target::Named(NamedNode::new_unchecked("http://example.org/g")))
+            Ok(Target::Named(NamedNode::new_unchecked(
+                "http://example.org/g"
+            )))
         );
     }
 
@@ -424,7 +495,10 @@ mod tests {
 
     #[test]
     fn neither_is_refused_unless_direct_identification_is_configured() {
-        assert_eq!(target(&params(&[]), "/gsp/x", None), Err(TargetError::Missing));
+        assert_eq!(
+            target(&params(&[]), "/gsp/x", None),
+            Err(TargetError::Missing)
+        );
         assert_eq!(
             target(&params(&[]), "/gsp/x", Some("http://data.example.org")),
             Ok(Target::Named(NamedNode::new_unchecked(
@@ -443,7 +517,9 @@ mod tests {
                 "/gsp/x",
                 Some("http://data.example.org")
             ),
-            Ok(Target::Named(NamedNode::new_unchecked("http://elsewhere/g")))
+            Ok(Target::Named(NamedNode::new_unchecked(
+                "http://elsewhere/g"
+            )))
         );
     }
 

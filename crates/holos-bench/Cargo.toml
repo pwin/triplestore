@@ -17,12 +17,17 @@ holos-core.workspace = true
 holos-store.workspace = true
 holos-security.workspace = true
 holos-engine.workspace = true
+# The spatial benchmark builds probe geometries and compares against a scan, so it needs
+# the geometry types and a set for de-duplicating shared terms.
+geo.workspace = true
+rustc-hash.workspace = true
 holos-shacl.workspace = true
 holos-holon.workspace = true
 holos-stats.workspace = true
 oxrdf.workspace = true
 oxrdfio.workspace = true
 spareval.workspace = true
+spargebra.workspace = true
 anyhow.workspace = true
 
 [features]

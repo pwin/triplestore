@@ -312,11 +312,30 @@ def test_concatenated_gzip_members_all_load(tmp_path):
 # --------------------------------------------------------------------------- geospatial
 
 
-def test_geosparql_function_list_includes_the_two_we_added():
-    fns = holosdb.geosparql_functions()
-    assert len(fns) == 45
-    assert any(f.endswith("/buffer") for f in fns)
-    assert any(f.endswith("/boundary") for f in fns)
+def test_geosparql_functions_include_the_ones_this_project_adds():
+    # Deliberately not a count. This asserted `len(fns) == 45`, which went stale the moment
+    # the set operations were wrapped and again when geof:distance was replaced -- and it
+    # went stale silently, because nothing runs the wheel tests until a release. A count is
+    # a test of arithmetic; what matters is that the functions are actually there.
+    fns = set(holosdb.geosparql_functions())
+    geof = "http://www.opengis.net/def/function/geosparql/"
+
+    # Added by this project because spargeo does not carry them.
+    for name in ["buffer", "boundary"]:
+        assert geof + name in fns, f"geof:{name} is missing"
+
+    # Replaced by this project, so they must still be registered exactly once each.
+    for name in ["union", "intersection", "difference", "symDifference", "distance"]:
+        assert geof + name in fns, f"geof:{name} is missing"
+
+    # And the ones that come from spargeo, so a wiring mistake that dropped the whole
+    # upstream set would be caught rather than looking like a shorter list. Taken from the
+    # registry rather than from memory: geo:asWKT is a *property*, not a function, and
+    # asserting it here failed in CI for exactly that reason.
+    for name in ["sfWithin", "sfIntersects", "envelope", "asGeoJSON", "relate"]:
+        assert geof + name in fns, f"geof:{name} is missing"
+
+    assert len(fns) == len(holosdb.geosparql_functions()), "the list contains duplicates"
 
 
 def test_buffer_and_boundary_evaluate():

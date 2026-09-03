@@ -41,7 +41,12 @@ fn engine() -> Engine {
     engine
 }
 
-fn subjects(engine: &Engine, session: &Session, sparql: &str, options: &QueryOptions) -> Vec<String> {
+fn subjects(
+    engine: &Engine,
+    session: &Session,
+    sparql: &str,
+    options: &QueryOptions,
+) -> Vec<String> {
     let view = engine.view(session);
     let (results, _) = Engine::query_with(&view, sparql, options).expect("query");
     let mut out = match results {
@@ -139,12 +144,20 @@ fn the_union_default_graph_is_the_union_of_the_named_graphs() {
 fn a_variable_can_be_bound_without_touching_the_query_text() {
     let engine = engine();
     let session = Session::unrestricted(engine.store()).expect("session");
-    let options = QueryOptions::new().with_substitution(
-        Variable::new_unchecked("s"),
-        Term::NamedNode(ex("default")),
-    );
+    let options = QueryOptions::new()
+        .with_substitution(Variable::new_unchecked("s"), Term::NamedNode(ex("default")));
     let found = subjects(&engine, &session, "SELECT ?s WHERE { ?s ?p ?o }", &options);
     assert_eq!(found, vec![format!("<{EX}default>")]);
+
+    // The same query bound to a subject that is not there. Without this, the assertion
+    // above passes whether the substitution was applied or silently dropped — `ex:default`
+    // is the only subject in the default graph, so ignoring the binding gives the same
+    // answer. That is exactly how a fast path that did not model substitution went
+    // unnoticed here while failing `substitution_cannot_inject_sparql` next door.
+    let absent = QueryOptions::new()
+        .with_substitution(Variable::new_unchecked("s"), Term::NamedNode(ex("absent")));
+    let found = subjects(&engine, &session, "SELECT ?s WHERE { ?s ?p ?o }", &absent);
+    assert!(found.is_empty(), "no triple has ex:absent as its subject");
 }
 
 #[test]
@@ -160,8 +173,8 @@ fn substitution_cannot_inject_sparql() {
     let options = QueryOptions::new().with_substitution(Variable::new_unchecked("o"), hostile);
 
     let view = engine.view(&session);
-    let (results, _) = Engine::query_with(&view, "SELECT ?s ?o WHERE { ?s ?p ?o }", &options)
-        .expect("query");
+    let (results, _) =
+        Engine::query_with(&view, "SELECT ?s ?o WHERE { ?s ?p ?o }", &options).expect("query");
     let n = match results {
         QueryResults::Solutions(iter) => iter.count(),
         _ => panic!("expected solutions"),
@@ -180,9 +193,8 @@ fn a_plan_comes_back_when_asked_for() {
     let session = Session::unrestricted(engine.store()).expect("session");
     let view = engine.view(&session);
 
-    let (_, none) =
-        Engine::query_with(&view, "SELECT ?s WHERE { ?s ?p ?o }", &QueryOptions::new())
-            .expect("query");
+    let (_, none) = Engine::query_with(&view, "SELECT ?s WHERE { ?s ?p ?o }", &QueryOptions::new())
+        .expect("query");
     assert!(none.is_none(), "no plan unless it was asked for");
 
     let (results, plan) = Engine::query_with(
@@ -241,22 +253,18 @@ fn a_long_running_query_is_stopped() {
     let options = QueryOptions::new().with_timeout(Duration::from_millis(60));
 
     let started = std::time::Instant::now();
-    let outcome = Engine::query_with(
-        &view,
-        "SELECT * WHERE { ?a ?b ?c . ?d ?e ?f }",
-        &options,
-    )
-    .and_then(|(results, _)| match results {
-        QueryResults::Solutions(iter) => {
-            let mut n = 0_u64;
-            for solution in iter {
-                solution?;
-                n += 1;
+    let outcome = Engine::query_with(&view, "SELECT * WHERE { ?a ?b ?c . ?d ?e ?f }", &options)
+        .and_then(|(results, _)| match results {
+            QueryResults::Solutions(iter) => {
+                let mut n = 0_u64;
+                for solution in iter {
+                    solution?;
+                    n += 1;
+                }
+                Ok(n)
             }
-            Ok(n)
-        }
-        _ => Ok(0),
-    });
+            _ => Ok(0),
+        });
     let elapsed = started.elapsed();
 
     assert!(

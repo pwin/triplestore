@@ -18,6 +18,8 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
+pub mod entailment;
+pub mod json;
 pub mod manifest;
 pub mod protocol;
 pub mod resultset;
@@ -150,6 +152,13 @@ pub fn run_rdf_test(test: &TestEntry) -> Outcome {
 /// Runs one entry from an RDF syntax or evaluation suite against a chosen tier.
 #[must_use]
 pub fn run_rdf_test_on(test: &TestEntry, tier: Tier) -> Outcome {
+    // An entailment test asks whether a premise entails a conclusion. Running it through
+    // the round-trip below compares a premise against a conclusion as though the second were
+    // the expected parse of the first, which is a different question with a predictable
+    // answer, and reports the mismatch as an upstream parser fault.
+    if entailment::handles(test) {
+        return entailment::run(test);
+    }
     let kind = local_name(&test.kind);
     let Some(action) = test.action.as_ref() else {
         return Outcome::skip("no mf:action");
@@ -222,14 +231,28 @@ fn compare_datasets(expected: &Dataset, actual: &Dataset) -> std::result::Result
     if a == b {
         return Ok(());
     }
-    let missing: Vec<_> = a.iter().filter(|q| !b.contains(*q)).take(2).collect();
-    let extra: Vec<_> = b.iter().filter(|q| !a.contains(*q)).take(2).collect();
+    let mut missing: Vec<String> = a
+        .iter()
+        .filter(|q| !b.contains(*q))
+        .map(|q| q.to_string())
+        .collect();
+    let mut extra: Vec<String> = b
+        .iter()
+        .filter(|q| !a.contains(*q))
+        .map(|q| q.to_string())
+        .collect();
+    // Sorted before truncating: which examples get shown must not depend on hash iteration
+    // order. The recorded `.failures` baselines carry this text, so a nondeterministic sample
+    // makes every re-baseline churn, and a ratchet whose diff is always noise is one nobody
+    // reads.
+    missing.sort_unstable();
+    extra.sort_unstable();
+    missing.truncate(2);
+    extra.truncate(2);
     Err(format!(
-        "{} expected vs {} actual quads; missing {:?}; unexpected {:?}",
+        "{} expected vs {} actual quads; missing {missing:?}; unexpected {extra:?}",
         a.len(),
         b.len(),
-        missing.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        extra.iter().map(ToString::to_string).collect::<Vec<_>>()
     ))
 }
 
@@ -266,12 +289,18 @@ pub fn run_sparql_test(test: &TestEntry) -> Outcome {
             Err(_) => Outcome::Passed,
         },
 
-        // The protocol suites need an HTTP server driven by the harness (L6); entailment
-        // needs a reasoner (L4). Both are roadmap items.
-        k @ ("ProtocolTest"
-        | "GraphStoreProtocolTest"
-        | "ServiceDescriptionTest"
-        | "CSVResultFormatTest") => Outcome::skip(format!("{k}: not implemented yet")),
+        // The protocol tests are run, but by the suites written for them —
+        // `sparql_protocol` and `graph_store_protocol`, both perfect — because they need an
+        // HTTP conversation rather than a query. The counts match exactly: 34 and 13. They
+        // appear here because `manifest-all.ttl` includes every sub-manifest, and skipping
+        // them says *where they ran*, not that they did not.
+        k @ ("ProtocolTest" | "GraphStoreProtocolTest") => Outcome::skip(format!(
+            "{k}: run by the dedicated protocol suite, which this manifest includes"
+        )),
+        // These two are genuinely not implemented.
+        k @ ("ServiceDescriptionTest" | "CSVResultFormatTest") => {
+            Outcome::skip(format!("{k}: not implemented"))
+        }
         other => Outcome::skip(format!("unhandled test type {other}")),
     }
 }
@@ -343,6 +372,48 @@ fn run_update_evaluation(test: &TestEntry) -> Outcome {
     compare_stores(&engine, &expected)
 }
 
+/// An engine's whole contents as a dataset, for comparison up to isomorphism.
+fn as_dataset(engine: &holos_engine::Engine) -> Result<Dataset> {
+    let store = engine.store();
+    let mut out = Dataset::new();
+    for quad in store.quads_for_pattern(None, None, None, holos_store::GraphFilter::Any) {
+        out.insert(&store.decode_quad(quad?)?);
+    }
+    Ok(out)
+}
+
+/// Loads the graphs a query's `FROM` and `FROM NAMED` clauses name.
+///
+/// Both go in as *named* graphs under their own IRI, which lets the evaluator's own dataset
+/// handling do the rest: `FROM` merges them into the active default graph and `FROM NAMED`
+/// leaves them addressable, and neither is this harness's decision to make.
+///
+/// A clause naming something that is not a readable file is left alone rather than failing.
+/// A query may name a graph the store already holds, and the federated tests name endpoints.
+fn load_dataset_clauses(engine: &mut holos_engine::Engine, query: &spargebra::Query) -> Result<()> {
+    let dataset = match query {
+        spargebra::Query::Select { dataset, .. }
+        | spargebra::Query::Construct { dataset, .. }
+        | spargebra::Query::Describe { dataset, .. }
+        | spargebra::Query::Ask { dataset, .. } => dataset.as_ref(),
+    };
+    let Some(dataset) = dataset else {
+        return Ok(());
+    };
+    let named = dataset.named.iter().flatten();
+    for iri in dataset.default.iter().chain(named) {
+        let Some(path) = manifest::file_url_to_path(iri.as_str()) else {
+            continue;
+        };
+        if !path.is_file() {
+            continue;
+        }
+        let graph = GraphName::from(iri.clone());
+        load(engine, &path, iri.as_str(), Some(graph))?;
+    }
+    Ok(())
+}
+
 /// Loads a default graph and a set of named graphs into an engine.
 fn load_dataset(
     engine: &mut holos_engine::Engine,
@@ -389,7 +460,8 @@ fn compare_stores(actual: &holos_engine::Engine, expected: &holos_engine::Engine
         Ok(out)
     };
 
-    let (actual, expected) = match (dump(actual), dump(expected)) {
+    let (actual_engine, expected_engine) = (actual, expected);
+    let (actual, expected) = match (dump(actual_engine), dump(expected_engine)) {
         (Ok(a), Ok(e)) => (a, e),
         (Err(e), _) | (_, Err(e)) => return Outcome::fail(format!("reading a dataset: {e}")),
     };
@@ -398,8 +470,28 @@ fn compare_stores(actual: &holos_engine::Engine, expected: &holos_engine::Engine
         return Outcome::Passed;
     }
 
-    let missing: Vec<&String> = expected.difference(&actual).take(3).collect();
-    let extra: Vec<&String> = actual.difference(&expected).take(3).collect();
+    // Then up to blank-node isomorphism. An update that creates a blank node gets whichever
+    // label the store hands out, so comparing labels makes a correct result look wrong — a
+    // limitation this harness used to admit in its skip text rather than fix.
+    if let (Ok(a), Ok(e)) = (as_dataset(actual_engine), as_dataset(expected_engine)) {
+        if compare_datasets(&e, &a).is_ok() {
+            return Outcome::Passed;
+        }
+    }
+
+    // The examples quoted have to be the *sorted* prefix, not whichever the set reached
+    // first: the recorded `.failures` baselines carry this text, so a sample that moves makes
+    // every re-baseline churn, and a ratchet whose diff is always noise is one nobody reads.
+    //
+    // Here that comes from `dump` returning a `BTreeSet`, which is ordered already — the sort
+    // below is a no-op today and is kept only so the property survives a change of container.
+    // The two sibling comparisons build from unordered sets and genuinely need theirs.
+    let mut missing: Vec<&String> = expected.difference(&actual).collect();
+    let mut extra: Vec<&String> = actual.difference(&expected).collect();
+    missing.sort_unstable();
+    extra.sort_unstable();
+    missing.truncate(3);
+    extra.truncate(3);
 
     if (missing.iter().any(|q| q.contains("_:")) || extra.iter().any(|q| q.contains("_:")))
         && missing.len() == extra.len()
@@ -436,11 +528,14 @@ fn run_query_evaluation(test: &TestEntry) -> Outcome {
     let Some(result_path) = test.result.as_ref() else {
         return Outcome::skip("no mf:result");
     };
-    if test.needs_entailment {
-        // The answer depends on RDFS or OWL entailment. L4 (DESIGN.md §8) materialises
-        // those through the rule engine; until it exists these cannot pass, and counting
-        // them as failures would hide the ones that are actually broken.
-        return Outcome::skip("needs an entailment regime: L4 is not built");
+    // A test that names an entailment regime is answered against the *entailed* graph, not
+    // the asserted one. RDFS is materialisable here; OWL and RIF are not, and are skipped
+    // with the regime named rather than under one word that covers both cases.
+    if test.needs_entailment() && !test.rdfs_entailment_suffices() {
+        return Outcome::skip(format!(
+            "needs an entailment regime this engine does not implement: {}",
+            test.entailment_regimes.join(", ")
+        ));
     }
     let query = match read_and_parse_query(test) {
         Ok(q) => q,
@@ -459,6 +554,14 @@ fn run_query_evaluation(test: &TestEntry) -> Outcome {
             return Outcome::fail(format!("loading graph data: {e}"));
         }
     }
+    // `FROM <g>` and `FROM NAMED <g>` name graphs the *query* asks for, and in the dataset
+    // suite that is all the test supplies — the action carries a query and nothing else, and
+    // the IRIs resolve to files beside it. Without loading them the query runs against an
+    // empty dataset and returns nothing, which the differential rig then files as an
+    // upstream fault because the reference evaluator, given the same nothing, agrees.
+    if let Err(e) = load_dataset_clauses(&mut engine, &query) {
+        return Outcome::fail(format!("loading a FROM clause: {e}"));
+    }
 
     // The federated suite names each endpoint with `qt:serviceData` and supplies a local
     // file for it, so `SERVICE` is exercised without a live endpoint anywhere.
@@ -476,10 +579,26 @@ fn run_query_evaluation(test: &TestEntry) -> Outcome {
         }
     }
 
-    let session = match Session::unrestricted(engine.store()) {
+    let mut session = match Session::unrestricted(engine.store()) {
         Ok(s) => s,
         Err(e) => return Outcome::fail(format!("opening session: {e}")),
     };
+
+    // Materialised into the *default* graph rather than beside it. Under an entailment
+    // regime the basic graph pattern is matched against the entailed graph, so the closure
+    // has to be the graph the query reads; a second graph next to it would be invisible to
+    // a query with no `GRAPH` clause, which is every query in this suite.
+    if test.needs_entailment() {
+        if let Err(e) = holos_engine::entailment::materialise(
+            &mut engine,
+            &mut session,
+            None,
+            holos_engine::entailment::DEFAULT_BUDGET,
+        ) {
+            return Outcome::fail(format!("materialising the RDFS closure: {e}"));
+        }
+    }
+
     let view = engine.view(&session);
     let actual = match Engine::query_prepared_with_services(&view, &query, services) {
         Ok(r) => r,
@@ -487,7 +606,11 @@ fn run_query_evaluation(test: &TestEntry) -> Outcome {
     };
 
     let ordered = query.to_string().to_uppercase().contains("ORDER BY");
-    match compare_results(actual, result_path, ordered, &view) {
+    let shape = Shape {
+        ordered,
+        lax_cardinality: test.lax_cardinality,
+    };
+    match compare_results(actual, result_path, shape, &view) {
         Ok(()) => Outcome::Passed,
         Err(e) if e == UNREADABLE_RESULT_FORMAT => Outcome::Skipped(e),
         Err(e) => attribute(test, &query, result_path, ordered, e),
@@ -512,10 +635,21 @@ fn attribute(
     ordered: bool,
     failure: String,
 ) -> Outcome {
+    // The rig compares two *evaluators* over the same data, which is only meaningful when
+    // both see the same data. Under an entailment regime they do not: HOLOS is answering
+    // against a materialised closure and the reference against the assertions alone, so
+    // they agree exactly when the closure added nothing — and reading that as "upstream"
+    // would file this engine's own missing inferences under someone else's name.
+    if test.needs_entailment() {
+        return Outcome::Failed(failure);
+    }
     let Ok(dataset) = reference_dataset(test) else {
         return Outcome::Failed(failure);
     };
-    let Ok(oracle) = spareval::QueryEvaluator::new().prepare(query).execute(&dataset) else {
+    let Ok(oracle) = spareval::QueryEvaluator::new()
+        .prepare(query)
+        .execute(&dataset)
+    else {
         return Outcome::Failed(failure);
     };
     // Re-run HOLOS so both answers come from a fresh evaluation.
@@ -583,24 +717,59 @@ fn compare_two(
 ) -> std::result::Result<(), String> {
     match (a, b) {
         (QueryResults::Boolean(x), QueryResults::Boolean(y)) if x == y => Ok(()),
-        (QueryResults::Boolean(x), QueryResults::Boolean(y)) => {
-            Err(format!("boolean {x} vs {y}"))
-        }
+        (QueryResults::Boolean(x), QueryResults::Boolean(y)) => Err(format!("boolean {x} vs {y}")),
         (QueryResults::Solutions(x), QueryResults::Solutions(y)) => {
-            let xs: Vec<_> = x.collect::<std::result::Result<_, _>>().map_err(|e| e.to_string())?;
-            let ys: Vec<_> = y.collect::<std::result::Result<_, _>>().map_err(|e| e.to_string())?;
-            compare_solutions(&ys, &xs, ordered)
+            // Collected before either is inspected, because *failing the same way* is the
+            // most important form of agreement this rig can observe. An evaluator that
+            // raises the same error over both storages has told us the error is its own —
+            // propagating the first one instead reported a divergence between two runs that
+            // did the identical thing, and filed a shared limitation as a HOLOS defect.
+            let xs = x.collect::<std::result::Result<Vec<_>, _>>();
+            let ys = y.collect::<std::result::Result<Vec<_>, _>>();
+            let (xs, ys) = match (xs, ys) {
+                (Ok(xs), Ok(ys)) => (xs, ys),
+                (Err(a), Err(b)) if a.to_string() == b.to_string() => return Ok(()),
+                (Err(a), Err(b)) => {
+                    return Err(format!("different errors: {a} vs {b}"));
+                }
+                (Err(a), Ok(_)) => {
+                    return Err(format!("HOLOS errored and the reference did not: {a}"))
+                }
+                (Ok(_), Err(b)) => {
+                    return Err(format!("the reference errored and HOLOS did not: {b}"))
+                }
+            };
+            compare_solutions(
+                &ys,
+                &xs,
+                Shape {
+                    ordered,
+                    // The rig compares two live results, so a difference in multiplicity
+                    // between them is a real difference whatever the test asserts.
+                    lax_cardinality: false,
+                },
+            )
         }
         (QueryResults::Graph(x), QueryResults::Graph(y)) => {
             let mut gx = Dataset::new();
             for t in x {
                 let t = t.map_err(|e| e.to_string())?;
-                gx.insert(&Quad { subject: t.subject, predicate: t.predicate, object: t.object, graph_name: GraphName::DefaultGraph });
+                gx.insert(&Quad {
+                    subject: t.subject,
+                    predicate: t.predicate,
+                    object: t.object,
+                    graph_name: GraphName::DefaultGraph,
+                });
             }
             let mut gy = Dataset::new();
             for t in y {
                 let t = t.map_err(|e| e.to_string())?;
-                gy.insert(&Quad { subject: t.subject, predicate: t.predicate, object: t.object, graph_name: GraphName::DefaultGraph });
+                gy.insert(&Quad {
+                    subject: t.subject,
+                    predicate: t.predicate,
+                    object: t.object,
+                    graph_name: GraphName::DefaultGraph,
+                });
             }
             compare_datasets(&gy, &gx)
         }
@@ -619,10 +788,23 @@ fn load(engine: &mut Engine, path: &Path, base: &str, graph: Option<GraphName>) 
     Ok(())
 }
 
+/// How strictly a result is to be compared.
+///
+/// Two independent axes, and both come from the test rather than from the query. `ordered`
+/// is whether the sequence is part of the answer; `lax_cardinality` is whether the
+/// *multiplicities* are, which `mf:resultCardinality mf:LaxCardinality` says they are not.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Shape {
+    /// The query has an `ORDER BY`, so the sequence is part of the answer.
+    pub ordered: bool,
+    /// `mf:LaxCardinality`: how many times a solution appears is not asserted.
+    pub lax_cardinality: bool,
+}
+
 fn compare_results(
     actual: QueryResults<'_>,
     expected_path: &Path,
-    ordered: bool,
+    shape: Shape,
     view: &DatasetView<'_>,
 ) -> std::result::Result<(), String> {
     match actual {
@@ -639,7 +821,7 @@ fn compare_results(
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| format!("reading solutions: {e}"))?;
             let expected = read_expected_solutions(expected_path)?;
-            compare_solutions(&expected, &actual, ordered)
+            compare_solutions(&expected, &actual, shape)
         }
         QueryResults::Graph(triples) => {
             let mut got = Dataset::new();
@@ -652,11 +834,9 @@ fn compare_results(
                     graph_name: GraphName::DefaultGraph,
                 });
             }
-            let expected = manifest::parse_dataset(
-                expected_path,
-                &manifest::path_to_file_url(expected_path),
-            )
-            .map_err(|e| format!("upstream: expected graph did not parse: {e}"))?;
+            let expected =
+                manifest::parse_dataset(expected_path, &manifest::path_to_file_url(expected_path))
+                    .map_err(|e| format!("upstream: expected graph did not parse: {e}"))?;
             let _ = view; // graph results carry no view-specific state
             compare_datasets(&expected, &got)
         }
@@ -723,14 +903,19 @@ pub fn ratchet_named(name: &str, failed: &[(String, String)]) {
         "{name}: {} test(s) on the known-failure list now pass:\n  {}\n\nRe-baseline with \
          HOLOS_UPDATE_CONFORMANCE=1 — a stale list is a list nobody trusts.",
         fixed.len(),
-        fixed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n  ")
+        fixed
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
     );
 }
 
 /// Marker for the one result encoding the harness cannot read: results serialised as RDF
 /// (the old DAWG `rs:ResultSet` vocabulary). Reported as a skip, because it says nothing
 /// about the engine.
-const UNREADABLE_RESULT_FORMAT: &str = "expected results are encoded as RDF, which the harness does not read";
+const UNREADABLE_RESULT_FORMAT: &str =
+    "expected results are encoded as RDF, which the harness does not read";
 
 fn results_format(path: &Path) -> Option<QueryResultsFormat> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
@@ -779,9 +964,9 @@ fn read_expected_solutions(path: &Path) -> std::result::Result<Vec<QuerySolution
         .for_reader(reader)
         .map_err(|e| e.to_string())?
     {
-        ReaderQueryResultsParserOutput::Solutions(iter) => iter
-            .map(|s| s.map_err(|e| e.to_string()))
-            .collect(),
+        ReaderQueryResultsParserOutput::Solutions(iter) => {
+            iter.map(|s| s.map_err(|e| e.to_string())).collect()
+        }
         ReaderQueryResultsParserOutput::Boolean(_) => {
             Err("expected solutions, file holds a boolean".to_owned())
         }
@@ -798,8 +983,28 @@ fn read_expected_solutions(path: &Path) -> std::result::Result<Vec<QuerySolution
 fn compare_solutions(
     expected: &[QuerySolution],
     actual: &[QuerySolution],
-    ordered: bool,
+    shape: Shape,
 ) -> std::result::Result<(), String> {
+    // Under lax cardinality the answer is the *set*, so both sides are deduplicated before
+    // anything is counted. `REDUCED` may return any number of copies between one per
+    // distinct solution and the whole multiset, and a fixture can only show one of those —
+    // so comparing multiplicities against it fails an engine that chose differently and was
+    // right to.
+    if shape.lax_cardinality {
+        let expected = distinct(expected);
+        let actual = distinct(actual);
+        if expected.len() != actual.len() {
+            return Err(format!(
+                "expected {} distinct solutions, got {}",
+                expected.len(),
+                actual.len()
+            ));
+        }
+        return compare_datasets(
+            &solutions_as_dataset(expected),
+            &solutions_as_dataset(actual),
+        );
+    }
     if expected.len() != actual.len() {
         return Err(format!(
             "expected {} solutions, got {}",
@@ -807,7 +1012,7 @@ fn compare_solutions(
             actual.len()
         ));
     }
-    if ordered && !has_blank_nodes(expected) && !has_blank_nodes(actual) {
+    if shape.ordered && !has_blank_nodes(expected) && !has_blank_nodes(actual) {
         for (i, (e, a)) in expected.iter().zip(actual).enumerate() {
             if bindings(e) != bindings(a) {
                 return Err(format!(
@@ -819,7 +1024,23 @@ fn compare_solutions(
         }
         return Ok(());
     }
-    compare_datasets(&solutions_as_dataset(expected), &solutions_as_dataset(actual))
+    compare_datasets(
+        &solutions_as_dataset(expected),
+        &solutions_as_dataset(actual),
+    )
+}
+
+/// The distinct solutions, keeping the first of each.
+///
+/// Keyed on the rendered bindings rather than on `QuerySolution`, which is not `Hash`. Two
+/// solutions binding the same variables to the same terms render identically, which is what
+/// "distinct" means here.
+fn distinct(solutions: &[QuerySolution]) -> Vec<&QuerySolution> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    solutions
+        .iter()
+        .filter(|s| seen.insert(format!("{:?}", render(s))))
+        .collect()
 }
 
 fn has_blank_nodes(solutions: &[QuerySolution]) -> bool {
@@ -842,7 +1063,7 @@ fn render(solution: &QuerySolution) -> Vec<String> {
         .collect()
 }
 
-fn solutions_as_dataset(solutions: &[QuerySolution]) -> Dataset {
+fn solutions_as_dataset<'a>(solutions: impl IntoIterator<Item = &'a QuerySolution>) -> Dataset {
     let root = NamedNode::new_unchecked("urn:holos:conformance:results");
     let has_solution = NamedNode::new_unchecked("urn:holos:conformance:solution");
     let mut dataset = Dataset::new();
@@ -869,7 +1090,7 @@ fn solutions_as_dataset(solutions: &[QuerySolution]) -> Dataset {
     dataset
 }
 
-fn local_name(iri: &str) -> &str {
+pub(crate) fn local_name(iri: &str) -> &str {
     iri.rsplit(['#', '/']).next().unwrap_or(iri)
 }
 
@@ -877,4 +1098,103 @@ fn local_name(iri: &str) -> &str {
 #[must_use]
 pub fn rdf_format(path: &Path) -> Option<RdfFormat> {
     manifest::format_for(path)
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+    use oxrdf::{Dataset, NamedNode, Quad};
+
+    /// The recorded `.failures` baselines quote a sample of the differing quads, and the
+    /// sample used to be whichever ones hash iteration reached first. Every re-baseline then
+    /// rewrote files where nothing had changed — on one run six baselines moved and only one
+    /// had actually changed state — so the ratchet's diff was noise and hid real movement.
+    ///
+    /// The fix was to sort before truncating. It was verified by hand, by re-baselining twice
+    /// and diffing, which is exactly the kind of verification that does not survive contact
+    /// with a later edit.
+    fn quad(n: u32) -> Quad {
+        Quad {
+            subject: NamedNode::new_unchecked(format!("http://example.com/s{n:02}")).into(),
+            predicate: NamedNode::new_unchecked("http://example.com/p"),
+            object: NamedNode::new_unchecked(format!("http://example.com/o{n:02}")).into(),
+            graph_name: oxrdf::GraphName::DefaultGraph,
+        }
+    }
+
+    #[test]
+    fn the_quoted_sample_is_the_sorted_prefix_not_whatever_came_first() {
+        // Ten differing quads, so the two that get quoted are a choice rather than the whole
+        // set — which is the situation the sample has to be deterministic in.
+        let expected = Dataset::new();
+        let mut actual = Dataset::new();
+        for n in (0..10).rev() {
+            actual.insert(&quad(n));
+        }
+        let message = compare_datasets(&expected, &actual).expect_err("the datasets differ");
+
+        assert!(
+            message.contains("s00") && message.contains("s01"),
+            "the two lexicographically smallest should be quoted, got: {message}"
+        );
+        assert!(
+            !message.contains("s09"),
+            "and nothing later than them, got: {message}"
+        );
+        assert!(
+            message.find("s00") < message.find("s01"),
+            "quoted in sorted order, got: {message}"
+        );
+    }
+
+    /// Insertion order must not reach the output either. Two datasets holding the same quads
+    /// built in opposite orders have to produce the same text, because a baseline that moves
+    /// when nothing did is a baseline nobody reads.
+    #[test]
+    fn insertion_order_does_not_reach_the_message() {
+        let expected = Dataset::new();
+        let mut forwards = Dataset::new();
+        let mut backwards = Dataset::new();
+        for n in 0..10 {
+            forwards.insert(&quad(n));
+        }
+        for n in (0..10).rev() {
+            backwards.insert(&quad(n));
+        }
+        assert_eq!(
+            compare_datasets(&expected, &forwards).expect_err("differ"),
+            compare_datasets(&expected, &backwards).expect_err("differ"),
+        );
+    }
+
+    /// `compare_stores` is the third place the same sample is built.
+    ///
+    /// Unlike the other two it was never actually broken: it dumps into a `BTreeSet`, which
+    /// is ordered, so its prefix was already the sorted one and its explicit sort is a no-op.
+    /// The test pins the *observable* property rather than the mechanism, which is what makes
+    /// it worth having — it does not fail if the redundant sort goes, and it does fail if the
+    /// container is ever swapped for an unordered one, which is how this would really break.
+    #[test]
+    fn the_store_comparison_quotes_a_sorted_prefix_too() {
+        let mut actual = holos_engine::Engine::new();
+        let expected = holos_engine::Engine::new();
+        for n in (0..10).rev() {
+            actual.store_mut().insert(quad(n).as_ref()).expect("insert");
+        }
+        let Outcome::Failed(message) = compare_stores(&actual, &expected) else {
+            panic!("the stores differ, so this must fail");
+        };
+        for n in 0..3 {
+            assert!(
+                message.contains(&format!("s{n:02}")),
+                "s{n:02} is in the three smallest and should be quoted, got: {message}"
+            );
+        }
+        for n in 3..10 {
+            assert!(
+                !message.contains(&format!("s{n:02}")),
+                "s{n:02} is outside the three smallest, got: {message}"
+            );
+        }
+    }
 }

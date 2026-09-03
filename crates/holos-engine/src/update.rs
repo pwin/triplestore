@@ -16,27 +16,35 @@
 //! # Atomicity, honestly described
 //!
 //! An update is a sequence of operations, and SPARQL requires each to see the effects of
-//! the ones before it. So they are applied in order — and every change that actually
-//! altered the store is recorded in a [`Journal`]. If any operation fails, the journal is
-//! replayed backwards and the store is left as it was.
+//! the ones before it. So they are applied in order, inside one [`Store`](holos_store::Store) commit scope: on
+//! a persistent backend the writes accumulate into a single batch and are written once, and
+//! every read the update itself makes is answered through that batch. If any operation
+//! fails the scope is abandoned, and on a persistent backend that means nothing was ever
+//! written.
 //!
-//! This gives **failure atomicity**: an update either completes or leaves nothing behind.
-//! It does **not** give isolation. A concurrent reader holding its own view can observe an
-//! intermediate state, and a reader that looks during a rollback can see the store
-//! mid-unwind. Real isolation needs the MVCC in `DESIGN.md` §6.1, which is not built. The
-//! `Engine` is behind an `RwLock` in both the server and the Python binding, so in those
-//! two deployments a writer excludes readers for the update's duration and the distinction
-//! does not arise; a caller driving the `Engine` directly should know it does.
+//! This gives **failure atomicity**, and — new with the scope — **crash atomicity**: a
+//! process that dies mid-update leaves the store as it was, rather than with the operations
+//! that happened to have been written already. What replaced a hand-rolled undo log is
+//! worth stating: that log rolled back by writing the inverse of each change, so a rollback
+//! could itself fail and leave a state nobody could describe. Abandoning a batch that was
+//! never written cannot.
+//!
+//! It does **not** give isolation. A concurrent reader holding its own view can observe the
+//! store before the commit or after it, and this makes no promise about which. Real
+//! isolation needs the MVCC in `DESIGN.md` §6.1, which is not built. The `Engine` is behind
+//! an `RwLock` in both the server and the Python binding, so in those two deployments a
+//! writer excludes readers for the update's duration and the distinction does not arise; a
+//! caller driving the `Engine` directly should know it does.
 
 use crate::view::DatasetView;
 use crate::{Engine, EngineError};
 use holos_security::Session;
 use oxrdf::{GraphName, GraphNameRef, NamedNode, Quad, Term};
 use oxrdfio::RdfParser;
+use spareval::DeleteInsertQuad;
 use spargebra::algebra::GraphTarget;
 use spargebra::term::{GroundQuad, GroundQuadPattern, GroundTerm, GroundTriple, QuadPattern};
 use spargebra::{GraphUpdateOperation, SparqlParser, Update};
-use spareval::DeleteInsertQuad;
 
 /// What an update changed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -49,51 +57,6 @@ pub struct UpdateOutcome {
     pub graphs_created: u64,
     /// Named graphs removed.
     pub graphs_dropped: u64,
-}
-
-/// One change that actually altered the store, kept so it can be undone.
-///
-/// Only *effective* changes are recorded — inserting a quad that was already there
-/// changes nothing and must not be undone, or a rollback would delete data the update
-/// never added.
-#[derive(Debug)]
-enum Change {
-    Inserted(Quad),
-    Removed(Quad),
-    GraphCreated(NamedNode),
-    GraphDropped(NamedNode),
-}
-
-/// The undo log for one update.
-#[derive(Debug, Default)]
-struct Journal {
-    changes: Vec<Change>,
-}
-
-impl Journal {
-    fn rollback(self, engine: &mut Engine) {
-        // Backwards: the last change is the first to undo.
-        for change in self.changes.into_iter().rev() {
-            let undo = match change {
-                Change::Inserted(quad) => engine.store_mut().remove(quad.as_ref()).map(|_| ()),
-                Change::Removed(quad) => engine.store_mut().insert(quad.as_ref()).map(|_| ()),
-                Change::GraphCreated(graph) => engine
-                    .store_mut()
-                    .remove_named_graph(GraphNameRef::NamedNode(graph.as_ref()))
-                    .map(|_| ()),
-                Change::GraphDropped(graph) => engine
-                    .store_mut()
-                    .insert_named_graph(&GraphName::NamedNode(graph))
-                    .map(|_| ()),
-            };
-            // A rollback that itself fails leaves the store in a state nobody can describe.
-            // There is nothing useful to return it to at that point, and swallowing the
-            // error silently would be worse than saying so.
-            if let Err(e) = undo {
-                eprintln!("holos: rolling back an update failed: {e}. The store may be inconsistent.");
-            }
-        }
-    }
 }
 
 /// Applies a SPARQL 1.1 update.
@@ -186,14 +149,26 @@ pub fn apply(
     session: &mut Session,
     parsed: &Update,
 ) -> Result<UpdateOutcome, EngineError> {
-    let mut journal = Journal::default();
-    let mut outcome = UpdateOutcome::default();
+    // A caller may already have one open — a holon tick applies its delta inside one, and an
+    // update run from there belongs to that commit rather than to a commit of its own. Then
+    // the rollback point is the caller's: an operation that fails still unwinds everything,
+    // just at the outer boundary.
+    let owned = !engine.store().in_scope();
+    if owned {
+        engine.store_mut().begin()?;
+    }
 
+    let mut outcome = UpdateOutcome::default();
     for operation in &parsed.operations {
-        if let Err(e) = apply_one(engine, session, operation, &mut journal, &mut outcome) {
-            journal.rollback(engine);
+        if let Err(e) = apply_one(engine, session, operation, &mut outcome) {
+            if owned {
+                engine.store_mut().rollback();
+            }
             return Err(e);
         }
+    }
+    if owned {
+        engine.store_mut().commit()?;
     }
     Ok(outcome)
 }
@@ -202,20 +177,19 @@ fn apply_one(
     engine: &mut Engine,
     session: &mut Session,
     operation: &GraphUpdateOperation,
-    journal: &mut Journal,
     outcome: &mut UpdateOutcome,
 ) -> Result<(), EngineError> {
     match operation {
         GraphUpdateOperation::InsertData { data } => {
             for quad in data {
-                insert(engine, session, algebra_quad(quad), journal, outcome)?;
+                insert(engine, session, &algebra_quad(quad), outcome)?;
             }
             Ok(())
         }
 
         GraphUpdateOperation::DeleteData { data } => {
             for quad in data {
-                remove(engine, session, ground_quad(quad), journal, outcome)?;
+                remove(engine, session, &ground_quad(quad), outcome)?;
             }
             Ok(())
         }
@@ -232,7 +206,6 @@ fn apply_one(
             insert_template,
             using.clone(),
             pattern,
-            journal,
             outcome,
         ),
 
@@ -246,24 +219,23 @@ fn apply_one(
                 session,
                 source,
                 &algebra_graph_name(destination),
-                journal,
                 outcome,
             );
             silence(result, *silent)
         }
 
         GraphUpdateOperation::Clear { silent, graph } => {
-            let result = clear(engine, session, graph, journal, outcome);
+            let result = clear(engine, session, graph, outcome);
             silence(result, *silent)
         }
 
         GraphUpdateOperation::Create { silent, graph } => {
-            let result = create(engine, graph, journal, outcome);
+            let result = create(engine, graph, outcome);
             silence(result, *silent)
         }
 
         GraphUpdateOperation::Drop { silent, graph } => {
-            let result = drop_graph(engine, session, graph, journal, outcome);
+            let result = drop_graph(engine, session, graph, outcome);
             silence(result, *silent)
         }
     }
@@ -289,12 +261,10 @@ fn silence(result: Result<(), EngineError>, silent: bool) -> Result<(), EngineEr
 fn insert(
     engine: &mut Engine,
     session: &mut Session,
-    quad: Quad,
-    journal: &mut Journal,
+    quad: &Quad,
     outcome: &mut UpdateOutcome,
 ) -> Result<(), EngineError> {
     if engine.insert(session, quad.as_ref())? {
-        journal.changes.push(Change::Inserted(quad));
         outcome.inserted += 1;
     }
     Ok(())
@@ -303,12 +273,10 @@ fn insert(
 fn remove(
     engine: &mut Engine,
     session: &mut Session,
-    quad: Quad,
-    journal: &mut Journal,
+    quad: &Quad,
     outcome: &mut UpdateOutcome,
 ) -> Result<(), EngineError> {
     if engine.remove(session, quad.as_ref())? {
-        journal.changes.push(Change::Removed(quad));
         outcome.deleted += 1;
     }
     Ok(())
@@ -326,7 +294,6 @@ fn delete_insert(
     insert_template: &[QuadPattern],
     using: Option<spargebra::algebra::QueryDataset>,
     pattern: &spargebra::algebra::GraphPattern,
-    journal: &mut Journal,
     outcome: &mut UpdateOutcome,
 ) -> Result<(), EngineError> {
     // The delta is collected in full before anything is applied. That is forced by the
@@ -358,10 +325,10 @@ fn delete_insert(
     // two templates overlap — `DELETE { ?s ?p ?o } INSERT { ?s ?p ?new }` on the same
     // subject would otherwise remove what it had just written.
     for quad in to_delete {
-        remove(engine, session, quad, journal, outcome)?;
+        remove(engine, session, &quad, outcome)?;
     }
     for quad in to_insert {
-        insert(engine, session, quad, journal, outcome)?;
+        insert(engine, session, &quad, outcome)?;
     }
     Ok(())
 }
@@ -373,7 +340,6 @@ fn delete_insert(
 fn create(
     engine: &mut Engine,
     graph: &NamedNode,
-    journal: &mut Journal,
     outcome: &mut UpdateOutcome,
 ) -> Result<(), EngineError> {
     let name = GraphName::NamedNode(graph.clone());
@@ -383,7 +349,6 @@ fn create(
         ))));
     }
     if engine.store_mut().insert_named_graph(&name)? {
-        journal.changes.push(Change::GraphCreated(graph.clone()));
         outcome.graphs_created += 1;
     }
     Ok(())
@@ -414,7 +379,6 @@ fn clear(
     engine: &mut Engine,
     session: &mut Session,
     target: &GraphTarget,
-    journal: &mut Journal,
     outcome: &mut UpdateOutcome,
 ) -> Result<(), EngineError> {
     if let GraphTarget::NamedNode(name) = target {
@@ -428,7 +392,7 @@ fn clear(
         }
     }
     for quad in quads_in(engine, session, target)? {
-        remove(engine, session, quad, journal, outcome)?;
+        remove(engine, session, &quad, outcome)?;
     }
     Ok(())
 }
@@ -437,11 +401,10 @@ fn drop_graph(
     engine: &mut Engine,
     session: &mut Session,
     target: &GraphTarget,
-    journal: &mut Journal,
     outcome: &mut UpdateOutcome,
 ) -> Result<(), EngineError> {
     // DROP is CLEAR plus removing the graph itself from the catalogue.
-    clear(engine, session, target, journal, outcome)?;
+    clear(engine, session, target, outcome)?;
 
     let names: Vec<NamedNode> = match target {
         GraphTarget::NamedNode(name) => vec![name.clone()],
@@ -454,7 +417,6 @@ fn drop_graph(
             .store_mut()
             .remove_named_graph(GraphNameRef::NamedNode(name.as_ref()))?
         {
-            journal.changes.push(Change::GraphDropped(name));
             outcome.graphs_dropped += 1;
         }
     }
@@ -481,7 +443,6 @@ fn load(
     session: &mut Session,
     source: &NamedNode,
     destination: &GraphName,
-    journal: &mut Journal,
     outcome: &mut UpdateOutcome,
 ) -> Result<(), EngineError> {
     let iri = source.as_str();
@@ -524,7 +485,7 @@ fn load(
         });
     }
     for quad in loaded {
-        insert(engine, session, quad, journal, outcome)?;
+        insert(engine, session, &quad, outcome)?;
     }
     Ok(())
 }

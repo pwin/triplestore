@@ -136,8 +136,8 @@ pub fn put_term(term: TermRef<'_>, triple_components: Option<[TermId; 3]>) -> Ve
         },
         TermRef::Triple(_) => {
             out.push(T_TRIPLE);
-            let ids = triple_components
-                .expect("a triple term must be serialised with its component ids");
+            let ids =
+                triple_components.expect("a triple term must be serialised with its component ids");
             for id in ids {
                 out.extend_from_slice(&put_id(id));
             }
@@ -301,7 +301,10 @@ mod tests {
         // Distinct terms must serialise to distinct bytes, or the dictionary conflates them.
         let mut seen = std::collections::HashSet::new();
         for term in &cases {
-            assert!(seen.insert(put_term(term.as_ref(), None)), "collision on {term}");
+            assert!(
+                seen.insert(put_term(term.as_ref(), None)),
+                "collision on {term}"
+            );
         }
     }
 

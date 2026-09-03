@@ -68,9 +68,15 @@ fn lexical_form() -> impl Strategy<Value = String> {
         Just("0001-01-01T00:00:00Z".to_owned()),
         Just("9999-12-31T23:59:59Z".to_owned()),
         Just("-0500-01-01T00:00:00Z".to_owned()),
-        (1i32..10000, 1u32..13, 1u32..29, 0u32..24, 0u32..60, 0u32..60).prop_map(
-            |(y, m, d, h, mi, s)| format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
-        ),
+        (
+            1i32..10000,
+            1u32..13,
+            1u32..29,
+            0u32..24,
+            0u32..60,
+            0u32..60
+        )
+            .prop_map(|(y, m, d, h, mi, s)| format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")),
     ]
 }
 
@@ -79,7 +85,10 @@ fn literal() -> impl Strategy<Value = Literal> {
         // Typed and simple literals.
         (lexical_form(), datatype()).prop_map(|(v, d)| Literal::new_typed_literal(v, d)),
         // Language-tagged literals, which must never inline.
-        (lexical_form(), prop_oneof![Just("en"), Just("fr"), Just("de-CH")])
+        (
+            lexical_form(),
+            prop_oneof![Just("en"), Just("fr"), Just("de-CH")]
+        )
             .prop_map(|(v, tag)| Literal::new_language_tagged_literal_unchecked(v, tag)),
     ]
 }

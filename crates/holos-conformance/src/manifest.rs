@@ -86,18 +86,59 @@ pub struct TestEntry {
     pub result_data: Option<PathBuf>,
     /// The base IRI test content must be parsed against. See the module note.
     pub base: String,
-    /// True when the test declares an entailment regime, and so needs a reasoner.
-    pub needs_entailment: bool,
+    /// `mf:resultCardinality mf:LaxCardinality` — the result's *cardinality* is not part of
+    /// what the test asserts.
+    ///
+    /// Declared by the `REDUCED` tests, where the specification permits any cardinality
+    /// between one per distinct solution and the full multiset. A fixture can only show one
+    /// permitted answer, so comparing multiplicities against it fails a conformant engine.
+    pub lax_cardinality: bool,
+    /// `mf:entailmentRegime` — the RDF semantics suites name a regime as a plain string
+    /// (`"simple"`, `"RDF"`, `"RDFS"`) rather than as the IRI the SPARQL suite uses.
+    pub mf_entailment_regime: Option<String>,
+    /// `mf:recognizedDatatypes` — the datatypes a D-entailment test says the recogniser
+    /// knows. An empty list is meaningful and different from an absent one.
+    pub recognized_datatypes: Vec<String>,
+    /// `mf:unrecognizedDatatypes` — datatypes the test says are *not* recognised, so an
+    /// ill-formed literal of one of them is not an inconsistency.
+    pub unrecognized_datatypes: Vec<String>,
+    /// `mf:result false` — the entailment tests use a boolean where other suites name a
+    /// file. For a positive test it asserts the premise is inconsistent; for a negative
+    /// one, that it is consistent.
+    pub result_is_false: bool,
+    /// The `sd:entailmentRegime` IRIs the test declares, if any.
+    ///
+    /// A list rather than a flag, because *which* regime it asks for decides whether this
+    /// engine can run it at all: RDFS is materialisable here, OWL-Direct is not, and a
+    /// single boolean cannot tell the two apart.
+    pub entailment_regimes: Vec<String>,
 }
 
 impl TestEntry {
+    /// Whether the test asks for an entailment regime at all.
+    #[must_use]
+    pub fn needs_entailment(&self) -> bool {
+        !self.entailment_regimes.is_empty()
+    }
+
+    /// Whether RDFS materialisation answers the regime this test asks for.
+    ///
+    /// A test names every regime it holds under, so RDFS appearing anywhere in the list is
+    /// enough: the expected answers are the same under all of them. `ent:RDF` is weaker than
+    /// RDFS, so a materialised RDFS closure entails everything it asks for and possibly more
+    /// — which is why an RDF-only test is *not* accepted here, since "possibly more" is
+    /// exactly what would break an exact result comparison.
+    #[must_use]
+    pub fn rdfs_entailment_suffices(&self) -> bool {
+        self.entailment_regimes
+            .iter()
+            .any(|r| r.ends_with("/entailment/RDFS"))
+    }
+
     /// Short local name, for readable failure output.
     #[must_use]
     pub fn short_id(&self) -> &str {
-        self.id
-            .rsplit(['#', '/'])
-            .next()
-            .unwrap_or(&self.id)
+        self.id.rsplit(['#', '/']).next().unwrap_or(&self.id)
     }
 }
 
@@ -109,11 +150,7 @@ pub fn load(manifest: &Path) -> Result<Vec<TestEntry>> {
     Ok(out)
 }
 
-fn load_into(
-    manifest: &Path,
-    out: &mut Vec<TestEntry>,
-    seen: &mut HashSet<PathBuf>,
-) -> Result<()> {
+fn load_into(manifest: &Path, out: &mut Vec<TestEntry>, seen: &mut HashSet<PathBuf>) -> Result<()> {
     let manifest = manifest
         .canonicalize()
         .with_context(|| format!("resolving {}", manifest.display()))?;
@@ -189,7 +226,12 @@ fn load_into(
             result_graph_data: Vec::new(),
             result_data: None,
             base: assumed_base.clone(),
-            needs_entailment: false,
+            lax_cardinality: false,
+            mf_entailment_regime: None,
+            recognized_datatypes: Vec::new(),
+            unrecognized_datatypes: Vec::new(),
+            result_is_false: false,
+            entailment_regimes: Vec::new(),
         };
 
         match object(&graph, subject, &mf("action")) {
@@ -213,15 +255,27 @@ fn load_into(
                 collect_service_data(&graph, action, &mut test.service_data);
                 // A protocol test's action is an ht:Connection. Reading it here keeps the
                 // runner from having to re-parse the manifest.
-                if object(&graph, action, &NamedNode::new_unchecked(
-                    "http://www.w3.org/2011/http#requests",
-                ))
+                if object(
+                    &graph,
+                    action,
+                    &NamedNode::new_unchecked("http://www.w3.org/2011/http#requests"),
+                )
                 .is_some()
                 {
                     test.script = crate::protocol::read_script(&graph, action).ok();
                 }
-                test.needs_entailment =
-                    object(&graph, action, &sd("entailmentRegime")).is_some();
+                // `sd:entailmentRegime` is one IRI or an RDF list of them, and a test
+                // holds under any it names.
+                if let Some(term) = object(&graph, action, &sd("entailmentRegime")) {
+                    test.entailment_regimes = match &term {
+                        Term::NamedNode(n) => vec![n.as_str().to_owned()],
+                        _ => collection(&graph, term)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(term_as_iri)
+                            .collect(),
+                    };
+                }
             }
             _ => {}
         }
@@ -230,9 +284,37 @@ fn load_into(
         // rather than an argument to any one request.
         collect_graph_data(&graph, subject, &assumed_base, &mut test.graph_data);
 
+        test.lax_cardinality = matches!(
+            object(&graph, subject, &mf("resultCardinality")),
+            Some(Term::NamedNode(n)) if n.as_str().ends_with("#LaxCardinality")
+        );
+        test.mf_entailment_regime =
+            object(&graph, subject, &mf("entailmentRegime")).map(|t| literal_value(&t));
+        for (predicate, into) in [
+            ("recognizedDatatypes", 0usize),
+            ("unrecognizedDatatypes", 1),
+        ] {
+            let Some(head) = object(&graph, subject, &mf(predicate)) else {
+                continue;
+            };
+            let list: Vec<String> = collection(&graph, head)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(term_as_iri)
+                .collect();
+            if into == 0 {
+                test.recognized_datatypes = list;
+            } else {
+                test.unrecognized_datatypes = list;
+            }
+        }
+
         match object(&graph, subject, &mf("result")) {
             // A plain file: a result set or a graph.
             Some(Term::NamedNode(n)) => test.result = file_url_to_path(n.as_str()),
+            // `mf:result false`: the entailment suites assert consistency this way rather
+            // than by naming a conclusion graph.
+            Some(Term::Literal(l)) if l.value() == "false" => test.result_is_false = true,
             // A blank node: the expected *dataset* of an update test.
             Some(Term::BlankNode(b)) => {
                 let result = NamedOrBlankNodeRef::from(b.as_ref());
@@ -441,12 +523,7 @@ fn percent_decode(s: &str) -> String {
 /// Infers an RDF format from a file extension.
 #[must_use]
 pub fn format_for(path: &Path) -> Option<RdfFormat> {
-    match path
-        .extension()?
-        .to_str()?
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "ttl" => Some(RdfFormat::Turtle),
         "nt" => Some(RdfFormat::NTriples),
         "trig" => Some(RdfFormat::TriG),
@@ -462,8 +539,7 @@ pub fn format_for(path: &Path) -> Option<RdfFormat> {
 
 /// Reads an RDF file into a dataset, parsed against `base`.
 pub fn parse_dataset(path: &Path, base: &str) -> Result<oxrdf::Dataset> {
-    let format = format_for(path)
-        .ok_or_else(|| anyhow!("no RDF format for {}", path.display()))?;
+    let format = format_for(path).ok_or_else(|| anyhow!("no RDF format for {}", path.display()))?;
     let parser = RdfParser::from_format(format)
         .with_base_iri(base)
         .map_err(|e| anyhow!("bad base IRI {base}: {e}"))?;

@@ -223,6 +223,14 @@ fn run_inner(test: &ShaclTest, engine: Engine) -> Result<super::Outcome> {
         }
         Err(e) => return Ok(super::Outcome::fail(format!("validating: {e}"))),
     };
+    // `sh:conformanceDisallows` is a property of the *report*, not of the shapes: it says
+    // which severities the validator was asked to treat as disqualifying. A test that sets
+    // it is asking for a run under that rule, so the harness has to read it from the
+    // expected report and apply it — there is nowhere else it could come from.
+    let report = match disallowed_severities(&expected, &store)? {
+        Some(severities) => report.with_conformance_disallows(severities),
+        None => report,
+    };
     let actual = to_dataset(shapes.report_to_quads(&store, &report)?);
 
     Ok(match compare(&expected, &actual) {
@@ -232,11 +240,7 @@ fn run_inner(test: &ShaclTest, engine: Engine) -> Result<super::Outcome> {
 }
 
 /// Runs a test through the adapted engine, bridged from the store.
-fn run_adapted(
-    store: &Store,
-    options: Options,
-    expected: &Dataset,
-) -> Result<super::Outcome> {
+fn run_adapted(store: &Store, options: Options, expected: &Dataset) -> Result<super::Outcome> {
     let mut run = match holos_shacl::engine::EngineRun::prepare(store, options) {
         Ok(r) => r,
         Err(e) => return Ok(super::Outcome::fail(format!("preparing the engine: {e}"))),
@@ -245,7 +249,17 @@ fn run_adapted(
         Ok(r) => r,
         Err(e) => return Ok(super::Outcome::fail(format!("validating: {e}"))),
     };
-    let graph = run.report_to_oxrdf(&report);
+    // Same rule as the native path: `sh:conformanceDisallows` is a property of the report,
+    // so a test that sets one is asking for a run judged under it.
+    let declared: Vec<_> = disallowed_iris(expected)
+        .iter()
+        .filter_map(|iri| run.term_for_iri(iri))
+        .collect();
+    let graph = if declared.is_empty() {
+        run.report_to_oxrdf(&report)
+    } else {
+        run.report_to_oxrdf_with(&report, &declared)
+    };
     let mut actual = Dataset::new();
     for triple in graph.iter() {
         actual.insert(&Quad {
@@ -314,6 +328,39 @@ fn load_into(store: &mut Store, path: &Path, graph: Option<NamedNode>) -> Result
     Ok(())
 }
 
+/// The `sh:conformanceDisallows` IRIs an expected report names.
+fn disallowed_iris(expected: &Dataset) -> Vec<String> {
+    let predicate = NamedNode::new_unchecked("http://www.w3.org/ns/shacl#conformanceDisallows");
+    expected
+        .iter()
+        .filter(|q| q.predicate == predicate.as_ref())
+        .filter_map(|q| match q.object {
+            TermRef::NamedNode(n) => Some(n.as_str().to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The severities an expected report declares as disqualifying, if it declares any.
+fn disallowed_severities(
+    expected: &Dataset,
+    store: &Store,
+) -> Result<Option<Vec<holos_core::TermId>>> {
+    let predicate = NamedNode::new_unchecked("http://www.w3.org/ns/shacl#conformanceDisallows");
+    let mut out = Vec::new();
+    for quad in expected.iter() {
+        if quad.predicate != predicate.as_ref() {
+            continue;
+        }
+        // Looked up rather than interned: a severity the store has never seen cannot be the
+        // severity of any result, so it disqualifies nothing and can be dropped.
+        if let Some(id) = store.lookup_term(quad.object)? {
+            out.push(id);
+        }
+    }
+    Ok((!out.is_empty()).then_some(out))
+}
+
 /// Extracts the expected report — the subgraph reachable from `mf:result`.
 fn expected_report(graph: &Graph, entry: NamedOrBlankNodeRef<'_>) -> Result<Dataset> {
     let Some(result) = graph.object_for_subject_predicate(entry, mf("result").as_ref()) else {
@@ -367,18 +414,24 @@ fn compare(expected: &Dataset, actual: &Dataset) -> std::result::Result<(), Stri
     if a == b {
         return Ok(());
     }
-    let missing: Vec<String> = a
+    let mut missing: Vec<String> = a
         .iter()
         .filter(|q| !b.contains(*q))
-        .take(3)
         .map(|q| q.to_string())
         .collect();
-    let extra: Vec<String> = b
+    let mut extra: Vec<String> = b
         .iter()
         .filter(|q| !a.contains(*q))
-        .take(3)
         .map(|q| q.to_string())
         .collect();
+    // Sorted before truncating: which examples get shown must not depend on hash iteration
+    // order. The recorded `.failures` baselines carry this text, so a nondeterministic sample
+    // makes every re-baseline churn, and a ratchet whose diff is always noise is one nobody
+    // reads.
+    missing.sort_unstable();
+    extra.sort_unstable();
+    missing.truncate(3);
+    extra.truncate(3);
     Err(format!(
         "{} expected vs {} actual triples; missing {missing:?}; unexpected {extra:?}",
         a.len(),
@@ -392,4 +445,45 @@ pub fn suite_root() -> Option<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?.parent()?;
     let dir = root.join("testsuites").join("data-shapes");
     dir.is_dir().then_some(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The SHACL baselines quoted a sample of the differing triples chosen by hash iteration,
+    /// so `shacl-core-adapted.failures` and its siblings churned on every re-baseline even
+    /// when no test had changed state. Sorted before truncating; this pins that, because the
+    /// original check was a manual double re-baseline and a manual check does not survive the
+    /// next edit.
+    fn triple(n: u32) -> Quad {
+        Quad {
+            subject: NamedNode::new_unchecked(format!("http://example.com/s{n:02}")).into(),
+            predicate: NamedNode::new_unchecked("http://example.com/p"),
+            object: NamedNode::new_unchecked(format!("http://example.com/o{n:02}")).into(),
+            graph_name: GraphName::DefaultGraph,
+        }
+    }
+
+    #[test]
+    fn the_quoted_sample_is_sorted_and_independent_of_insertion_order() {
+        let expected = Dataset::new();
+        let mut forwards = Dataset::new();
+        let mut backwards = Dataset::new();
+        for n in 0..10 {
+            forwards.insert(&triple(n));
+        }
+        for n in (0..10).rev() {
+            backwards.insert(&triple(n));
+        }
+
+        let one = compare(&expected, &forwards).expect_err("the datasets differ");
+        let two = compare(&expected, &backwards).expect_err("the datasets differ");
+        assert_eq!(one, two, "insertion order must not reach the message");
+        assert!(
+            one.contains("s00") && one.contains("s01") && one.contains("s02"),
+            "the three lexicographically smallest should be quoted, got: {one}"
+        );
+        assert!(!one.contains("s09"), "and nothing later, got: {one}");
+    }
 }

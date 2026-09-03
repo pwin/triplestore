@@ -47,19 +47,39 @@ fn seed(engine: &mut Engine, people: usize, orgs: usize) {
     for i in 0..people {
         let s = ex(&format!("person{i}"));
         add(s.clone(), rdf::TYPE.into_owned(), ex("Person").into());
-        add(s.clone(), ex("name"), Literal::new_simple_literal(format!("P{i}")).into());
-        add(s.clone(), ex("email"), Literal::new_simple_literal(format!("p{i}@x")).into());
+        add(
+            s.clone(),
+            ex("name"),
+            Literal::new_simple_literal(format!("P{i}")).into(),
+        );
+        add(
+            s.clone(),
+            ex("email"),
+            Literal::new_simple_literal(format!("p{i}@x")).into(),
+        );
         // A third of people have a nickname: a genuinely rarer predicate.
         if i % 3 == 0 {
-            add(s.clone(), ex("nickname"), Literal::new_simple_literal(format!("nick{i}")).into());
+            add(
+                s.clone(),
+                ex("nickname"),
+                Literal::new_simple_literal(format!("nick{i}")).into(),
+            );
         }
         // Everyone works for an org: a join out of the star.
-        add(s, ex("worksFor"), ex(&format!("org{}", i % orgs.max(1))).into());
+        add(
+            s,
+            ex("worksFor"),
+            ex(&format!("org{}", i % orgs.max(1))).into(),
+        );
     }
     for i in 0..orgs {
         let s = ex(&format!("org{i}"));
         add(s.clone(), rdf::TYPE.into_owned(), ex("Org").into());
-        add(s.clone(), ex("legalName"), Literal::new_simple_literal(format!("O{i}")).into());
+        add(
+            s.clone(),
+            ex("legalName"),
+            Literal::new_simple_literal(format!("O{i}")).into(),
+        );
         add(s, ex("country"), Literal::new_simple_literal("GB").into());
     }
 }
@@ -206,7 +226,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "-".repeat(90));
     println!(
         "{:<28} {:>10} {:>14} {:>9.1} {:>14} {:>9.1}",
-        "mean q-error", "", "", sum_baseline / n, "", sum_ours / n
+        "mean q-error",
+        "",
+        "",
+        sum_baseline / n,
+        "",
+        sum_ours / n
     );
     println!(
         "{:<28} {:>10} {:>14} {:>9.1} {:>14} {:>9.1}",

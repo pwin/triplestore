@@ -49,6 +49,14 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// a staleness signal, so it must be cheap: a counter, never a scan.
     fn dictionary_len(&self) -> usize;
 
+    /// How many ids have been issued for one dictionary-backed tag.
+    ///
+    /// Each kind has its own dense index space, so this is also an enumeration bound:
+    /// `TermId::new(tag, i)` for `i` in `0..dictionary_count_for(tag)` is every id issued for
+    /// that tag. Must be a counter rather than a scan, for the same reason
+    /// [`Storage::dictionary_len`] must be.
+    fn dictionary_count_for(&self, tag: holos_core::Tag) -> usize;
+
     // --- quads --------------------------------------------------------------------
 
     /// Indexes an already-encoded quad. `Ok(true)` if it was not already present.
@@ -112,11 +120,94 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// Makes everything written so far durable. A no-op for the in-memory tier.
     fn flush(&mut self) -> Result<()>;
 
+    /// Writes a consistent snapshot of the store to `destination`.
+    ///
+    /// The point of a checkpoint is that it can be taken while the store is *open* and
+    /// being written to, which is what makes an online backup possible. Copying the
+    /// directory instead requires stopping the service, because an LSM tree in mid-flight
+    /// is not a set of files that can be copied one at a time.
+    ///
+    /// The default is a refusal rather than a silent copy: a backend that cannot produce a
+    /// consistent snapshot should say so, not hand back something that looks like one.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unsupported`] on a backend without checkpoints, and whatever the
+    /// backend reports otherwise.
+    fn checkpoint(&self, destination: &std::path::Path) -> Result<()> {
+        let _ = destination;
+        Err(crate::StorageError::Unsupported(
+            "this storage backend cannot take a checkpoint".to_owned(),
+        ))
+    }
+
+    /// Opens a commit scope: writes until [`Storage::commit`] land together or not at all.
+    ///
+    /// A single quad write is already atomic — every index order for it goes into one
+    /// batch — so what this adds is atomicity across *several*. An update or a holon tick is
+    /// a sequence of quad writes, and without a scope a crash between two of them leaves half
+    /// a commit: `DESIGN.md` §9's "a crash between applying the delta and writing the event
+    /// leaves the two disagreeing".
+    ///
+    /// What it does **not** give is isolation. A reader with its own handle can see the store
+    /// before the commit or after it, and this makes no promise about which — the server and
+    /// the Python binding hold the engine behind an `RwLock`, so a writer excludes readers
+    /// there and the question does not arise. Isolation is `DESIGN.md` §6.1's MVCC and is
+    /// still not built.
+    ///
+    /// Reads inside the scope see the scope's own writes. A backend that buffered without
+    /// arranging that would break duplicate detection, which is a read.
+    ///
+    /// The default is a no-op pair, which gives a backend that cannot do better the same
+    /// *interface* and a weaker guarantee. That is a deliberate choice against a default that
+    /// returned an error: a caller should be able to write correct code once, and a backend
+    /// where a crash loses everything anyway — the in-memory one — satisfies "all or nothing"
+    /// vacuously.
+    ///
+    /// # Errors
+    ///
+    /// Nesting is refused rather than flattened: a scope inside a scope reads as two commits
+    /// and is one, and silently making it one is how a caller comes to believe in a rollback
+    /// point that does not exist.
+    fn begin(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Commits a scope opened by [`Storage::begin`].
+    ///
+    /// # Errors
+    ///
+    /// A write failure, or no scope open.
+    fn commit(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Abandons a scope, leaving the store as it was when [`Storage::begin`] was called.
+    ///
+    /// Infallible on purpose. It is called on the failure path, and a rollback that can fail
+    /// leaves a state nobody can describe — which is exactly what the compensating-write
+    /// undo it replaces could do.
+    fn rollback(&mut self) {}
+
+    /// Whether a commit scope is open.
+    fn in_scope(&self) -> bool {
+        false
+    }
+
     /// Announces a bulk load, so a backend can buffer writes and skip its log.
     ///
     /// A default no-op rather than a downcast: a caller should be able to ask any backend
     /// for its fastest load path without knowing which backend it has.
-    fn begin_bulk_load(&mut self) {}
+    ///
+    /// # Errors
+    ///
+    /// A commit scope open. The two both buffer, and a backend that started a load inside a
+    /// scope would route the load's writes into the scope and then rebuild its counters from
+    /// a database that has not seen them. They are refused in both directions, so neither can
+    /// be the one that happens to be checked.
+    fn begin_bulk_load(&mut self) -> Result<()> {
+        Ok(())
+    }
 
     /// Ends a bulk load, writing anything buffered.
     fn end_bulk_load(&mut self) -> Result<()> {

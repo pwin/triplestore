@@ -26,6 +26,15 @@ deploy\smoke.ps1
 
 Then open `http://127.0.0.1:7878/` for the YASGUI console.
 
+The console has a **Map** tab alongside Table. It appears when a result carries a
+`geo:wktLiteral` or `geo:geoJSONLiteral` binding, draws the geometries on an OpenStreetMap
+base layer, and puts the rest of each row in the shape's popup — so a map is a result view
+rather than a picture. It reads CRS84 only, which is GeoSPARQL's default; a geometry in any
+other CRS is counted and reported under the map rather than drawn somewhere wrong.
+
+YASR's own map and chart plugins are not open source. This one was written for HOLOS and
+lives in `crates/holos-server/src/ui.rs`.
+
 ### Prerequisites
 
 | | Why |
@@ -216,17 +225,85 @@ file silently.
 
 ---
 
+### Blank nodes are scoped to the file they came from
+
+Each load is a document, and RDF scopes a blank node label to the document it appears in. So
+`_:a` in two files denotes two different things, and loading both gives you two nodes:
+
+```sh
+holos stats --store ./var/store --bulk --data a.ttl
+holos stats --store ./var/store --bulk --data b.ttl   # b.ttl's `_:a` is not a.ttl's
+```
+
+This matters more than it sounds, because `_:a`, `_:b0` and `_:genid1` are what every
+serialiser reaches for first — merging on the label would join unrelated records whenever two
+exports happened to agree on a name.
+
+The consequence to plan for: **loading the same file twice does not deduplicate** its
+blank-node triples. The second load asserts a second existential, which is what RDF says it
+does. Anything with an IRI subject deduplicates normally.
+
+---
+
 ## Backup and restore
 
-[deploy/backup.sh](deploy/backup.sh) — and it **requires the service to be stopped**, which
-is a real limitation rather than caution:
+**The service keeps running.** RocksDB checkpoints flush the log and hard-link the SST files
+into a new directory, so the snapshot is consistent, near-instant, and initially costs almost
+no disk — taken while the store is open and being written to.
 
-> RocksDB checkpoints are named in `DESIGN.md` §6.1 but are **not built yet**, so there is
-> no way to take a consistent snapshot of an open store. When checkpoints land this becomes
-> a hard-linked online copy and the stop goes away.
+```sh
+deploy/backup.sh /backups          # or: holos backup --store ./var/store --to /backups/tonight
+```
 
-The script refuses to run if it can see the lock held. Restore by stopping the service and
-copying the directory back.
+Two consequences of hard links, both of which matter:
+
+- **A checkpoint on the same filesystem shares the store's files.** That is what makes it
+  cheap, and it means **it is not an off-machine backup** — losing the disk loses both. Copy
+  or replicate the result elsewhere if that is what you need. To a different filesystem
+  RocksDB copies instead: correct, no longer instant, genuinely independent.
+- **A checkpoint pins the files it links**, so compaction cannot delete them. Disk use climbs
+  as the snapshot and the live store diverge. `deploy/backup.sh` keeps the last
+  `HOLOS_BACKUP_KEEP` (default 7) and removes the rest — retention is part of the job, not an
+  afterthought.
+
+Restore by pointing `--store` at a checkpoint, or by copying it back with the service stopped.
+
+Two refusals worth knowing, both preventing a backup that looks fine and is not:
+
+- **During a bulk load.** Those writes are buffered in the process rather than in RocksDB, so
+  a checkpoint taken then would be internally consistent and missing data.
+- **An in-memory store.** It has no files to snapshot, and says so rather than writing nothing
+  and reporting success.
+
+### Over HTTP
+
+`POST /backup` does the same thing, and is **off unless both flags are set**:
+
+```sh
+holos-server --store ./var/store              --backup-dir /backups --backup-role ops --trust-forwarded-identity
+
+curl -X POST -H 'X-Holos-Roles: ops' http://127.0.0.1:7878/backup
+# {"path":"/backups/holos-1787763950","quads":1048576}
+```
+
+| Condition | Answer |
+|---|---|
+| Either flag unset | **404** — the endpoint is absent, not merely defended |
+| Identity not trusted | **403** — every request is anonymous, so nobody holds the role |
+| Role missing or wrong | **403** |
+| Role held | **201** with the path and quad count |
+| Bulk load in progress, or in-memory store | **409** with the reason |
+
+**The caller never names the destination.** `POST /backup?to=/anywhere` would be an
+arbitrary-write primitive — whatever the server process can write, a caller could ask it to
+fill with a copy of the database. The server owns `--backup-dir` and mints a timestamped
+child inside it.
+
+A backup copies the whole store, ignoring the policy that governs every query. It is the one
+operation where the ordinary access controls do not apply, which is why it has its own role —
+and why `--role` on the server, which grants a role to *everyone*, must not be used to
+provide it.
+
 
 `holos dump` is **not** a backup — it emits what the *principal* is allowed to see, through
 the same policy-filtered view as any query. That is usually a smaller thing, and that is the
@@ -256,8 +333,12 @@ Three things worth knowing:
 - **It takes the write lock.** `/update` is the only endpoint that does, so a writer
   excludes readers for the update's duration. That is what makes the update's failure
   atomicity behave as isolation in this deployment.
-- **It is all-or-nothing.** If any operation in the request fails, the store is left
-  exactly as it was — including the operations that had already succeeded.
+- **It is all-or-nothing, including across a crash.** The whole request runs inside one
+  commit scope: the writes accumulate into a single RocksDB batch and are written once. If
+  any operation fails, the store is left exactly as it was — including the operations that
+  had already succeeded — and if the process dies mid-request, so is the store on disk,
+  because nothing had been written yet. The scope refuses past a few hundred thousand quads
+  in one request; load data that size with `--data`, which is built for the volume.
 - **Policy applies to the write path.** Every quad written is checked for `WRITE`, and the
   `WHERE` clause is filtered by read policy on the same path as a `SELECT` — so a principal
   cannot delete what it cannot see. `SILENT` suppresses an operation's own error but never
@@ -356,6 +437,84 @@ Four things worth knowing:
 `PUT` is the operation people otherwise write as `DROP GRAPH … ; INSERT DATA { GRAPH … }`,
 which is two operations that can half-succeed where this is one that cannot.
 
+## Maintenance
+
+Three jobs that are not automatic, and are not automatic on purpose. Each is cheap to run and
+none of them is urgent; a server that decides for itself to do whole-store work is a server
+that does something surprising at three in the morning.
+
+### Reclaiming space: `holos compact`
+
+`backup` preserves the store *exactly*, dictionary included. That is the right behaviour for a
+backup and the wrong one for reclaiming space, because the dictionary is append-only: deleting
+quads leaves their terms behind, and nothing in the normal course of running removes them.
+
+```sh
+holos compact --store ./var/store --to ./var/store.new
+```
+
+It writes a **new** store holding only the live data, and refuses if the destination exists —
+a failure then leaves the original untouched. Two things to plan for:
+
+- It needs room for both stores at once.
+- It does not copy writes that arrive while it runs. Stop writers, or accept that the window
+  is lost, then swap the directories.
+
+It reads the store directly rather than through a policy, so it copies everything regardless
+of who runs it. Treat the output as you would the original.
+
+### Entailment: `holos entail`
+
+Materialises the RDFS closure, so every reader sees the entailed triples without knowing about
+entailment — the query path, the topology rewrite, SHACL, the statistics.
+
+```sh
+holos entail --store ./var/store                    # into <https://holos.dev/ns#entailed>
+holos entail --store ./var/store --entail-graph <IRI> --entail-budget 1000000
+```
+
+It writes into a **graph of its own**, `<https://holos.dev/ns#entailed>` unless you name
+another, which is what lets you undo it:
+
+```sparql
+DROP GRAPH <https://holos.dev/ns#entailed>
+``` The cost is that queries only see the entailed triples
+under the union default graph, or by naming the graph. That trade is the reason for the
+default, not an accident of it.
+
+The budget is a bound on a mistake rather than a tuning knob. A schema entailing ten million
+triples is worth reading before it is materialised, so the closure is abandoned and **nothing
+is written** rather than the machine running out of memory.
+
+Two entailments are true and cannot be written down, so they are not:
+`ex:age rdfs:range xsd:integer` with `ex:alice ex:age 30` entails that 30 is an integer, and a
+triple term denotes a proposition. RDF has no subject position for a literal or a triple term.
+
+### Spatial index upkeep: `POST /maintenance/purge`
+
+The spatial index tracks the **dictionary**, which never forgets. That is what lets it catch
+up with a write in a fraction of a millisecond instead of rebuilding — and it means deleted
+geometries leave entries behind. Nothing is wrong while they are there: the index is a
+superset filter, so a geometry with no quads fails to join and contributes no row. It is
+memory, not correctness. **Restarting does not clear them**, because the index is rebuilt from
+the dictionary and comes back holding every geometry ever interned.
+
+Off unless `--purge-role` is set, and then the caller must hold that role:
+
+```sh
+holos-server --store ./var/store --purge-role ops --trust-forwarded-identity
+curl -X POST -H 'X-Auth-Request-Groups: ops' http://127.0.0.1:7878/maintenance/purge
+```
+
+Without `--trust-forwarded-identity` every request is anonymous and holds no roles, so the
+endpoint is unreachable. A switched-off endpoint answers **404** rather than 403, so probing
+cannot map the configuration.
+
+There is no timer inside the server. Point cron, a systemd timer or a Kubernetes CronJob at
+it, the same way `deploy/backup.sh` calls `/backup`.
+
+---
+
 ## Monitoring
 
 | Endpoint | Use |
@@ -384,12 +543,14 @@ Stated plainly, because finding these out in production is worse.
 |---|---|---|
 | **No TLS in the server** | Plain HTTP only | Terminate at the front door. Both configs do |
 | **Timeouts are not absolute** | `--timeout` stops a query that is reading or streaming rows; one blocked inside a single in-memory step is not interruptible | Bound the result size in the query |
-| **No online backup** | Backups need a stop | Above |
+| **A checkpoint is not off-machine** | Hard links share the live store's files, so one disk failure loses both | Copy or replicate the checkpoint elsewhere; or checkpoint to a different filesystem, which copies |
 | **Single process per store** | No read replicas over one directory | Run replicas over separate copies |
 | **CORS is `*`** | Any origin may query | Intentional — a SPARQL endpoint is routinely queried from a page elsewhere, and refusing that makes it useless for its most common job. Restrict at the proxy if you need to |
 | **Direct graph identification is off by default** | `PUT /graph/people` answers 400; the parameter form works | Set `--gsp-base` to the base URI the *outside* sees |
 | **No cost-based planner** | Query order matters: a measured **3×** on a five-pattern query | Reordering is applied automatically when statistics are built; write the most selective pattern first if they are not. See `DESIGN.md` §16 |
 | **`--data` reloads every start** | Slow restarts | Load once with `load.sh`, leave `HOLOS_DATA` empty |
+| **Shapes beyond SHACL Core are refused by the default validator** | A `sh:sparql` constraint, a SHACL-AF rule or a node expression makes `holos validate` and the holon Boundary refuse the shapes graph, naming the construct | Deliberate: that validator is what gates a commit, and it used to drop what it could not check and answer *conforms* — a gate that fails open. Run `holos validate --engine adapted`, which implements them; the Boundary keeps the native one because only it revalidates a delta |
+| **Compaction is offline** | Writes arriving during `holos compact` are not copied | Stop writers for the window, then swap directories |
 
 ---
 

@@ -64,11 +64,17 @@ fn graph_store_protocol() {
 
     for test in &scripted {
         let Some(script) = &test.script else {
-            skipped.push((test.short_id().to_owned(), "no ht:Connection in the action".to_owned()));
+            skipped.push((
+                test.short_id().to_owned(),
+                "no ht:Connection in the action".to_owned(),
+            ));
             continue;
         };
         if script.requests.is_empty() {
-            skipped.push((test.short_id().to_owned(), "no requests in the script".to_owned()));
+            skipped.push((
+                test.short_id().to_owned(),
+                "no requests in the script".to_owned(),
+            ));
             continue;
         }
 
@@ -81,7 +87,10 @@ fn graph_store_protocol() {
             port,
             &["--gsp-path", "/gsp", "--gsp-base", "http://www.example"],
         ) else {
-            skipped.push((test.short_id().to_owned(), format!("no server on port {port}")));
+            skipped.push((
+                test.short_id().to_owned(),
+                format!("no server on port {port}"),
+            ));
             continue;
         };
 
@@ -129,13 +138,21 @@ fn replay(address: &str, script: &protocol::Script) -> Result<(), String> {
                     i + 1
                 ));
             };
-            request.path = request.path.replace("$LOCATION$", &percent_encode(location));
+            request.path = request
+                .path
+                .replace("$LOCATION$", &percent_encode(location));
         }
         let request = &request;
 
         trace(request);
-        let response = protocol::send(address, request)
-            .map_err(|e| format!("request {} ({} {}): {e}", i + 1, request.method, request.path))?;
+        let response = protocol::send(address, request).map_err(|e| {
+            format!(
+                "request {} ({} {}): {e}",
+                i + 1,
+                request.method,
+                request.path
+            )
+        })?;
         if let Some(location) = response.header("location") {
             last_location = Some(location.to_owned());
         }

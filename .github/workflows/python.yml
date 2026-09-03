@@ -21,6 +21,13 @@ name: python
 on:
   push:
     tags: ["v*"]
+    # Also on the default branch. Without this the wheel tests ran only at release time,
+    # and a stale assertion in them sat undiscovered across two commits until a tag went up
+    # and the release blocked itself on it -- twice. This project pushes to `develop`
+    # directly rather than through pull requests, so the `pull_request` trigger below covers
+    # a workflow nobody here uses. Building the matrix on every push costs CI minutes; not
+    # building it costs a failed release and a re-tag, which is worse.
+    branches: ["develop"]
   pull_request:
     paths:
       - "crates/**"

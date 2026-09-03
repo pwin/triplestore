@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let evaluator = started.elapsed();
     println!(
-        "evaluator, reordered           {rows:>3} rows  {:>9.1} ms",
+        "query path (bind join)         {rows:>3} rows  {:>9.3} ms",
         evaluator.as_secs_f64() * 1000.0
     );
 
@@ -91,7 +91,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     'outer: for quad in store.quads_for_pattern(None, Some(badge), None, GraphFilter::Default) {
         let subject = quad?.subject;
         // Probe: (subject, name, *) and (subject, memberOf, *).
-        for name_quad in store.quads_for_pattern(Some(subject), Some(name), None, GraphFilter::Default)
+        for name_quad in
+            store.quads_for_pattern(Some(subject), Some(name), None, GraphFilter::Default)
         {
             let name_quad = name_quad?;
             probes += 1;
@@ -118,13 +119,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!(
-        "\n{:.0}x — what an index nested-loop operator would be worth on this shape.",
+        "\n{:.0}x — what a hand-written join still beats the general one by here.",
         evaluator.as_secs_f64() / bind.as_secs_f64().max(1e-9)
     );
     println!(
-        "The evaluator scans both right-hand patterns in full; the bind join touches {probes} \n\
-         keys. The gap is not estimation — the order is already optimal in both — it is the \n\
-         absence of a join operator that can exploit a bound variable."
+        "The first row goes through `holos_engine::bindjoin`, which probes rather than \n\
+         scans and touches roughly the same {probes} keys. What separates the two is the \n\
+         cost of being general — choosing the next pattern from statistics at each step, \n\
+         hashing bindings, decoding terms — rather than the absence of an operator, which \n\
+         is what this benchmark showed at 611x before one existed."
+    );
+
+    filtered(&engine, &session, &stats)?;
+
+    Ok(())
+}
+
+/// What a `FILTER` costs, now that one no longer leaves the fragment.
+///
+/// The interesting number is not the filtered query against the unfiltered one — those are
+/// different questions. It is the filtered query against *the same filtered query before
+/// filters were in the fragment*, which is the evaluator's own plan. Asking for an
+/// explanation is what forces that comparison, because the fast path declines to produce
+/// one, so both rows below are the same SPARQL over the same store.
+fn filtered(
+    engine: &Engine,
+    session: &Session,
+    stats: &Arc<Statistics>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // `badgeNumber` is a simple literal — `"B0000000"`, not a number — so the comparison
+    // has to be a string one. A numeric threshold is a type error, which SPARQL turns into
+    // an eliminated solution rather than a failure, so the benchmark would quietly measure
+    // two ways of returning nothing.
+    //
+    // Selective enough that pushing it down prunes most branches before the other two
+    // patterns are scanned, which is the claim being measured.
+    let sparql = format!(
+        "PREFIX ex: <{EX}> SELECT ?n ?u WHERE {{ \
+         ?s ex:badgeNumber ?b . ?s ex:name ?n . ?s ex:memberOf ?u \
+         FILTER(?b > \"B0090000\") }}"
+    );
+
+    let run = |options: &QueryOptions| -> Result<(usize, f64), Box<dyn std::error::Error>> {
+        let view = engine.view(session);
+        let started = Instant::now();
+        let (results, _) = Engine::query_with(&view, &sparql, options)?;
+        let rows = match results {
+            QueryResults::Solutions(iter) => iter.filter(Result::is_ok).count(),
+            _ => 0,
+        };
+        Ok((rows, started.elapsed().as_secs_f64() * 1000.0))
+    };
+
+    println!("\n## A filter, pushed down\n");
+    let (fast_rows, fast) = run(&QueryOptions::new().reordering(Arc::clone(stats)))?;
+    let (slow_rows, slow) = run(&QueryOptions::new().explaining())?;
+
+    assert_eq!(
+        fast_rows, slow_rows,
+        "the filter changed the answer: {fast_rows} through the operator, {slow_rows} through \
+         the evaluator"
+    );
+    assert!(
+        fast_rows > 0,
+        "the filter matched nothing, so this compares two ways of returning an empty answer"
+    );
+    println!("bind join, filter pushed down  {fast_rows:>3} rows  {fast:>9.3} ms");
+    println!("evaluator, filter after join   {slow_rows:>3} rows  {slow:>9.3} ms");
+    println!(
+        "\n{:.0}x. Row counts are asserted equal rather than reported and hoped over.",
+        slow / fast.max(1e-9)
     );
 
     Ok(())

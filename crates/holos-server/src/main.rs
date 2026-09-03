@@ -79,6 +79,16 @@ SERVER
     --no-ui                  Do not serve the console. The endpoints still work, and the
                              server then needs no network access of any kind.
 
+MAINTENANCE
+    --backup-dir <DIR>       Parent directory for `POST /backup` checkpoints. The endpoint
+                             does not exist unless this and --backup-role are both set: a
+                             client never names a path, so it cannot be aimed at one.
+    --backup-role <ROLE>     Role a principal must hold to trigger a backup.
+    --purge-role <ROLE>      Role a principal must hold to call POST /maintenance/purge,
+                             which reclaims spatial index entries for geometries no longer
+                             referenced by any quad. There is no timer: schedule it with
+                             cron or a systemd timer, as with backups.
+
 IDENTITY  (see DESIGN.md §14.5)
     --trust-forwarded-identity
                              Read the principal from X-Holos-Principal, X-Holos-Roles and
@@ -104,6 +114,13 @@ struct Config {
     gsp_path: String,
     data: Vec<String>,
     store: Option<String>,
+    /// Where `POST /backup` writes checkpoints. `None` disables the endpoint entirely.
+    backup_dir: Option<String>,
+    /// The role a principal must hold to trigger a backup. `None` disables the endpoint.
+    backup_role: Option<String>,
+    /// The role a principal must hold to purge the spatial index. `None` disables the
+    /// endpoint, on the same reasoning as `backup_role`.
+    purge_role: Option<String>,
     threads: usize,
     ui: bool,
     trust_forwarded: bool,
@@ -127,6 +144,9 @@ impl Default for Config {
             gsp_path: "/graph".to_owned(),
             data: Vec::new(),
             store: None,
+            backup_dir: None,
+            backup_role: None,
+            purge_role: None,
             threads: 8,
             ui: true,
             trust_forwarded: false,
@@ -151,6 +171,12 @@ struct State {
     /// never wrong — reordering a basic graph pattern cannot change its answer — so a
     /// reader never has to wait for a rebuild.
     statistics: RwLock<Option<Arc<holos_stats::Statistics>>>,
+    /// The spatial index, rebuilt on every write alongside the statistics.
+    ///
+    /// Rebuilding rather than maintaining incrementally, for now: it is the same shape as
+    /// the statistics beside it, and it is what keeps the index *current*, which is the
+    /// condition the query path checks before it will use one at all.
+    spatial: RwLock<Option<Arc<holos_engine::spatial::SpatialIndex>>>,
 }
 
 impl State {
@@ -180,6 +206,42 @@ impl State {
     fn statistics(&self) -> Option<Arc<holos_stats::Statistics>> {
         self.statistics.read().ok().and_then(|s| s.clone())
     }
+
+    /// Brings the spatial index up to date with the store.
+    ///
+    /// Called wherever the statistics are refreshed, and for the same reason: a write has
+    /// happened, so anything derived from the store is out of date. An index that is not
+    /// refreshed is not *wrong* — the query path notices it no longer describes the store and
+    /// does the full scan instead — but it stops narrowing anything, so refreshing is what
+    /// makes it worth having.
+    ///
+    /// Updates the existing index rather than replacing it. A rebuild re-decodes and
+    /// re-parses every geometry in the store, which is 57% of its cost and all of it wasted
+    /// on geometries that have not changed; a refresh pays that only for terms it has not
+    /// seen before. The first call, when there is no index yet, still builds one.
+    fn refresh_spatial(&self) {
+        let Ok(engine) = self.engine.read() else {
+            return;
+        };
+        let existing = self.spatial.read().ok().and_then(|slot| slot.clone());
+        let outcome = match existing {
+            Some(index) => index.refresh(engine.store()),
+            None => holos_engine::spatial::SpatialIndex::build(engine.store()).map(|built| {
+                if let Ok(mut slot) = self.spatial.write() {
+                    *slot = Some(Arc::new(built));
+                }
+            }),
+        };
+        // Losing the index costs speed, not correctness: without one, topology relations are
+        // evaluated by scanning, which is what they did before it existed.
+        if let Err(e) = outcome {
+            eprintln!("the spatial index could not be brought up to date: {e}");
+        }
+    }
+
+    fn spatial(&self) -> Option<Arc<holos_engine::spatial::SpatialIndex>> {
+        self.spatial.read().ok().and_then(|s| s.clone())
+    }
 }
 
 fn main() -> Result<()> {
@@ -207,7 +269,14 @@ fn main() -> Result<()> {
         policy,
         config,
         statistics: RwLock::new(None),
+        spatial: RwLock::new(None),
     });
+    // Built unconditionally, and deliberately not inside the `--reorder` block below. The
+    // two were coupled, which meant a server started without `--reorder` — the default — had
+    // no spatial index at all until its first write, and every GeoSPARQL query until then
+    // did a full scan. Reordering and spatial routing are unrelated features that happened
+    // to be refreshed together.
+    state.refresh_spatial();
     if state.config.reorder {
         let started = std::time::Instant::now();
         state.refresh_statistics();
@@ -366,6 +435,8 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
             }
             apply_update(state, request, &update, &merged)
         }
+        ("POST", "/backup") => backup(state, request),
+        ("POST", "/maintenance/purge") => purge(state, request),
         ("OPTIONS", _) => respond(request, 204, "text/plain", Vec::new()),
         (method, p)
             if matches!(method, "GET" | "HEAD" | "PUT" | "POST" | "DELETE")
@@ -386,7 +457,10 @@ fn answer(
     params: &std::collections::HashMap<String, String>,
 ) -> Result<()> {
     let principal = principal_for(state, &request);
-    let guard = state.engine.read().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let guard = state
+        .engine
+        .read()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?;
     let session = match Session::open(guard.store(), principal, state.policy.clone()) {
         Ok(s) => s,
         Err(e) => {
@@ -450,6 +524,163 @@ fn is_graph_store_path(state: &State, path: &str) -> bool {
         && path.starts_with(&format!("{}/", state.config.gsp_path.trim_end_matches('/')))
 }
 
+/// Takes a consistent snapshot of the store, for an administrator.
+///
+/// # Why the client cannot name the destination
+///
+/// It would be the obvious API — `POST /backup?to=/srv/backups/tonight` — and it would be an
+/// arbitrary-write primitive: whatever the server process can write, a caller could ask it
+/// to fill with a copy of the database. The server owns the parent directory (`--backup-dir`)
+/// and mints a timestamped child; the caller chooses nothing but the moment.
+///
+/// # The guard
+///
+/// Three conditions, each of which fails closed:
+///
+/// 1. **The endpoint does not exist** unless both `--backup-dir` and `--backup-role` are set.
+///    An unconfigured server answers 404, so the surface is absent rather than merely
+///    defended.
+/// 2. **The principal must hold the named role.** A backup copies the whole store, ignoring
+///    the policy that governs every query — so this is the one operation where the ordinary
+///    access controls do not apply, and it needs its own.
+/// 3. **Identity has to be trustworthy.** Without `--trust-forwarded-identity` every request
+///    is anonymous and holds no roles, so the endpoint answers 403 to everyone. That is the
+///    correct default: an unauthenticated server should not be able to be told to copy
+///    itself.
+/// `POST /maintenance/purge` — reclaim spatial index entries for departed geometries.
+///
+/// # Why this is a maintenance step and not automatic
+///
+/// The spatial index tracks the **dictionary**, which never forgets, rather than the store.
+/// That is what lets it catch up with a write in a fraction of a millisecond instead of
+/// rebuilding — but it means deleting geometries leaves entries behind. Nothing is wrong
+/// while they are there: the index is a superset filter, and a geometry with no quads fails
+/// to join and contributes no row. It is memory, not correctness.
+///
+/// **Restarting does not clear them.** The index is rebuilt at startup from the dictionary,
+/// so it comes back holding every geometry ever interned. Reclaiming really does need an
+/// explicit step, which is why this exists.
+///
+/// # Scheduling
+///
+/// There is no timer inside the server. This is an endpoint so that whatever already
+/// schedules things on the host — cron, a systemd timer, a Kubernetes CronJob — can call it,
+/// the same way `deploy/backup.sh` calls `/backup`. A server that schedules its own
+/// maintenance is a server that does something surprising at three in the morning.
+///
+/// # The guard
+///
+/// The same shape as [`backup`]: the endpoint does not exist unless `--purge-role` is set,
+/// the principal must hold that role, and without `--trust-forwarded-identity` every request
+/// is anonymous and holds no roles. Purging cannot destroy data — it only drops derived
+/// entries — but it is a whole-store operation whose cost is proportional to the index, and
+/// an unauthenticated server should not be able to be told to do work.
+fn purge(state: &State, request: Request) -> Result<()> {
+    let Some(role) = &state.config.purge_role else {
+        // Not 403: a switched-off endpoint should be indistinguishable from one that was
+        // never built, so probing cannot map the configuration.
+        return respond(request, 404, "text/plain", b"not found".to_vec());
+    };
+
+    let principal = principal_for(state, &request);
+    if !principal.has_role(role) {
+        return respond(
+            request,
+            403,
+            "text/plain",
+            format!("a purge requires the `{role}` role").into_bytes(),
+        );
+    }
+
+    let Some(index) = state.spatial() else {
+        return respond(
+            request,
+            409,
+            "text/plain",
+            b"there is no spatial index to purge".to_vec(),
+        );
+    };
+
+    // A read lock: purging reads the store to ask which geometries are still referenced, and
+    // mutates only the index, which has its own lock.
+    let guard = state
+        .engine
+        .read()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let outcome = index.purge(guard.store());
+    drop(guard);
+
+    match outcome {
+        Ok(report) => {
+            let body = format!(
+                r#"{{"examined":{},"dropped":{},"retained":{}}}"#,
+                report.examined, report.dropped, report.retained
+            );
+            respond(request, 200, "application/json", body.into_bytes())
+        }
+        Err(e) => respond(request, 500, "text/plain", e.to_string().into_bytes()),
+    }
+}
+
+fn backup(state: &State, request: Request) -> Result<()> {
+    let (Some(dir), Some(role)) = (&state.config.backup_dir, &state.config.backup_role) else {
+        // Not 403: an endpoint that is switched off should be indistinguishable from one
+        // that was never built, so probing cannot map the configuration.
+        return respond(request, 404, "text/plain", b"not found".to_vec());
+    };
+
+    let principal = principal_for(state, &request);
+    if !principal.has_role(role) {
+        return respond(
+            request,
+            403,
+            "text/plain",
+            format!("a backup requires the `{role}` role").into_bytes(),
+        );
+    }
+
+    let destination = std::path::Path::new(dir).join(format!(
+        "holos-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    ));
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return respond(
+            request,
+            500,
+            "text/plain",
+            format!("could not prepare {dir}: {e}").into_bytes(),
+        );
+    }
+
+    // A read lock: a checkpoint is a read of the store, and blocking writers for its
+    // duration would defeat the point of having one.
+    let guard = state
+        .engine
+        .read()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let outcome = guard.store().checkpoint(&destination);
+    let quads = guard.store().len();
+    drop(guard);
+
+    match outcome {
+        Ok(()) => {
+            let body = format!(
+                r#"{{"path":{},"quads":{quads}}}"#,
+                ui::json_string(&destination.display().to_string())
+            );
+            respond(request, 201, "application/json", body.into_bytes())
+        }
+        Err(holos_store::StorageError::Unsupported(why)) => {
+            // 409 rather than 500: the request was well formed and the server is healthy;
+            // this store simply cannot do it right now, or at all.
+            respond(request, 409, "text/plain", why.into_bytes())
+        }
+        Err(e) => respond(request, 500, "text/plain", e.to_string().into_bytes()),
+    }
+}
+
 /// The Graph Store Protocol.
 ///
 /// One function for all five verbs because they share the target resolution, the policy
@@ -464,15 +695,15 @@ fn graph_store(
     let writing = matches!(method.as_str(), "PUT" | "POST" | "DELETE");
 
     if writing && state.config.read_only {
-        return respond(request, 403, "text/plain", b"this endpoint is read-only".to_vec());
+        return respond(
+            request,
+            403,
+            "text/plain",
+            b"this endpoint is read-only".to_vec(),
+        );
     }
 
-    let path = request
-        .url()
-        .split('?')
-        .next()
-        .unwrap_or("/")
-        .to_owned();
+    let path = request.url().split('?').next().unwrap_or("/").to_owned();
     // `POST` to the protocol endpoint itself, carrying neither `?graph` nor `?default`,
     // is the specification's "create a graph and tell me its name" (§5.5). It has to be
     // recognised before the ordinary rules run: with a base configured those would resolve
@@ -492,8 +723,7 @@ fn graph_store(
                 request,
                 400,
                 "text/plain",
-                b"creating a graph by POST needs --gsp-base, so the server can name it"
-                    .to_vec(),
+                b"creating a graph by POST needs --gsp-base, so the server can name it".to_vec(),
             );
         };
         let name = gsp::mint_graph_name(base, &path);
@@ -542,11 +772,19 @@ fn graph_store(
     // A read takes the read lock; a write takes the write lock. Sharing one path would
     // mean every GET excluding every other request for no reason.
     if writing {
-        let mut guard = state.engine.write().map_err(|_| anyhow::anyhow!("poisoned"))?;
+        let mut guard = state
+            .engine
+            .write()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?;
         let mut session = match Session::open(guard.store(), principal, state.policy.clone()) {
             Ok(s) => s,
             Err(e) => {
-                return respond(request, 500, "text/plain", format!("session: {e}").into_bytes())
+                return respond(
+                    request,
+                    500,
+                    "text/plain",
+                    format!("session: {e}").into_bytes(),
+                )
             }
         };
         let existed = match gsp::exists(&guard, &session, &target) {
@@ -554,54 +792,73 @@ fn graph_store(
             Err(e) => return respond(request, 500, "text/plain", e.to_string().into_bytes()),
         };
 
+        // Decided before a scope is opened, because both answers are refusals rather than
+        // writes and an early return past an open scope would leak it.
+        if method == "DELETE" && !existed {
+            // Not an error: the client learns the graph was not there.
+            return respond(request, 404, "text/plain", b"no such graph".to_vec());
+        }
+        if matches!(method.as_str(), "PUT" | "POST") && !usable {
+            return respond(
+                request,
+                415,
+                "text/plain",
+                b"unsupported media type: send RDF with a content-type this store parses".to_vec(),
+            );
+        }
+
+        // One commit scope for the whole request. `PUT` is clear-then-merge, and without
+        // this a body that fails to parse — or a quad the policy refuses — leaves the graph
+        // cleared and not replaced, having told the client the request failed. Emptying
+        // someone's graph is not an acceptable outcome of a 400.
+        if let Err(e) = guard.store_mut().begin() {
+            return respond(
+                request,
+                500,
+                "text/plain",
+                format!("begin: {e}").into_bytes(),
+            );
+        }
+
         let outcome = match method.as_str() {
             "DELETE" => {
-                if !existed {
-                    // Not an error: the client learns the graph was not there.
-                    return respond(request, 404, "text/plain", b"no such graph".to_vec());
-                }
                 // DELETE removes the graph, not just its contents — otherwise a second
                 // DELETE cannot answer 404.
                 gsp::drop_graph(&mut guard, &mut session, &target).map(|_| 204)
             }
-            "PUT" | "POST" => {
-                if !usable {
-                    return respond(
-                        request,
-                        415,
-                        "text/plain",
-                        b"unsupported media type: send RDF with a content-type this \
-                          store parses".to_vec(),
-                    );
-                }
-                // PUT replaces, POST merges. That difference is the whole distinction
-                // between the two verbs here.
-                let mut result = if method == "PUT" {
-                    gsp::clear(&mut guard, &mut session, &target).map(|_| ())
-                } else {
-                    Ok(())
-                };
-                // Each document in turn. PUT cleared once above rather than once per
-                // document, so the parts of an upload accumulate into the replacement
-                // instead of replacing one another.
-                for (content, format) in &documents {
-                    if result.is_err() {
-                        break;
-                    }
-                    result = gsp::merge(&mut guard, &mut session, &target, content, *format, None)
-                        .map(|_| ());
-                }
-                result
-                    .and_then(|()| gsp::create(&mut guard, &target))
-                    // 201 tells the client it created the graph; 204 that it changed one.
-                    .map(|()| if existed { 204 } else { 201 })
-            }
+            // PUT replaces, POST merges — see `gsp::write`, which is where the two
+            // operations a replace is made of are held together.
+            "PUT" | "POST" => gsp::write(
+                &mut guard,
+                &mut session,
+                &target,
+                &documents,
+                method == "PUT",
+            )
+            // 201 tells the client it created the graph; 204 that it changed one.
+            .map(|_| if existed { 204 } else { 201 }),
             _ => Ok(400),
+        };
+
+        // A 400 is still a well-formed answer rather than a failure, so it commits — there
+        // is nothing buffered under it. Anything that produced an error discards the batch,
+        // which is the whole point.
+        let outcome = match (&outcome, guard.store().in_scope()) {
+            (Ok(_), true) => match guard.store_mut().commit() {
+                Ok(()) => outcome,
+                Err(e) => Err(anyhow::anyhow!("commit: {e}")),
+            },
+            (Err(_), true) => {
+                guard.store_mut().rollback();
+                outcome
+            }
+            (_, false) => outcome,
         };
 
         drop(guard);
         if matches!(method.as_str(), "PUT" | "POST" | "DELETE") {
             state.refresh_statistics();
+            state.refresh_spatial();
         }
 
         return match outcome {
@@ -627,10 +884,20 @@ fn graph_store(
         };
     }
 
-    let guard = state.engine.read().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    let guard = state
+        .engine
+        .read()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?;
     let session = match Session::open(guard.store(), principal, state.policy.clone()) {
         Ok(s) => s,
-        Err(e) => return respond(request, 500, "text/plain", format!("session: {e}").into_bytes()),
+        Err(e) => {
+            return respond(
+                request,
+                500,
+                "text/plain",
+                format!("session: {e}").into_bytes(),
+            )
+        }
     };
     match gsp::exists(&guard, &session, &target) {
         Ok(false) => return respond(request, 404, "text/plain", b"no such graph".to_vec()),
@@ -775,6 +1042,9 @@ fn query_options(
     if let Some(stats) = state.statistics() {
         options = options.reordering(stats);
     }
+    if let Some(index) = state.spatial() {
+        options = options.with_spatial(index);
+    }
     for iri in http::values(params, "default-graph-uri") {
         let node = NamedNode::new(&iri).map_err(|e| format!("default-graph-uri `{iri}`: {e}"))?;
         options = options.with_default_graph(node.into());
@@ -817,17 +1087,17 @@ fn apply_update(
     // `using-graph-uri` names the dataset the update's WHERE runs against. It is applied
     // to the parsed form rather than the text, so an update that names its own dataset can
     // be told apart from one that does not — the protocol makes carrying both an error.
-    let outcome = named_dataset(params)
-        .and_then(|(default_graphs, named_graphs)| {
-            let mut parsed = sparql_update::parse(update, Some(&base))?;
-            sparql_update::with_protocol_dataset(&mut parsed, default_graphs, named_graphs)?;
-            sparql_update::apply(&mut guard, &mut session, &parsed)
-        });
+    let outcome = named_dataset(params).and_then(|(default_graphs, named_graphs)| {
+        let mut parsed = sparql_update::parse(update, Some(&base))?;
+        sparql_update::with_protocol_dataset(&mut parsed, default_graphs, named_graphs)?;
+        sparql_update::apply(&mut guard, &mut session, &parsed)
+    });
     // Release the write lock before rebuilding: refresh_statistics takes a read lock, and
     // holding the write lock across it would deadlock.
     drop(guard);
     if outcome.is_ok() {
         state.refresh_statistics();
+        state.refresh_spatial();
     }
 
     match outcome {
@@ -842,8 +1112,9 @@ fn apply_update(
             let status = match &e {
                 // Both mean the client sent something unanswerable, which is a 400
                 // whether the SPARQL failed to parse or the request contradicted itself.
-                holos_engine::EngineError::Syntax(_)
-                | holos_engine::EngineError::BadRequest(_) => 400,
+                holos_engine::EngineError::Syntax(_) | holos_engine::EngineError::BadRequest(_) => {
+                    400
+                }
                 holos_engine::EngineError::AccessDenied => 403,
                 _ => 500,
             };
@@ -894,7 +1165,10 @@ fn principal_for(state: &State, request: &Request) -> Principal {
         match header(request, "x-holos-principal") {
             Some(id) => Principal::new(NamedNode::new_unchecked(format!(
                 "urn:holos:principal:forwarded/{}",
-                id.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_', "_")
+                id.replace(
+                    |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_',
+                    "_"
+                )
             ))),
             None => Principal::anonymous(),
         }
@@ -908,7 +1182,8 @@ fn principal_for(state: &State, request: &Request) -> Principal {
                 principal = principal.with_role(role);
             }
         }
-        if let Some(level) = header(request, "x-holos-clearance").and_then(|c| c.trim().parse().ok())
+        if let Some(level) =
+            header(request, "x-holos-clearance").and_then(|c| c.trim().parse().ok())
         {
             principal = principal.with_clearance(Label::level(level));
         }
@@ -958,7 +1233,10 @@ fn respond_with(
         ("Access-Control-Allow-Headers", "content-type, accept"),
         // The Graph Store Protocol uses all five verbs, so a browser client that can only
         // GET and POST cannot reach half of it.
-        ("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, DELETE, OPTIONS"),
+        (
+            "Access-Control-Allow-Methods",
+            "GET, HEAD, POST, PUT, DELETE, OPTIONS",
+        ),
         // Without this a browser cannot read the name of a graph it just created.
         ("Access-Control-Expose-Headers", "location"),
     ]
@@ -988,7 +1266,9 @@ fn open_engine(config: &Config) -> Result<Engine> {
         Some(path) => {
             let storage = holos_store::RocksStorage::open(path)
                 .with_context(|| format!("opening the store at {path}"))?;
-            Ok(Engine::with_store(holos_store::Store::with_storage(storage)))
+            Ok(Engine::with_store(holos_store::Store::with_storage(
+                storage,
+            )))
         }
         #[cfg(not(feature = "rocksdb"))]
         Some(_) => anyhow::bail!("this build has no persistent backend"),
@@ -1054,6 +1334,9 @@ fn parse_args(args: &[String]) -> Result<Config> {
             "--listen" => c.listen = value(&mut i)?,
             "--data" => c.data.push(value(&mut i)?),
             "--store" => c.store = Some(value(&mut i)?),
+            "--backup-dir" => c.backup_dir = Some(value(&mut i)?),
+            "--backup-role" => c.backup_role = Some(value(&mut i)?),
+            "--purge-role" => c.purge_role = Some(value(&mut i)?),
             "--threads" => c.threads = value(&mut i)?.parse()?,
             "--timeout" => {
                 let seconds: f64 = value(&mut i)?.parse()?;

@@ -74,10 +74,24 @@ pub struct ValidationResult {
     pub source_shape: TermId,
     /// `sh:sourceConstraintComponent`.
     pub component: TermId,
+    /// `sh:sourceConstraint` — the node that *stated* the constraint, where that is a thing
+    /// distinct from the shape carrying it.
+    ///
+    /// Most constraints are written inline and have no such node. A node expression does:
+    /// the expression is a term in the shapes graph, and a reader needs it to know which
+    /// expression failed.
+    pub source_constraint: Option<TermId>,
     /// `sh:resultSeverity`.
     pub severity: TermId,
     /// `sh:resultMessage`, in shapes-graph order.
     pub messages: Vec<TermId>,
+    /// `sh:detail` — results that explain this one.
+    ///
+    /// A constraint whose violation is about a *structure* rather than a value reports the
+    /// structure and then, underneath, what was wrong inside it: `sh:uniqueMembers` names
+    /// the list and details the members that repeated. Nesting is what keeps the outer
+    /// result about the thing the shape was checking.
+    pub details: Vec<ValidationResult>,
 }
 
 /// The outcome of a validation.
@@ -87,16 +101,50 @@ pub struct Report {
     pub conforms: bool,
     /// Every violation found.
     pub results: Vec<ValidationResult>,
+    /// `sh:conformanceDisallows` — the severities that make the data non-conforming.
+    ///
+    /// `None` is the default rule: everything from `sh:Info` upwards disqualifies, and
+    /// `sh:Debug` and `sh:Trace` do not. A caller with a policy of its own says so here, and
+    /// the report then states which rule it used rather than leaving a reader to assume.
+    pub conformance_disallows: Option<Vec<TermId>>,
 }
 
 impl Report {
     /// Builds a report from results.
+    ///
+    /// `sh:conforms` is **not** "no results". SHACL 1.2 adds `sh:Debug` and `sh:Trace`
+    /// below `sh:Info`, and they are diagnostic rather than judgemental: a report may carry
+    /// them and still say the data conforms. Everything from `sh:Info` upwards is a finding
+    /// about the data and makes it non-conforming.
+    ///
+    /// The suite pins both halves of that. `severity-004` and `severity-005` carry a
+    /// `sh:Debug` and a `sh:Trace` result respectively and expect `sh:conforms true`;
+    /// `severity-003` carries a `sh:Warning` and expects `false`. Treating every result as
+    /// disqualifying, or none below `sh:Violation` as disqualifying, gets one of those
+    /// wrong.
     #[must_use]
     pub fn new(results: Vec<ValidationResult>) -> Self {
         Self {
-            conforms: results.is_empty(),
+            conforms: !results.iter().any(is_judgement),
             results,
+            conformance_disallows: None,
         }
+    }
+
+    /// Recomputes conformance against an explicit set of disqualifying severities.
+    ///
+    /// The default rule is a rule, not a law: a caller may decide that only `sh:Violation`
+    /// disqualifies, and then a report full of warnings still conforms. Saying so here makes
+    /// the report carry the rule it was judged by, which is the difference between "this
+    /// data is fine" and "this data is fine *by these lights*".
+    #[must_use]
+    pub fn with_conformance_disallows(mut self, disallowed: Vec<TermId>) -> Self {
+        self.conforms = !self
+            .results
+            .iter()
+            .any(|r| disallowed.contains(&r.severity));
+        self.conformance_disallows = Some(disallowed);
+        self
     }
 
     /// A conforming report.
@@ -104,6 +152,22 @@ impl Report {
     pub fn conforming() -> Self {
         Self::new(Vec::new())
     }
+}
+
+/// Whether a result is a finding about the data rather than a diagnostic note.
+///
+/// Compared against the well-known ids directly rather than through a `Sh` vocabulary
+/// struct, because [`Report::new`] is a plain constructor with no graph to resolve against —
+/// and these two IRIs are compile-time constants precisely so that is possible.
+fn is_judgement(result: &ValidationResult) -> bool {
+    let diagnostic = [
+        "http://www.w3.org/ns/shacl#Debug",
+        "http://www.w3.org/ns/shacl#Trace",
+    ]
+    .into_iter()
+    .filter_map(holos_core::vocab::encode_iri)
+    .any(|id| id == result.severity);
+    !diagnostic
 }
 
 /// Which graphs to read.
@@ -207,10 +271,17 @@ impl CompiledShapes {
         let mut attributed: rustc_hash::FxHashSet<(ShapeIdx, TermId)> =
             rustc_hash::FxHashSet::default();
         let mut implicated: rustc_hash::FxHashSet<ShapeIdx> = rustc_hash::FxHashSet::default();
+        // Shapes whose violation can sit at a node the delta never mentions, so the
+        // endpoint attribution below cannot reach it.
+        let mut widen: rustc_hash::FxHashSet<ShapeIdx> = rustc_hash::FxHashSet::default();
         for (idx, node) in plan.work() {
+            let upstream = self.shapes.focus_may_be_upstream(idx);
             for ancestor in self.shapes.targeted_ancestors(idx) {
                 implicated.insert(ancestor);
                 attributed.insert((ancestor, node));
+                if upstream {
+                    widen.insert(ancestor);
+                }
             }
         }
 
@@ -230,8 +301,13 @@ impl CompiledShapes {
                 .get(idx)
                 .is_some_and(|nodes| nodes.binary_search(focus).is_ok())
         });
+        // Widen a shape that got nothing — and one whose focus node can be upstream of the
+        // change, which the endpoint attribution reaches only by accident. Without the
+        // second case a compound path finds the violation at the node that changed and
+        // misses the one at the node whose path runs through it: a full validation rejects
+        // the graph and the write path admits it.
         for idx in &implicated {
-            if attributed.iter().any(|(i, _)| i == idx) {
+            if !widen.contains(idx) && attributed.iter().any(|(i, _)| i == idx) {
                 continue;
             }
             for focus in focus_cache.get(idx).into_iter().flatten() {
@@ -253,6 +329,7 @@ impl CompiledShapes {
         report::to_quads(
             report,
             GraphView::new(store, self.options.shapes_graph),
+            &self.shapes,
             &self.sh,
         )
     }

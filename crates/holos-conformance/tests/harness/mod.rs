@@ -119,6 +119,10 @@ pub fn trace(request: &holos_conformance::protocol::ScriptedRequest) {
         request.method, request.path, request.headers
     );
     if let Some(body) = &request.body {
-        eprintln!("     {} bytes: {:?}", body.len(), &body[..body.len().min(160)]);
+        eprintln!(
+            "     {} bytes: {:?}",
+            body.len(),
+            &body[..body.len().min(160)]
+        );
     }
 }
