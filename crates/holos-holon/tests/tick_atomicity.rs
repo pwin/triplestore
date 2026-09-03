@@ -235,3 +235,120 @@ fn a_tick_inside_a_caller_scope_joins_that_commit() {
     );
     assert_eq!(events_size(&engine, &h), 0);
 }
+
+// --------------------------------------------------------------- registering and branching
+
+/// A holon's definition is several quads, and half of one is not a holon.
+///
+/// `register` writes a type, three graph names and an admission policy, checking `ADMIN` on
+/// each. Denying one of them partway leaves an entry naming a scene and no admission — which
+/// `load` will read back as a holon, or refuse to, depending on which quad was missed. Either
+/// way the system graph is holding something nobody wrote on purpose.
+#[test]
+fn a_refused_registration_leaves_nothing_in_the_system_graph() {
+    let mut engine = Engine::new();
+    let h = holon();
+
+    // Everything except the last quad `register` writes. The point is to fail *partway*: a
+    // policy that denied the whole system graph would stop it at the first quad and leave
+    // nothing behind without the scope doing any work.
+    let mut session = Session::open(
+        engine.store(),
+        Principal::anonymous().with_role("half-admin"),
+        Policy::default()
+            .with_rule(Rule::allow(
+                Modes::ALL,
+                Scope::Everything,
+                PrincipalMatch::Role("half-admin".into()),
+            ))
+            .with_rule(Rule::deny(
+                Modes::ADMIN,
+                Scope::Predicate(holos_holon::model::holos("admits")),
+                PrincipalMatch::Role("half-admin".into()),
+            )),
+    )
+    .expect("session");
+
+    let result = registry::register(&mut engine, &h, &mut session);
+    assert!(
+        result.is_err(),
+        "the admission quad should have been refused"
+    );
+
+    assert_eq!(
+        holos_holon::graph_size(engine.store(), &holos_holon::model::system_graph()),
+        0,
+        "a refused registration left part of a holon definition behind"
+    );
+    assert!(
+        registry::load(engine.store(), &h.id)
+            .expect("load")
+            .is_none(),
+        "and nothing that reads back as a holon"
+    );
+}
+
+/// A branch is five multi-write operations, and a half-branch is worse than no branch.
+///
+/// The scene and boundary are copied without a policy check — they are the store's own data
+/// being duplicated — and only then does `register` ask for `ADMIN`. So a principal who may
+/// write but may not register gets all the way through the copying before failing, which is
+/// exactly the shape that leaves a scene sitting under a name nothing points at.
+#[test]
+fn a_failed_branch_leaves_no_half_branch() {
+    let (mut engine, source, mut admin) = prepared();
+    tick(
+        &mut engine,
+        &source,
+        &mut admin,
+        &Delta::adding(person("alice", "Alice")),
+    )
+    .expect("something to branch");
+
+    let child_id = NamedNode::new_unchecked("urn:holon:people-copy");
+    let child = Holon::new(child_id.clone());
+
+    // May write anything, may register nothing.
+    let mut writer = Session::open(
+        engine.store(),
+        Principal::anonymous().with_role("writer"),
+        Policy::default()
+            .with_rule(Rule::allow(
+                Modes::READ.union(Modes::WRITE),
+                Scope::Everything,
+                PrincipalMatch::Role("writer".into()),
+            ))
+            .with_rule(Rule::deny(
+                Modes::ADMIN,
+                Scope::Everything,
+                PrincipalMatch::Role("writer".into()),
+            )),
+    )
+    .expect("session");
+
+    let result = holos_holon::branch::branch(&mut engine, &source, child_id.clone(), &mut writer);
+    assert!(
+        result.is_err(),
+        "registering the child should have been refused"
+    );
+
+    assert_eq!(
+        holos_holon::graph_size(engine.store(), &child.scene),
+        0,
+        "the failed branch left the parent's scene copied under the child's name"
+    );
+    assert_eq!(
+        holos_holon::graph_size(engine.store(), &child.boundary),
+        0,
+        "and its boundary"
+    );
+    assert!(
+        registry::load(engine.store(), &child_id)
+            .expect("load")
+            .is_none(),
+        "and nothing registered"
+    );
+
+    // The parent is untouched, which is the other half of "nothing happened".
+    assert_eq!(scene_size(&engine, &source), 2);
+}

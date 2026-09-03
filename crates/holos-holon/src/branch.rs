@@ -79,8 +79,23 @@ pub fn branch(
         )));
     }
 
+    // Five multi-write operations, and a half-finished branch is worse than none: a scene
+    // copied with no registry entry is invisible, and a registry entry with no boundary is a
+    // holon that silently constrains nothing. One scope around the lot, so it is one commit.
+    let owned = crate::begin_commit(engine)?;
+    let result = branch_body(engine, source, new_id, session);
+    crate::end_commit(engine, owned, result.is_ok())?;
+    result
+}
+
+fn branch_body(
+    engine: &mut Engine,
+    source: &Holon,
+    new_id: NamedNode,
+    session: &mut Session,
+) -> Result<Holon, HolonError> {
     let version = registry::version(engine, source)?;
-    let mut child = Holon::new(new_id.clone());
+    let mut child = Holon::new(new_id);
     child.admission = source.admission;
     child.projections = source.projections.clone();
 

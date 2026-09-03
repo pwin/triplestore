@@ -25,6 +25,20 @@ pub fn register(
     holon: &Holon,
     session: &mut Session,
 ) -> Result<(), HolonError> {
+    // A holon's definition is several quads and is only meaningful whole. Written one at a
+    // time, a policy refusal partway leaves an entry that names a scene and no boundary —
+    // which `load` will happily read back as a holon that does not constrain anything.
+    let owned = crate::begin_commit(engine)?;
+    let result = register_body(engine, holon, session);
+    crate::end_commit(engine, owned, result.is_ok())?;
+    result
+}
+
+fn register_body(
+    engine: &mut Engine,
+    holon: &Holon,
+    session: &mut Session,
+) -> Result<(), HolonError> {
     let graph = GraphName::from(system_graph());
     let mut quads = vec![
         quad(&holon.id, rdf::TYPE.into_owned(), holos("Holon"), &graph),
@@ -142,6 +156,15 @@ pub fn next_version(engine: &Engine, holon: &Holon) -> Result<u64, HolonError> {
 /// state*, and the event log is append-only. Storing a mutable counter in an append-only
 /// log is how logs stop being append-only.
 pub fn set_version(engine: &mut Engine, holon: &Holon, version: u64) -> Result<(), HolonError> {
+    // Remove the old, insert the new. Between the two the holon has no version at all, and
+    // a failure there would leave it that way.
+    let owned = crate::begin_commit(engine)?;
+    let result = set_version_body(engine, holon, version);
+    crate::end_commit(engine, owned, result.is_ok())?;
+    result
+}
+
+fn set_version_body(engine: &mut Engine, holon: &Holon, version: u64) -> Result<(), HolonError> {
     let graph = GraphName::from(system_graph());
     let previous = self::version(engine, holon)?;
     if previous != 0 {

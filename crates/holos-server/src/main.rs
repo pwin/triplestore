@@ -792,50 +792,67 @@ fn graph_store(
             Err(e) => return respond(request, 500, "text/plain", e.to_string().into_bytes()),
         };
 
+        // Decided before a scope is opened, because both answers are refusals rather than
+        // writes and an early return past an open scope would leak it.
+        if method == "DELETE" && !existed {
+            // Not an error: the client learns the graph was not there.
+            return respond(request, 404, "text/plain", b"no such graph".to_vec());
+        }
+        if matches!(method.as_str(), "PUT" | "POST") && !usable {
+            return respond(
+                request,
+                415,
+                "text/plain",
+                b"unsupported media type: send RDF with a content-type this store parses".to_vec(),
+            );
+        }
+
+        // One commit scope for the whole request. `PUT` is clear-then-merge, and without
+        // this a body that fails to parse — or a quad the policy refuses — leaves the graph
+        // cleared and not replaced, having told the client the request failed. Emptying
+        // someone's graph is not an acceptable outcome of a 400.
+        if let Err(e) = guard.store_mut().begin() {
+            return respond(
+                request,
+                500,
+                "text/plain",
+                format!("begin: {e}").into_bytes(),
+            );
+        }
+
         let outcome = match method.as_str() {
             "DELETE" => {
-                if !existed {
-                    // Not an error: the client learns the graph was not there.
-                    return respond(request, 404, "text/plain", b"no such graph".to_vec());
-                }
                 // DELETE removes the graph, not just its contents — otherwise a second
                 // DELETE cannot answer 404.
                 gsp::drop_graph(&mut guard, &mut session, &target).map(|_| 204)
             }
-            "PUT" | "POST" => {
-                if !usable {
-                    return respond(
-                        request,
-                        415,
-                        "text/plain",
-                        b"unsupported media type: send RDF with a content-type this \
-                          store parses"
-                            .to_vec(),
-                    );
-                }
-                // PUT replaces, POST merges. That difference is the whole distinction
-                // between the two verbs here.
-                let mut result = if method == "PUT" {
-                    gsp::clear(&mut guard, &mut session, &target).map(|_| ())
-                } else {
-                    Ok(())
-                };
-                // Each document in turn. PUT cleared once above rather than once per
-                // document, so the parts of an upload accumulate into the replacement
-                // instead of replacing one another.
-                for (content, format) in &documents {
-                    if result.is_err() {
-                        break;
-                    }
-                    result = gsp::merge(&mut guard, &mut session, &target, content, *format, None)
-                        .map(|_| ());
-                }
-                result
-                    .and_then(|()| gsp::create(&mut guard, &target))
-                    // 201 tells the client it created the graph; 204 that it changed one.
-                    .map(|()| if existed { 204 } else { 201 })
-            }
+            // PUT replaces, POST merges — see `gsp::write`, which is where the two
+            // operations a replace is made of are held together.
+            "PUT" | "POST" => gsp::write(
+                &mut guard,
+                &mut session,
+                &target,
+                &documents,
+                method == "PUT",
+            )
+            // 201 tells the client it created the graph; 204 that it changed one.
+            .map(|_| if existed { 204 } else { 201 }),
             _ => Ok(400),
+        };
+
+        // A 400 is still a well-formed answer rather than a failure, so it commits — there
+        // is nothing buffered under it. Anything that produced an error discards the batch,
+        // which is the whole point.
+        let outcome = match (&outcome, guard.store().in_scope()) {
+            (Ok(_), true) => match guard.store_mut().commit() {
+                Ok(()) => outcome,
+                Err(e) => Err(anyhow::anyhow!("commit: {e}")),
+            },
+            (Err(_), true) => {
+                guard.store_mut().rollback();
+                outcome
+            }
+            (_, false) => outcome,
         };
 
         drop(guard);

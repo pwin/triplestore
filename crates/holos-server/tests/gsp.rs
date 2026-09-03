@@ -82,18 +82,131 @@ fn post_merges_and_put_replaces() {
         "POST accumulates"
     );
 
-    // PUT is clear-then-merge.
-    gsp::clear(&mut engine, &mut session, &target).expect("clear");
-    gsp::merge(
+    // PUT through the function the handler actually calls, rather than by hand. Simulating
+    // it here with a `clear` and a `merge` is what let the sequencing bug below hide: two
+    // `.expect()` calls only ever exercise the happy path.
+    gsp::write(
         &mut engine,
         &mut session,
         &target,
-        &turtle("z", "9"),
-        RdfFormat::NTriples,
-        None,
+        &[(turtle("z", "9"), RdfFormat::NTriples)],
+        true,
     )
-    .expect("merge");
+    .expect("PUT");
     assert_eq!(triples_in(&engine, &session, &target), 1, "PUT replaces");
+}
+
+/// A `PUT` that fails must leave the graph it was replacing exactly as it was.
+///
+/// The failure this pins is data loss, not a wrong answer. A replace is a clear followed by a
+/// merge, and the body is not parsed until the merge — so a malformed body used to empty the
+/// graph, fail, and return the client a 400 saying the request had not happened. The graph
+/// was gone and nothing said so.
+///
+/// Two ways in, because they fail at different points and a fix for one is not a fix for the
+/// other: a body that will not parse, and a body that parses into a quad the principal is not
+/// allowed to write.
+#[test]
+fn a_failed_put_does_not_destroy_what_it_was_replacing() {
+    let (mut engine, mut session) = setup();
+    let target = graph();
+
+    gsp::write(
+        &mut engine,
+        &mut session,
+        &target,
+        &[(turtle("keep", "1"), RdfFormat::NTriples)],
+        true,
+    )
+    .expect("the graph to replace");
+    assert_eq!(triples_in(&engine, &session, &target), 1);
+
+    // 1. A body that does not parse. The valid first line makes it past the point where a
+    //    parser could refuse the document before reading any of it.
+    let half_bad = b"<http://example.org/a> <http://example.org/p> \"ok\" .\nthis is not turtle";
+    assert!(gsp::write(
+        &mut engine,
+        &mut session,
+        &target,
+        &[(half_bad.to_vec(), RdfFormat::NTriples)],
+        true,
+    )
+    .is_err());
+    assert_eq!(
+        triples_in(&engine, &session, &target),
+        1,
+        "a PUT with an unparseable body emptied the graph and did not replace it"
+    );
+
+    // 2. A multipart upload whose second part is bad. The first part parses and writes, so
+    //    this fails later than case 1 — after the clear *and* after some of the replacement.
+    assert!(gsp::write(
+        &mut engine,
+        &mut session,
+        &target,
+        &[
+            (turtle("new", "2"), RdfFormat::NTriples),
+            (half_bad.to_vec(), RdfFormat::NTriples),
+        ],
+        true,
+    )
+    .is_err());
+    assert_eq!(
+        triples_in(&engine, &session, &target),
+        1,
+        "a PUT whose second document failed left the first one behind"
+    );
+}
+
+/// The same, for a body that parses but that policy will not let through.
+///
+/// Different code path from a parse failure — the refusal comes from the store rather than
+/// the parser, and lands partway through writing rather than before any of it.
+#[test]
+fn a_put_refused_by_policy_does_not_destroy_what_it_was_replacing() {
+    let (mut engine, mut session) = setup();
+    let target = graph();
+    gsp::write(
+        &mut engine,
+        &mut session,
+        &target,
+        &[(turtle("keep", "1"), RdfFormat::NTriples)],
+        true,
+    )
+    .expect("the graph to replace");
+
+    // A principal that may read and write everything except `ex:secret`. The document's
+    // first triple is allowed and its second is not, so the refusal lands mid-write.
+    let policy = Policy::default()
+        .with_rule(Rule::allow(
+            Modes::ALL,
+            Scope::Everything,
+            PrincipalMatch::Everyone,
+        ))
+        .with_rule(Rule::deny(
+            Modes::WRITE,
+            Scope::Predicate(NamedNode::new_unchecked(format!("{EX}secret"))),
+            PrincipalMatch::Everyone,
+        ));
+    let mut limited =
+        Session::open(engine.store(), Principal::anonymous(), policy).expect("session");
+
+    let mixed =
+        format!("<{EX}a> <{EX}p> \"fine\" .\n<{EX}a> <{EX}secret> \"nope\" .\n").into_bytes();
+    assert!(gsp::write(
+        &mut engine,
+        &mut limited,
+        &target,
+        &[(mixed, RdfFormat::NTriples)],
+        true,
+    )
+    .is_err());
+
+    assert_eq!(
+        triples_in(&engine, &session, &target),
+        1,
+        "a PUT refused by policy emptied the graph and did not replace it"
+    );
 }
 
 #[test]

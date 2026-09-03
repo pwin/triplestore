@@ -1033,7 +1033,31 @@ impl Storage for RocksStorage {
         };
         // One batch, one write. This is the whole guarantee: RocksDB applies a batch
         // atomically, so a crash lands either before the commit or after it.
-        self.write_pending(scope.pending, false)
+        let ScopeState {
+            pending,
+            quad_count,
+            predicate_counts,
+            ..
+        } = scope;
+        if let Err(e) = self.write_pending(pending, false) {
+            // The batch did not land, so the counters must not keep the values the scope
+            // gave them. They were advanced in memory as the scope ran, and dropping the
+            // scope's copies here — which the first version of this did — would leave
+            // `len` and `predicate_count` reporting writes that are not in the database,
+            // for the life of the process.
+            //
+            // The same restore as `rollback`, for the same reason: nothing was written.
+            //
+            // Not covered by a test, and it is worth saying why rather than leaving a reader
+            // to assume it is. The only way here is a RocksDB write failure — a full disk, a
+            // failing device — and there is no way to provoke one in-process through the
+            // public API. The argument is structural: this restores exactly the two fields
+            // `rollback` restores, from the same saved copies, and `rollback` *is* tested.
+            self.quad_count = quad_count;
+            self.predicate_counts = predicate_counts;
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn rollback(&mut self) {

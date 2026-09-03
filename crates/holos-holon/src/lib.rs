@@ -151,6 +151,47 @@ impl TickOutcome {
     }
 }
 
+/// Whether this caller opened the commit scope it is running in.
+///
+/// A newtype rather than a bare `bool` because the two are not interchangeable and getting
+/// them the wrong way round is silent: committing a scope you do not own ends someone else's
+/// commit early, and failing to commit one you do own leaks it.
+#[must_use]
+pub(crate) struct Owned(bool);
+
+/// Opens a commit scope unless the caller already has one.
+///
+/// Every multi-write operation here needs this, for the same reason: it writes several quads
+/// and there is no state in between that anyone should be able to observe or be left with.
+/// Joining a caller's scope rather than nesting means the outermost operation is the commit,
+/// which is what makes a tick that registers a holon one commit rather than three.
+pub(crate) fn begin_commit(engine: &mut Engine) -> Result<Owned, HolonError> {
+    let owned = !engine.store().in_scope();
+    if owned {
+        engine.store_mut().begin()?;
+    }
+    Ok(Owned(owned))
+}
+
+/// Closes a scope opened by [`begin_commit`], keeping the writes or discarding them.
+///
+/// Call this from a wrapper around the work rather than at each `return`, so that a `?` on a
+/// store call cannot slip past it — that is the failure the tick was rewritten to prevent.
+// Taken by value on purpose, and deliberately not `Copy`: consuming the token is what stops
+// a caller closing the same scope twice, which is how a commit ends up half-owned by two
+// pieces of code. Clippy only sees that the body reads one field.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn end_commit(engine: &mut Engine, owned: Owned, kept: bool) -> Result<(), HolonError> {
+    if owned.0 {
+        if kept {
+            engine.store_mut().commit()?;
+        } else {
+            engine.store_mut().rollback();
+        }
+    }
+    Ok(())
+}
+
 /// Applies one tick to a holon.
 ///
 /// The write authorisation is per quad and goes through the session, so §14's policy covers
@@ -198,19 +239,10 @@ pub fn tick_with_rules(
     //
     // A caller may already have one open, in which case the tick joins that commit instead of
     // making one of its own and the rollback point is the caller's.
-    let owned = !engine.store().in_scope();
-    if owned {
-        engine.store_mut().begin()?;
-    }
+    let owned = begin_commit(engine)?;
     let mut rules = rules;
     let outcome = tick_body(engine, holon, session, delta, rules.as_deref_mut());
-    if owned {
-        if outcome.is_ok() {
-            engine.store_mut().commit()?;
-        } else {
-            engine.store_mut().rollback();
-        }
-    }
+    end_commit(engine, owned, outcome.is_ok())?;
     // After the scope, so the bridge is squared against the store as it finally stands rather
     // than as it stood mid-tick. A refused commit counts as not kept: the boundary turned the
     // delta away, so the bridge must not go on believing in it.
