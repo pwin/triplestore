@@ -321,6 +321,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix",
+ "windows-sys",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -569,6 +579,7 @@ name = "holos-cli"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "fs4",
  "holos-core",
  "holos-engine",
  "holos-security",
@@ -579,6 +590,7 @@ dependencies = [
  "oxrdfio",
  "sparesults",
  "spareval",
+ "tempfile",
 ]
 
 [[package]]
@@ -684,6 +696,7 @@ name = "holos-server"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "fs4",
  "holos-core",
  "holos-engine",
  "holos-security",

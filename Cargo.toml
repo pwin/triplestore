@@ -63,6 +63,11 @@ holos-stats = { path = "crates/holos-stats", version = "0.3.0" }
 
 # --- everything else
 anyhow = "1"
+# Free space on a filesystem, which `std` does not expose and which the maintenance
+# commands need: `compact` writes a second copy of the store and `backup` can, so both
+# can fill a disk. A thin wrapper over statvfs and GetDiskFreeSpaceExW — `default-features`
+# off drops its async integrations, which this project has no runtime for.
+fs4 = { version = "1", default-features = false, features = ["sync"] }
 thiserror = "2"
 rustc-hash = "2"
 # Already in the tree through `geo`; declared because `holos-engine` uses it directly for

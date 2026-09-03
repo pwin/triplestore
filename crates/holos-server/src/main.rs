@@ -660,6 +660,34 @@ fn backup(state: &State, request: Request) -> Result<()> {
         .engine
         .read()
         .map_err(|_| anyhow::anyhow!("poisoned"))?;
+
+    // Refused before it starts, if it cannot fit. This is the endpoint a scheduler calls
+    // every night, so it is the one that fills a disk while nobody is watching — and the
+    // hard links a checkpoint makes are what stop compaction reclaiming the space, so a
+    // backup directory on the store's own filesystem grows until something says no.
+    //
+    // 507 rather than 500: the request was well formed and the server is healthy. It is the
+    // storage that is insufficient, which is exactly what the code means and is a thing a
+    // scheduler can alert on differently from a fault.
+    if let (Some(needed), Some(available)) = (
+        guard.store().on_disk_bytes(),
+        fs4::available_space(dir).ok(),
+    ) {
+        if needed > 0 && available < needed {
+            drop(guard);
+            return respond(
+                request,
+                507,
+                "text/plain",
+                format!(
+                    "not enough room for a checkpoint: the store holds {needed} bytes and \
+                     {dir} has {available} free"
+                )
+                .into_bytes(),
+            );
+        }
+    }
+
     let outcome = guard.store().checkpoint(&destination);
     let quads = guard.store().len();
     drop(guard);

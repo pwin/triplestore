@@ -291,3 +291,25 @@ fn a_finished_load_leaves_no_scratch_files() -> Result<()> {
     );
     Ok(())
 }
+
+/// The size a maintenance operation has to fit.
+///
+/// Counted through the whole directory rather than from RocksDB's `total-sst-files-size`,
+/// which leaves out the write-ahead log and the manifest — and a backup that cannot
+/// hard-link has to copy those too.
+#[test]
+fn a_store_can_say_how_much_disk_it_uses() -> Result<()> {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut store = opened(&dir)?;
+
+    let empty = store.on_disk_bytes().expect("a persistent store knows");
+    load(&mut store, &fixture(), true).expect("load");
+    store.flush().expect("flush");
+    let loaded = store.on_disk_bytes().expect("still knows");
+
+    assert!(loaded > empty, "{loaded} should exceed {empty}");
+    // An in-memory store has no files, and saying `Some(0)` would read as "an empty store on
+    // disk" rather than "not on disk at all".
+    assert_eq!(Store::new().on_disk_bytes(), None);
+    Ok(())
+}

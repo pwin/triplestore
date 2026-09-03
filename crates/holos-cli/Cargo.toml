@@ -23,6 +23,10 @@ oxrdfio.workspace = true
 sparesults.workspace = true
 spareval.workspace = true
 anyhow.workspace = true
+fs4.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [features]
 default = ["rocksdb"]

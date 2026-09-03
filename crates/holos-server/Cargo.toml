@@ -23,6 +23,7 @@ oxrdfio.workspace = true
 sparesults.workspace = true
 spareval.workspace = true
 anyhow.workspace = true
+fs4.workspace = true
 # A small synchronous server. The store is single-writer/many-readers and its writes take
 # `&mut`, so a thread-per-request model over an `RwLock` matches it exactly; an async
 # runtime would buy nothing here but a much larger dependency tree.

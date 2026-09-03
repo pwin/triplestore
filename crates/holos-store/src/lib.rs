@@ -287,6 +287,14 @@ impl Store {
         self.inner.in_scope()
     }
 
+    /// How many bytes this store occupies on disk, or `None` for an in-memory one.
+    ///
+    /// What a maintenance operation has to fit: see [`Storage::on_disk_bytes`].
+    #[must_use]
+    pub fn on_disk_bytes(&self) -> Option<u64> {
+        self.inner.on_disk_bytes()
+    }
+
     /// Announces a bulk load, so the backend can buffer writes and skip its log.
     ///
     /// # Errors

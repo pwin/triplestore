@@ -50,6 +50,10 @@ MAINTENANCE
                              <https://holos.dev/ns#entailed> -- an absolute IRI, because
                              `DROP GRAPH` needs the name the store actually holds.
     --entail-budget <N>      Refuse a closure larger than N new triples. Default 10,000,000.
+    --force                  Run `compact` even when the headroom estimate says it will
+                             not fit. The estimate is the source store's size on disk, which
+                             is generous on purpose: a compaction that reclaims most of a
+                             store needs far less. Use it when you know that is the case.
     --to <DIR>               Destination for `backup` and `compact`. Must not exist.
                              `backup` writes a RocksDB checkpoint: near-instant, hard-linked,
                              and it preserves the store exactly — including the dictionary
@@ -150,7 +154,7 @@ fn main() -> Result<()> {
 
     match command.as_str() {
         "query" => query(&engine, &opts),
-        "stats" => stats(&engine),
+        "stats" => stats(&engine, &opts),
         "dump" => dump(&engine, &opts),
         "update" => update_command(&mut engine, &opts),
         "validate" => validate(&mut engine, &opts),
@@ -244,6 +248,113 @@ fn write_results(results: QueryResults<'_>, format: QueryResultsFormat) -> Resul
     Ok(())
 }
 
+/// Renders a byte count the way an operator reading a refusal wants to see it.
+fn human(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Free space on the filesystem that will hold `destination`.
+///
+/// Asked of the nearest existing ancestor, because the destination itself must not exist
+/// yet — that is the precondition both maintenance commands check first.
+fn available_at(destination: &Path) -> Option<u64> {
+    let mut probe = destination;
+    loop {
+        if probe.exists() {
+            return fs4::available_space(probe).ok();
+        }
+        probe = probe.parent()?;
+        if probe.as_os_str().is_empty() {
+            return fs4::available_space(Path::new(".")).ok();
+        }
+    }
+}
+
+/// Refuses a maintenance command that cannot fit, before it spends an hour finding out.
+///
+/// The estimate is the source store's size on disk, which is deliberately generous for
+/// `compact` — the whole point of compacting is that the result is smaller — and about right
+/// for a `backup` that has to copy rather than link. Erring high is the safe direction for a
+/// check whose failure mode is a full disk.
+///
+/// `--force` exists because the estimate cannot know the answer: a compaction that reclaims
+/// nine tenths of a store genuinely needs a tenth of this, and an operator who knows that
+/// should not be blocked by arithmetic.
+fn check_headroom(
+    engine: &Engine,
+    source: Option<&str>,
+    destination: &Path,
+    force: bool,
+) -> Result<()> {
+    let (Some(source), Some(needed)) = (source, engine.store().on_disk_bytes()) else {
+        return Ok(());
+    };
+    let Some(available) = available_at(destination) else {
+        // Not knowing is not a reason to refuse. Say so, so an operator on a filesystem this
+        // cannot read does not think the check passed.
+        eprintln!(
+            "note: could not read free space for {}",
+            destination.display()
+        );
+        return Ok(());
+    };
+    if let Some(warning) = headroom_verdict(source, destination, needed, available, force)? {
+        eprintln!("{warning}");
+    }
+    Ok(())
+}
+
+/// The decision, separated from the filesystem so it can be tested.
+///
+/// `Ok(None)` fits, `Ok(Some(_))` does not fit but `--force` was given and here is what to
+/// say about it, `Err` refuses. Splitting it out is not ceremony: the interesting behaviour
+/// is entirely in the comparison, and reaching it through the real filesystem would mean a
+/// test that can only run on a nearly-full disk.
+fn headroom_verdict(
+    source: &str,
+    destination: &Path,
+    needed: u64,
+    available: u64,
+    force: bool,
+) -> Result<Option<String>> {
+    // A source of nothing is a store that has not been written to, or a path this could not
+    // read. Either way there is nothing to compare against.
+    if needed == 0 || available >= needed {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        force,
+        "not enough room: {} holds {}, and {} has {} free.\n\n\
+         This is an estimate from the source's size on disk, and it is deliberately \
+         generous — a compaction that reclaims most of a store needs far less. If you know \
+         it will fit, pass --force.\n\n\
+         Otherwise: free space, choose a --to on another filesystem, or run `holos compact` \
+         first if this is a backup of a store with a lot of deleted data in it.",
+        source,
+        human(needed),
+        destination.display(),
+        human(available)
+    );
+    Ok(Some(format!(
+        "warning: {} holds {} and {} has {} free; continuing because --force was given",
+        source,
+        human(needed),
+        destination.display(),
+        human(available)
+    )))
+}
+
 /// Writes a consistent snapshot of a persistent store to a new directory.
 ///
 /// Works on a store another process has open and is writing to, which is what makes it a
@@ -271,6 +382,32 @@ fn backup(engine: &Engine, opts: &Options) -> Result<()> {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
+        }
+    }
+
+    // A warning rather than a refusal. A checkpoint onto the same filesystem hard-links and
+    // costs almost nothing up front, so demanding the full size would block the ordinary
+    // case; but the links pin blocks that compaction can then never reclaim, so a store this
+    // size *will* eventually be needed. Onto another filesystem it is needed immediately.
+    if let (Some(needed), Some(available)) =
+        (engine.store().on_disk_bytes(), available_at(destination))
+    {
+        if needed > 0 && available < needed {
+            eprintln!(
+                "warning: {} has {} free and the store holds {}.",
+                destination.display(),
+                human(available),
+                human(needed)
+            );
+            eprintln!(
+                "         A checkpoint onto the same filesystem hard-links and will fit, but \
+                 the links pin"
+            );
+            eprintln!(
+                "         files compaction can no longer reclaim, so the space is owed \
+                 either way. Onto a"
+            );
+            eprintln!("         different filesystem this will copy, and will not fit.");
         }
     }
 
@@ -344,6 +481,11 @@ fn compact(engine: &Engine, opts: &Options) -> Result<()> {
         "{} already exists; compaction writes a new store rather than editing one in place,          so that a failure leaves the original untouched",
         destination.display()
     );
+
+    // Before anything is written. A compaction of a large store takes a long time, and
+    // discovering at the end that the disk is full wastes all of it and leaves a partial
+    // store behind to clean up.
+    check_headroom(engine, opts.store.as_deref(), destination, opts.force)?;
 
     let source = engine.store();
     let quads_before = source.len();
@@ -469,11 +611,26 @@ fn entail(engine: &mut Engine, opts: &Options) -> Result<()> {
     Ok(())
 }
 
-fn stats(engine: &Engine) -> Result<()> {
+fn stats(engine: &Engine, opts: &Options) -> Result<()> {
     let store = engine.store();
     println!("quads            {}", store.len());
     println!("dictionary terms {}", store.dictionary_len());
     println!("named graphs     {}", store.named_graphs()?.len());
+
+    // Disk, for a persistent store. Reported here so an operator can size headroom without
+    // starting a maintenance command to find out whether it will fit — which is how the
+    // question usually gets asked, and the worst time to ask it.
+    if let Some(path) = opts.store.as_deref() {
+        let used = store.on_disk_bytes().unwrap_or(0);
+        println!("on disk          {}", human(used));
+        if let Some(free) = available_at(Path::new(path)) {
+            println!("free here        {}", human(free));
+            // `compact` writes a second store beside the first, so that is the number that
+            // decides whether maintenance is possible at all.
+            let verdict = if free >= used { "yes" } else { "NO" };
+            println!("room to compact  {verdict} (needs up to {})", human(used));
+        }
+    }
     println!();
     println!("predicates by frequency");
     for (id, n) in store.predicate_histogram().iter().take(25) {
@@ -706,6 +863,9 @@ struct Options {
     data: Vec<String>,
     /// Destination for `holos backup`.
     to: Option<String>,
+    /// Proceed with a maintenance command whose disk-headroom estimate says it will
+    /// not fit. The estimate is the source's size and is deliberately generous.
+    force: bool,
     /// Where `holos entail` writes its conclusions.
     entail_graph: Option<String>,
     /// How many new triples `holos entail` may add before it refuses.
@@ -841,6 +1001,7 @@ impl Options {
                 "--except-role" => o.except_role = Some(value(&mut i)?),
                 "--store" => o.store = Some(value(&mut i)?),
                 "--to" => o.to = Some(value(&mut i)?),
+                "--force" => o.force = true,
                 "--entail-graph" => o.entail_graph = Some(value(&mut i)?),
                 "--entail-budget" => o.entail_budget = value(&mut i)?.parse()?,
                 "--bulk" => o.bulk = true,
@@ -971,4 +1132,56 @@ impl Options {
 
 fn iri_arg(s: &str) -> Result<NamedNode> {
     NamedNode::new(s).with_context(|| format!("`{s}` is not a valid IRI"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn verdict(needed: u64, available: u64, force: bool) -> Result<Option<String>> {
+        headroom_verdict("/store", Path::new("/backup"), needed, available, force)
+    }
+
+    #[test]
+    fn room_to_spare_is_no_comment() {
+        assert!(verdict(100, 200, false).expect("fits").is_none());
+        // Exactly enough is enough. A `>` here would refuse a store that fits precisely.
+        assert!(verdict(100, 100, false).expect("fits exactly").is_none());
+    }
+
+    #[test]
+    fn not_enough_room_is_refused() {
+        let refusal = verdict(200, 100, false)
+            .expect_err("should refuse")
+            .to_string();
+        // The message has to carry both numbers, because "not enough room" without them
+        // leaves the operator to go and measure the thing the command just measured.
+        assert!(refusal.contains("200 B"), "{refusal}");
+        assert!(refusal.contains("100 B"), "{refusal}");
+        assert!(refusal.contains("--force"), "{refusal}");
+    }
+
+    #[test]
+    fn force_downgrades_the_refusal_to_a_warning() {
+        let warning = verdict(200, 100, true)
+            .expect("force should not refuse")
+            .expect("and should still say something");
+        assert!(warning.starts_with("warning:"), "{warning}");
+    }
+
+    /// A source that measured as nothing is a store that was never written, or a path that
+    /// could not be read. Refusing on that would block the command for a reason that has
+    /// nothing to do with disk space.
+    #[test]
+    fn an_unmeasurable_source_does_not_refuse() {
+        assert!(verdict(0, 0, false).expect("no estimate").is_none());
+    }
+
+    #[test]
+    fn sizes_are_rendered_for_a_person() {
+        assert_eq!(human(512), "512 B");
+        assert_eq!(human(1024), "1.0 KiB");
+        assert_eq!(human(1024 * 1024 * 3 / 2), "1.5 MiB");
+        assert_eq!(human(1024 * 1024 * 1024), "1.0 GiB");
+    }
 }

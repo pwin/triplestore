@@ -1280,6 +1280,10 @@ impl Storage for RocksStorage {
         self.scope.is_some()
     }
 
+    fn on_disk_bytes(&self) -> Option<u64> {
+        Some(directory_bytes(&self.path))
+    }
+
     fn begin_bulk_load(&mut self) -> Result<()> {
         if self.scope.is_some() {
             return Err(StorageError::corruption(
@@ -1490,6 +1494,26 @@ fn checkpoint_to(storage: &RocksStorage, destination: &std::path::Path) -> Resul
 fn cf<'a>(db: &'a DB, name: &str) -> Result<&'a rocksdb::ColumnFamily> {
     db.cf_handle(name)
         .ok_or_else(|| StorageError::corruption(format!("column family {name} is missing")))
+}
+
+/// Bytes a directory occupies, through its whole tree.
+///
+/// An entry that cannot be read is skipped rather than fatal. This answers "roughly how much
+/// space does a copy of this need", and refusing to answer because one file could not be
+/// stat'd would be less useful than answering slightly low.
+fn directory_bytes(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0;
+    for entry in entries.flatten() {
+        match entry.metadata() {
+            Ok(meta) if meta.is_dir() => total += directory_bytes(&entry.path()),
+            Ok(meta) => total += meta.len(),
+            Err(_) => {}
+        }
+    }
+    total
 }
 
 fn rocks_err(e: rocksdb::Error) -> StorageError {

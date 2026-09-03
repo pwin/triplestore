@@ -194,6 +194,18 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
         false
     }
 
+    /// How many bytes this store occupies on disk, if it is on disk at all.
+    ///
+    /// `None` for a backend with no files. Used to decide whether a maintenance operation
+    /// will fit before it starts: a checkpoint eventually owes this much, and a compaction
+    /// needs it immediately because it writes a second store beside the first.
+    ///
+    /// Everything is counted, not just the SST files — the write-ahead log, the manifest and
+    /// anything else in the directory all have to be copied by a backup that cannot hard-link.
+    fn on_disk_bytes(&self) -> Option<u64> {
+        None
+    }
+
     /// Announces a bulk load, so a backend can buffer writes and skip its log.
     ///
     /// A default no-op rather than a downcast: a caller should be able to ask any backend
