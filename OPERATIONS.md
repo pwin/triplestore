@@ -579,9 +579,10 @@ are refusals, and that the graph store answers if it was configured.
 
 Memory goes to RocksDB's block cache plus the term dictionary. Size from `/stats` before
 setting a container limit — a store whose dictionary does not fit will thrash rather than
-fail. For scale: a million triples produced 489,479 dictionary terms and 48 MB on disk,
-because the `TermId` encoding inlines every integer, float and short string into the id
-itself so they never reach storage at all.
+fail. For scale: 7.5 million quads produced 2,002,681 dictionary terms and 253 MB on disk —
+about 35 bytes per quad across three index copies of each — because the `TermId` encoding
+inlines every integer, float and short string into the id itself so they never reach storage
+at all. `holos stats --store DIR` reports both for a store you have.
 
 ---
 

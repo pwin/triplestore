@@ -1154,28 +1154,40 @@ non-trivial scene — the alternative being 4/s if each commit revalidated every
 
 ### Two other numbers worth keeping
 
-**The dictionary holds 489,479 terms for a million triples.** Every `xsd:integer`, every
-`xsd:float` and every city name of six bytes or fewer inlined into its id and never reached
-storage — the §5 encoding doing exactly what it was designed to do.
+**The dictionary holds two terms per person** — 2,002,681 for the 7.5M-quad dataset,
+which is the person's IRI and their name literal and nothing else. Every `xsd:integer`, every
+`xsd:float` and every string of six bytes or fewer is inlined into its id and never reaches
+storage at all: the §5 encoding doing exactly what it was designed to do.
 
-**48 MB on disk for a 90 MB source file**, with three index copies of every triple. Dense
-64-bit ids plus LZ4 are why; a 128-bit hashed key would roughly double the index.
+**253 MB on disk for 7.5M quads**, with three index copies of every one — about 35 bytes per
+quad. Dense 64-bit ids plus LZ4 are why; a 128-bit hashed key would roughly double the
+index.
 
 ### How far it goes
 
-> **Measured.** 10,000,000 triples, eight predicates, on the same laptop.
+> **Measured.** Two ends of a 14× span, from the same generator and the same laptop.
 
-| | 1M | 10M |
+| | 753k quads | 10.5M quads |
 |---|---:|---:|
-| Bulk load | 41k quads/s | **35.6k quads/s** |
-| On disk | 48 MB | **453 MB** |
-| Dictionary terms | 489,479 | 3,755,433 |
-| Bytes per quad on disk | ~48 | **~47** |
+| Bulk load | 155k quads/s | **94k quads/s** |
+| On disk | 25 MB | **354 MB** |
+| Dictionary terms | 200,881 | 2,803,481 |
+| Bytes per quad on disk | ~35 | **~35** |
 
-Load throughput fell **13%** going up an order of magnitude, and bytes-per-quad did not
-move at all — so nothing in the storage layer degrades super-linearly across that range.
-Three index copies of every quad plus LZ4, over dense 64-bit ids, is what holds the figure
-flat.
+**Bytes-per-quad does not move**, across fourteen times the data — 34.8 at the small end and
+35.2 at the large one. Three index copies of every quad plus LZ4, over dense 64-bit ids, is
+what holds it flat, and it is the figure that says nothing in the storage layer degrades
+super-linearly.
+
+Throughput does fall, by 39% across that span. It is worth saying what that is *not*: the
+in-memory backend, which has no LSM, no write-ahead log and no files at all, falls 47% over
+the same range. So the decline is the dictionary and the cache behaviour of a working set
+that outgrows L3, not the storage layer. Sorted ingestion is also why the absolute figures
+are four times what they were: this table read 41k → 35.6k before it.
+
+The 35 bytes is itself down from ~48 in 0.2.0, and that was not a design goal — files written
+pre-sorted into the levels simply do not carry the fragmentation compaction is otherwise
+still working through.
 
 Query cost at 10M, from a cold process (about 0.4s of that is start-up):
 
