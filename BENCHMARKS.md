@@ -88,24 +88,35 @@ Regenerate with `cargo run --release -p holos-bench`.
 
 ## Load timings
 
-> **These load timings predate sorted ingestion.** They were measured before
-> `SstFileWriter` + `IngestExternalFile` replaced the buffered-batch write path, which an
-> interleaved A/B put at **1.7× on a whole `--bulk` load**. The `--bulk` rows below are
-> therefore pessimistic by roughly that much, and the no-`--bulk` rows are unaffected.
-> Re-running `cargo run --release -p holos-bench` is what replaces them; until someone does,
-> this note is more honest than numbers carried over from a different measurement.
+Three scales, three backends, one run of `cargo run --release -p holos-bench`. Times include
+parsing, which is what a real load does.
+
+Two things changed here in 0.3.0, both from sorted ingestion:
+
+- **`--bulk` pulled away from the ordinary write path.** It was 3.3–3.6× faster before and is
+  **5.4–8.5×** now. That ratio is within-run, so it says nothing about the machine.
+- **A bulk-loaded store is now smaller than one written key by key** — 253 MB against 284 MB
+  at 7.5M quads, where before it was slightly *larger*. Files written pre-sorted go straight
+  into the levels without the fragmentation compaction is otherwise still working through.
+
+The absolute figures are also better than the 0.2.0 table they replace, but by more than
+sorted ingestion can account for: the untouched no-`--bulk` path improved in the same
+comparison, so some of it is the machine. The controlled attribution is an interleaved A/B of
+the two write paths on identical hardware, which put the ingestion at **1.7× on a whole
+load** — see `cargo run --release -p holos-bench --bin loadprofile` for where the rest of a
+load's time goes.
 
 | People | Quads | Backend | Time | Rate | On disk | Dictionary |
 |---:|---:|---|---:|---:|---:|---:|
-| 100,000 | 753,218 | in memory | 3.87s | 194,384 quads/s | — | 200,881 |
-| 100,000 | 753,218 | rocksdb, --bulk | 19.82s | 37,996 quads/s | 33 MB | 200,881 |
-| 100,000 | 753,218 | rocksdb, no --bulk | 65.02s | 11,583 quads/s | 32 MB | 200,881 |
-| 500,000 | 3,762,016 | in memory | 31.66s | 118,826 quads/s | — | 1,001,681 |
-| 500,000 | 3,762,016 | rocksdb, --bulk | 177.71s | 21,168 quads/s | 171 MB | 1,001,681 |
-| 500,000 | 3,762,016 | rocksdb, no --bulk | 435.57s | 8,637 quads/s | 171 MB | 1,001,681 |
-| 1,000,000 | 7,523,015 | in memory | 66.52s | 113,090 quads/s | — | 2,002,681 |
-| 1,000,000 | 7,523,015 | rocksdb, --bulk | 206.34s | 36,459 quads/s | 328 MB | 2,002,681 |
-| 1,000,000 | 7,523,015 | rocksdb, no --bulk | 745.83s | 10,086 quads/s | 284 MB | 2,002,681 |
+| 100,000 | 753,218 | in memory | 2.42s | 311,585 quads/s | — | 200,881 |
+| 100,000 | 753,218 | rocksdb, --bulk | 4.86s | 155,040 quads/s | 25 MB | 200,881 |
+| 100,000 | 753,218 | rocksdb, no --bulk | 37.20s | 20,248 quads/s | 32 MB | 200,881 |
+| 500,000 | 3,762,016 | in memory | 19.91s | 188,910 quads/s | — | 1,001,681 |
+| 500,000 | 3,762,016 | rocksdb, --bulk | 35.24s | 106,745 quads/s | 127 MB | 1,001,681 |
+| 500,000 | 3,762,016 | rocksdb, no --bulk | 190.08s | 19,791 quads/s | 171 MB | 1,001,681 |
+| 1,000,000 | 7,523,015 | in memory | 42.63s | 176,475 quads/s | — | 2,002,681 |
+| 1,000,000 | 7,523,015 | rocksdb, --bulk | 48.27s | 155,849 quads/s | 253 MB | 2,002,681 |
+| 1,000,000 | 7,523,015 | rocksdb, no --bulk | 408.05s | 18,436 quads/s | 284 MB | 2,002,681 |
 
 ## Query timings
 
@@ -113,26 +124,26 @@ Median of three runs, in milliseconds, against the in-memory store.
 
 | Query | Group | Rows | 100,000 | 500,000 | 1,000,000 |
 |---|---|---:|---:|---:|---:|
-| point lookup | access | 1 | 0.14 | 0.05 | 0.08 |
-| subject fan-out | access | 205 | 0.35 | 0.58 | 0.25 |
-| rare predicate scan | access | 200 | 0.37 | 1.8 | 3.8 |
-| common predicate count | access | 1 | 36.3 | 176 | 368 |
-| object lookup | access | 412 | 0.61 | 1.8 | 6.1 |
-| 3-way star | join | 100 | 385 | 2321 | 5235 |
-| selective join, written well | join | 20 | 43.6 | 197 | 405 |
-| selective join, written badly | join | 20 | 357 | 2431 | 5399 |
-| 2-hop, anchored | join | 50 | 136 | 702 | 1347 |
-| 2-hop, unanchored | join | 20 | 902 | 6050 | 14141 |
-| OPTIONAL | join | 100 | 0.26 | 1.1 | 1.8 |
-| FILTER NOT EXISTS | join | 20 | 0.13 | 0.30 | 0.14 |
-| path: one-or-more up | property path | 4 | 0.07 | 0.11 | 0.13 |
-| path: zero-or-more up | property path | 5 | 0.14 | 0.14 | 0.22 |
-| path: inverse closure down | property path | 340 | 0.82 | 0.67 | 0.70 |
-| path: sequence + closure | property path | 5 | 2012 | 19667 | 25208 |
-| path: alternation | property path | 201 | 0.22 | 0.20 | 0.54 |
-| path: bounded social closure | property path | 500 | 261 | 6456 | 3612 |
-| path: negated set | property path | 5 | 0.09 | 0.08 | 0.13 |
-| path: count descendants | property path | 1 | 0.55 | 0.68 | 0.69 |
+| point lookup | access | 1 | 0.04 | 0.06 | 0.03 |
+| subject fan-out | access | 205 | 0.13 | 0.14 | 0.38 |
+| rare predicate scan | access | 200 | 0.17 | 0.94 | 1.8 |
+| common predicate count | access | 1 | 12.9 | 98.2 | 193 |
+| object lookup | access | 412 | 0.18 | 1.5 | 3.2 |
+| 3-way star | join | 100 | 0.22 | 0.24 | 0.42 |
+| selective join, written well | join | 20 | 0.08 | 0.08 | 0.15 |
+| selective join, written badly | join | 20 | 15.6 | 25.3 | 24.5 |
+| 2-hop, anchored | join | 50 | 0.10 | 0.25 | 0.25 |
+| 2-hop, unanchored | join | 20 | 0.08 | 0.19 | 0.22 |
+| OPTIONAL | join | 100 | 0.12 | 0.48 | 0.37 |
+| FILTER NOT EXISTS | join | 20 | 0.10 | 0.09 | 0.08 |
+| path: one-or-more up | property path | 4 | 0.06 | 0.06 | 0.05 |
+| path: zero-or-more up | property path | 5 | 0.06 | 0.05 | 0.07 |
+| path: inverse closure down | property path | 340 | 0.36 | 0.35 | 0.58 |
+| path: sequence + closure | property path | 5 | 829 | 7226 | 15556 |
+| path: alternation | property path | 201 | 0.11 | 0.27 | 0.13 |
+| path: bounded social closure | property path | 500 | 119 | 1012 | 2530 |
+| path: negated set | property path | 5 | 0.07 | 0.06 | 0.07 |
+| path: count descendants | property path | 1 | 0.70 | 0.17 | 0.58 |
 
 ### What each query isolates
 
@@ -163,24 +174,24 @@ A scene of 60,000 quads, a four-constraint boundary, 200 commits.
 
 | | Time |
 |---|---:|
-| Full validation of the scene | 140 ms |
-| **One accepted commit** | **0.91 ms** |
-| One rejected commit | 1.1 ms |
-| **Commit vs full pass** | **155× cheaper** |
-| Commits per second | 1103 |
+| Full validation of the scene | 94.2 ms |
+| **One accepted commit** | **0.76 ms** |
+| One rejected commit | 0.71 ms |
+| **Commit vs full pass** | **124× cheaper** |
+| Commits per second | 1313 |
 
 ### Holonic queries
 
 | Query | Rows | Time |
 |---|---:|---:|
-| holon: registry lookup | 1 | 0.08 ms |
-| holon: scene size | 1 | 18.7 ms |
-| holon: tick history | 20 | 1.3 ms |
-| holon: what changed in a tick | 3 | 0.60 ms |
-| holon: provenance of one statement | 1 | 1.4 ms |
-| holon: rejected commits | 1 | 0.21 ms |
-| holon: change volume per tick | 10 | 1.6 ms |
-| holon: scene joined to log | 20 | 24.3 ms |
+| holon: registry lookup | 1 | 0.10 ms |
+| holon: scene size | 1 | 23.3 ms |
+| holon: tick history | 20 | 1.2 ms |
+| holon: what changed in a tick | 3 | 0.74 ms |
+| holon: provenance of one statement | 1 | 1.3 ms |
+| holon: rejected commits | 1 | 0.65 ms |
+| holon: change volume per tick | 10 | 1.5 ms |
+| holon: scene joined to log | 20 | 13.1 ms |
 
 #### What each holonic query isolates
 
@@ -260,9 +271,9 @@ The dictionary grows at almost exactly **two terms per person** — the person's
 name literal. Age, membership and badge do not appear, because integers and short strings
 are inlined into their 64-bit ids and never reach the dictionary at all.
 
-**`--bulk` is worth more than previously measured**: 3.3–3.6× rather than the 2.4× recorded
-at one million quads in `DESIGN.md` §16. The advantage grows with the dataset, because the
-write-ahead log it skips grows with it too.
+**`--bulk` is worth far more than it once was**: **5.4–8.5×**, against 3.3–3.6× before
+sorted ingestion and 2.4× when it was first recorded at one million quads in `DESIGN.md` §16.
+Two separate improvements, a release apart, to the same number.
 
 ### 2. The planner is the ceiling, and the gap widens with scale
 

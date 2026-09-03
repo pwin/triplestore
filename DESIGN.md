@@ -1022,36 +1022,45 @@ much as the first, because a stale list is a list nobody trusts. Re-baseline del
 
 ## 16. What the store measures
 
-One million triples, N-Triples, eight predicates, 489,479 distinct dictionary terms, on a
-Windows laptop. Release build. Numbers include parsing.
+7.5 million quads from 1,000,000 generated people, N-Triples, 2,002,681 distinct
+dictionary terms, on a Windows laptop. Release build. Numbers include parsing.
 
 | Configuration | Throughput | On disk |
 |---|---|---|
-| In memory | 208,161 quads/s | — |
-| RocksDB, `--bulk` | 40,782 quads/s | 48 MB |
-| RocksDB, no `--bulk` | 17,782 quads/s | — |
+| In memory | 176,475 quads/s | — |
+| RocksDB, `--bulk` | 155,849 quads/s | 253 MB |
+| RocksDB, no `--bulk` | 18,436 quads/s | 284 MB |
 
 ### The P1 target was wrong, and here is the evidence
 
 §11 originally set P1's exit criterion at 500k triples/s. That number was written before
-anything had been measured. It is roughly 12× the persistent path's actual rate and is
-withdrawn rather than left standing as an unearned claim.
+anything had been measured. It is withdrawn rather than left standing as an unearned claim —
+though the gap has closed considerably: sorted ingestion took the persistent path from 41k
+to **156k quads/s**, so what was 12× off is now about 3×.
 
 Three measurements say where the time goes, and rule out the guesses:
 
 - **Re-loading the same file into an already-populated store runs at 45k quads/s** — only 11%
   faster than the cold load, despite allocating no ids and writing no dictionary rows. Term
   interning is not the bottleneck.
-- **`--bulk` is 3.3–3.6× faster than not**, measured across three scales in
-  [BENCHMARKS.md](BENCHMARKS.md) — the advantage grows with the dataset. So the write-ahead log and
-  per-quad batching do cost real time, and buffering recovers it.
-- **100k and 1M load at the same rate**, so the cost is linear. There is no algorithmic defect
-  to find.
+- **`--bulk` is 5.4–8.5× faster than not**, measured across three scales in
+  [BENCHMARKS.md](BENCHMARKS.md). So the write-ahead log and per-quad batching do cost real
+  time, and buffering recovers it.
+- **100k and 1M load at the same rate** — 155,040 against 155,849 quads/s — so the cost is
+  linear. There is no algorithmic defect to find.
 
-What remains is the per-quad cost of pushing three to six index keys through the memtable,
-and it is the same whether a key is new or an overwrite. That is precisely the work
-`SstFileWriter` ingestion skips: sorted SST files are handed to the LSM directly, bypassing
-the memtable. §6.1 named it; it is not built.
+What remained was the per-quad cost of pushing three to six index keys through the memtable,
+the same whether a key is new or an overwrite. That is precisely the work `SstFileWriter`
+ingestion skips: sorted files are handed to the LSM directly.
+
+**That prediction held.** Sorted ingestion is built as of 0.3.0, and the ratio above is how
+much: `--bulk` was 3.3–3.6× the ordinary path before it and is 5.4–8.5× after, measured
+within the same runs so the comparison owes nothing to the machine. An interleaved A/B of the
+two write paths on identical hardware put the ingestion itself at **1.7× on a whole load** —
+the difference between that and the ratio above is that a whole load is not only index
+writes. `loadprofile` gives the split: parsing 11%, the dictionary 32%, index writes 55%. It
+is the last of those that went to almost nothing, and the first two are what a further 2×
+would now have to come out of.
 
 **The replacement criterion:** P1 exits when SST ingestion lands and the persistent bulk path
 is measured again — against this 41k/s baseline, on a dataset large enough that it cannot be

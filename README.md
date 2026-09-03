@@ -45,13 +45,19 @@ manual; [DESIGN.md](DESIGN.md) carries the reasoning and the measurements.
 
 ## Performance
 
-One million triples, release build, on a Windows laptop. Numbers include parsing.
+7.5 million quads, release build, on a Windows laptop. Numbers include parsing.
 
 | Configuration | Throughput | On disk |
 |---|---|---|
-| In memory | 208,161 quads/s | — |
-| RocksDB, `--bulk` | 40,782 quads/s | 48 MB |
-| RocksDB, no `--bulk` | 17,782 quads/s | — |
+| In memory | 176,475 quads/s | — |
+| RocksDB, `--bulk` | 155,849 quads/s | 253 MB |
+| RocksDB, no `--bulk` | 18,436 quads/s | 284 MB |
+
+`--bulk` went from 3.6× the ordinary write path to **8.5×** in 0.3.0, when bulk loads
+started being ingested as sorted files rather than written key by key. It also produces a
+*smaller* store than the ordinary path — 253 MB against 284 MB — because files written
+pre-sorted into levels do not carry the fragmentation that compaction is still working
+through.
 
 A holon tick — SHACL validation inside every commit, on a 300k-triple scene:
 

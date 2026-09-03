@@ -190,10 +190,10 @@ nothing; there is no geospatial exemption.
 deploy/load.sh data/*.ttl        # stop the service first
 ```
 
-`--bulk` buffers writes and skips the write-ahead log: **3.3–3.6× faster** (see
-[BENCHMARKS.md](BENCHMARKS.md)), and the advantage grows with the dataset because the
-write-ahead log it skips grows with it too. Measured 36k vs 10k quads/s at 7.5M quads
-on a million triples), at the cost of a part-way-interrupted load having to be discarded
+`--bulk` buffers writes, skips the write-ahead log, and since 0.3.0 hands the index
+orders to RocksDB as pre-sorted files rather than writing them key by key: **5.4–8.5× faster**
+(see [BENCHMARKS.md](BENCHMARKS.md)). Measured 156k vs 18k quads/s at 7.5M quads, at the cost
+of a part-way-interrupted load having to be discarded
 rather than resumed. That is the right trade for a load you can simply re-run.
 
 **Only one process may hold the store directory.** RocksDB takes an exclusive lock on
