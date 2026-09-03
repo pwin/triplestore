@@ -29,6 +29,7 @@ pub mod source;
 pub mod spatial;
 pub mod topology;
 pub mod update;
+pub mod validate;
 pub mod view;
 
 pub use options::{Deadline, QueryOptions};
@@ -314,6 +315,9 @@ impl Engine {
                 .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
         }
         let parsed = parser.parse_query(query)?;
+        // Before anything looks at it. A query the specification calls invalid has no
+        // defined answer, and the answer this would otherwise give looks like data.
+        crate::validate::check(&parsed)?;
         // Same rewrite as `query_with`: a topology property means the same thing whichever
         // entry point asked, and answering it on one path only would be worse than not
         // answering it at all. No spatial routing here — this entry point takes no options,
@@ -354,6 +358,7 @@ impl Engine {
                 .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
         }
         let parsed = parser.parse_query(query)?;
+        crate::validate::check(&parsed)?;
         // GeoSPARQL topology properties become geometry lookups and a filter. Unconditional
         // because it is correctness rather than optimisation: without it, `?a geo:sfContains
         // ?b` is an ordinary lookup that matches nothing and says so silently.

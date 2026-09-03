@@ -20,7 +20,7 @@ mod codec;
 mod sort;
 
 use crate::error::{Result, StorageError};
-use crate::index::{EncodedQuad, GraphFilter, QuadScan};
+use crate::index::{EncodedQuad, GraphFilter, IdRange, QuadScan};
 use crate::storage::Storage;
 use codec::{key, prefix_upper_bound, put_id, put_term, read_id, split_key, StoredTerm};
 use holos_core::{inline, vocab, Tag, TermId, FORMAT_VERSION};
@@ -866,6 +866,45 @@ impl RocksStorage {
         Ok(())
     }
 
+    /// A scan bounded by a prefix *and* a span on the component after it.
+    ///
+    /// The keys are big-endian ids laid end to end, so a span on one component is a
+    /// contiguous byte range and `RocksDB`'s own iterate bounds do the work — the same
+    /// mechanism as a prefix seek, one component further in.
+    ///
+    /// `total_order_seek` for the same reason `scan_order` uses it when there is no prefix:
+    /// with an empty prefix the range starts at a span rather than at a value the column
+    /// family's prefix extractor knows about, and a prefix-constrained iterator would stop
+    /// early.
+    fn scan_order_span(
+        &self,
+        order: &'static str,
+        prefix: &[TermId],
+        span: IdRange,
+    ) -> Result<RowScan<'_>> {
+        let mut lower = key(prefix);
+        lower.extend_from_slice(&put_id(span.first));
+        let mut upper = key(prefix);
+        upper.extend_from_slice(&put_id(span.last));
+        let mut opts = ReadOptions::default();
+        if prefix.is_empty() {
+            opts.set_total_order_seek(true);
+        }
+        opts.set_iterate_lower_bound(lower);
+        // The iterate bound is exclusive and the span is inclusive, so the bound is the
+        // first key that cannot match: one past the span's last id. `None` means every byte
+        // was 0xFF and there is no such key — the span reaches the end of the keyspace, so
+        // there is nothing to bound it with and nothing beyond it to exclude.
+        if let Some(next) = prefix_upper_bound(&upper) {
+            opts.set_iterate_upper_bound(next);
+        }
+        Ok(RowScan {
+            inner: self
+                .db
+                .iterator_cf_opt(cf(&self.db, order)?, opts, IteratorMode::Start),
+        })
+    }
+
     fn scan_order(&self, order: &'static str, prefix: &[TermId]) -> Result<RowScan<'_>> {
         let lower = key(prefix);
         let upper = prefix_upper_bound(&lower);
@@ -1132,6 +1171,53 @@ impl Storage for RocksStorage {
         self.db_contains(quad)
     }
 
+    fn quads_with_object_in(
+        &self,
+        subject: Option<TermId>,
+        predicate: Option<TermId>,
+        span: IdRange,
+        graph: GraphFilter,
+    ) -> QuadScan<'_> {
+        if span.is_empty() {
+            return Box::new(std::iter::empty());
+        }
+        // A scope buffers, so its quads are not in the index the span is about to bound.
+        // Falling back to the trait's scan-and-filter keeps the answer right; a load or an
+        // update is not where a range scan earns anything anyway.
+        if self.scope.is_some() {
+            return Box::new(self.scan(subject, predicate, None, graph).filter(
+                move |quad| match quad {
+                    Ok(quad) => span.contains(quad.object),
+                    Err(_) => true,
+                },
+            ));
+        }
+        let rows: QuadScan<'_> = match graph {
+            GraphFilter::Any => Box::new(
+                self.quads_with_object_in(subject, predicate, span, GraphFilter::Default)
+                    .chain(self.quads_with_object_in(
+                        subject,
+                        predicate,
+                        span,
+                        GraphFilter::AnyNamed,
+                    )),
+            ),
+            _ => match self.routed_span(predicate, span, graph) {
+                Ok(iter) => iter,
+                Err(e) => Box::new(std::iter::once(Err(e))),
+            },
+        };
+        // The subject sits behind the object in every order a span can bound, so it cannot
+        // narrow the range and is checked on the way out.
+        match subject {
+            None => rows,
+            Some(s) => Box::new(rows.filter(move |q| match q {
+                Ok(quad) => quad.subject == s,
+                Err(_) => true,
+            })),
+        }
+    }
+
     fn scan(
         &self,
         subject: Option<TermId>,
@@ -1371,6 +1457,47 @@ impl Storage for RocksStorage {
 impl RocksStorage {
     /// Routes a pattern to the one order whose prefix it binds — the same decision
     /// [`QuadIndex::plan`](crate::QuadIndex::plan) makes for the in-memory tier.
+    /// Picks the order whose key puts the object where a span can bound it.
+    ///
+    /// With a predicate bound that is `pos`, where the object follows the prefix; without
+    /// one it is `osp`, where the object leads. Those are the only two shapes: in every
+    /// other order the object sits behind something unbound, and a span on it is not a
+    /// contiguous range.
+    fn routed_span(
+        &self,
+        p: Option<TermId>,
+        span: IdRange,
+        graph: GraphFilter,
+    ) -> Result<QuadScan<'_>> {
+        Ok(match (graph, p) {
+            (GraphFilter::Default, Some(p)) => Box::new(
+                self.scan_order_span(DPOS, &[p], span)?
+                    .map(move |k| Ok(un_dpos(split_key::<3>(&k?)?))),
+            ),
+            (GraphFilter::Default, None) => Box::new(
+                self.scan_order_span(DOSP, &[], span)?
+                    .map(move |k| Ok(un_dosp(split_key::<3>(&k?)?))),
+            ),
+            (GraphFilter::Named(g), Some(p)) => Box::new(
+                self.scan_order_span(GPOS, &[g, p], span)?
+                    .map(move |k| Ok(un_gpos(split_key::<4>(&k?)?))),
+            ),
+            (GraphFilter::Named(g), None) => Box::new(
+                self.scan_order_span(GOSP, &[g], span)?
+                    .map(move |k| Ok(un_gosp(split_key::<4>(&k?)?))),
+            ),
+            (GraphFilter::AnyNamed, Some(p)) => Box::new(
+                self.scan_order_span(POSG, &[p], span)?
+                    .map(move |k| Ok(un_posg(split_key::<4>(&k?)?))),
+            ),
+            (GraphFilter::AnyNamed, None) => Box::new(
+                self.scan_order_span(OSPG, &[], span)?
+                    .map(move |k| Ok(un_ospg(split_key::<4>(&k?)?))),
+            ),
+            (GraphFilter::Any, _) => unreachable!("handled by the caller"),
+        })
+    }
+
     fn routed_scan(
         &self,
         s: Option<TermId>,

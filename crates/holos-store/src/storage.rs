@@ -18,7 +18,7 @@
 //! [`Result`](crate::Result) for the same reason.
 
 use crate::error::Result;
-use crate::index::{EncodedQuad, GraphFilter, QuadScan};
+use crate::index::{EncodedQuad, GraphFilter, IdRange, QuadScan};
 use holos_core::TermId;
 use oxrdf::{Term, TermRef};
 
@@ -192,6 +192,37 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// Whether a commit scope is open.
     fn in_scope(&self) -> bool {
         false
+    }
+
+    /// Quads matching the pattern whose **object** lies inside `span`.
+    ///
+    /// The narrowing `DESIGN.md` §5's order-preserving encodings exist for: an inline
+    /// integer, float or dateTime has an id whose order is its value's order, so a
+    /// comparison against a constant is a bound on the index rather than a test applied to
+    /// everything the index returns.
+    ///
+    /// **The span narrows what is read; it does not decide what matches.** A caller still
+    /// applies its own filter, and must pass a span admitting at least everything that
+    /// could match — a numeric comparison, for instance, can be satisfied by an
+    /// `xsd:decimal`, which the inline codec declines and the dictionary therefore holds in
+    /// no particular order.
+    ///
+    /// The default implementation scans and filters, which is correct and buys nothing. A
+    /// backend overrides it when its index can be bounded.
+    fn quads_with_object_in(
+        &self,
+        subject: Option<TermId>,
+        predicate: Option<TermId>,
+        span: IdRange,
+        graph: GraphFilter,
+    ) -> QuadScan<'_> {
+        Box::new(
+            self.scan(subject, predicate, None, graph)
+                .filter(move |quad| match quad {
+                    Ok(quad) => span.contains(quad.object),
+                    Err(_) => true,
+                }),
+        )
     }
 
     /// How many times the most recent bulk load spilled its buffer to disk.

@@ -17,7 +17,7 @@
 //! will. See [`crate::error`].
 
 use crate::error::Result;
-use holos_core::TermId;
+use holos_core::{Tag, TermId};
 use std::collections::BTreeSet;
 
 /// A quad whose terms have been interned.
@@ -33,6 +33,51 @@ pub struct EncodedQuad {
     pub graph_name: Option<TermId>,
 }
 
+/// An inclusive span of term ids, for a scan bounded by more than equality.
+///
+/// The point of `DESIGN.md` §5's order-preserving encodings: an inline integer, float or
+/// dateTime has an id whose numeric order *is* the value's order, so `FILTER(?d > "2020-01-01")`
+/// is a bound on the index rather than a test applied to everything it returns.
+///
+/// Inclusive at both ends because the caller is working in term ids, where "the next id
+/// after this one" is a meaningful thing to compute and an exclusive end would make every
+/// caller compute it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdRange {
+    /// Lowest id the span admits.
+    pub first: TermId,
+    /// Highest id the span admits.
+    pub last: TermId,
+}
+
+impl IdRange {
+    /// Every id with a given tag.
+    ///
+    /// What a caller needs for a tag whose ids are *not* ordered by value — a dictionary
+    /// literal, say. A numeric comparison can be satisfied by an `xsd:decimal`, which the
+    /// inline codec declines, so a sound range for one has to admit the whole dictionary
+    /// region alongside the ordered part. See `holos_engine::range`.
+    #[must_use]
+    pub const fn whole_tag(tag: Tag) -> Self {
+        Self {
+            first: TermId::new(tag, 0),
+            last: TermId::new(tag, holos_core::term_id::PAYLOAD_MAX),
+        }
+    }
+
+    /// Whether the span admits an id.
+    #[must_use]
+    pub fn contains(&self, id: TermId) -> bool {
+        self.first <= id && id <= self.last
+    }
+
+    /// Whether the span admits nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.first > self.last
+    }
+}
+
 /// Which graphs a pattern is allowed to match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphFilter {
@@ -46,6 +91,12 @@ pub enum GraphFilter {
     Any,
 }
 
+/// Sentinels below and above every id an encoder can produce.
+///
+/// `MAX` is tag `0xF`, which is `Tag::Reserved` and never produced, so a range ending at
+/// `[.., MAX]` covers every real key regardless of whether the end is inclusive. That is
+/// worth saying because it makes the `..=` below unfalsifiable by test: swapping it for `..`
+/// changes the answer only for a subject no store can hold.
 const MIN: TermId = TermId::from_raw(u64::MIN);
 const MAX: TermId = TermId::from_raw(u64::MAX);
 
@@ -231,6 +282,108 @@ impl QuadIndex {
     }
 
     // --- default graph: the d* orders, three components per key -------------------
+
+    /// Quads matching the pattern whose **object** lies inside `span`.
+    ///
+    /// The order is chosen so the span bounds the scan rather than filtering it: with a
+    /// predicate bound that is `pos`, where the object is the component straight after the
+    /// prefix; without one it is `osp`, where the object leads. A bound subject is checked
+    /// afterwards, because in both of those orders it sits behind the object and cannot
+    /// narrow a contiguous range.
+    ///
+    /// The caller still applies its filter. This narrows *what is read*; it does not decide
+    /// what matches, and it must therefore admit at least everything that could.
+    #[must_use]
+    pub fn quads_with_object_in(
+        &self,
+        subject: Option<TermId>,
+        predicate: Option<TermId>,
+        span: IdRange,
+        graph: GraphFilter,
+    ) -> QuadScan<'_> {
+        if span.is_empty() {
+            return Box::new(std::iter::empty());
+        }
+        let rows: QuadScan<'_> = match graph {
+            GraphFilter::Default => self.range_default(predicate, span),
+            GraphFilter::Named(g) => self.range_named(g, predicate, span),
+            GraphFilter::AnyNamed => self.range_any_named(predicate, span),
+            GraphFilter::Any => Box::new(
+                self.range_default(predicate, span)
+                    .chain(self.range_any_named(predicate, span)),
+            ),
+        };
+        match subject {
+            None => rows,
+            Some(s) => Box::new(rows.filter(move |q| match q {
+                Ok(quad) => quad.subject == s,
+                Err(_) => true,
+            })),
+        }
+    }
+
+    fn range_default(&self, p: Option<TermId>, span: IdRange) -> QuadScan<'_> {
+        let quad = |s, p, o| EncodedQuad {
+            subject: s,
+            predicate: p,
+            object: o,
+            graph_name: None,
+        };
+        match p {
+            Some(p) => Box::new(
+                self.dpos
+                    .range([p, span.first, MIN]..=[p, span.last, MAX])
+                    .map(move |&[p, o, s]| Ok(quad(s, p, o))),
+            ),
+            None => Box::new(
+                self.dosp
+                    .range([span.first, MIN, MIN]..=[span.last, MAX, MAX])
+                    .map(move |&[o, s, p]| Ok(quad(s, p, o))),
+            ),
+        }
+    }
+
+    fn range_named(&self, g: TermId, p: Option<TermId>, span: IdRange) -> QuadScan<'_> {
+        let quad = move |s, p, o| EncodedQuad {
+            subject: s,
+            predicate: p,
+            object: o,
+            graph_name: Some(g),
+        };
+        match p {
+            Some(p) => Box::new(
+                self.gpos
+                    .range([g, p, span.first, MIN]..=[g, p, span.last, MAX])
+                    .map(move |&[_, p, o, s]| Ok(quad(s, p, o))),
+            ),
+            None => Box::new(
+                self.gosp
+                    .range([g, span.first, MIN, MIN]..=[g, span.last, MAX, MAX])
+                    .map(move |&[_, o, s, p]| Ok(quad(s, p, o))),
+            ),
+        }
+    }
+
+    fn range_any_named(&self, p: Option<TermId>, span: IdRange) -> QuadScan<'_> {
+        let quad = |s, p, o, g| EncodedQuad {
+            subject: s,
+            predicate: p,
+            object: o,
+            graph_name: Some(g),
+        };
+        match p {
+            Some(p) => Box::new(
+                self.posg
+                    .range([p, span.first, MIN, MIN]..=[p, span.last, MAX, MAX])
+                    .map(move |&[p, o, s, g]| Ok(quad(s, p, o, g))),
+            ),
+            None => Box::new(
+                self.ospg
+                    .range([span.first, MIN, MIN, MIN]..=[span.last, MAX, MAX, MAX])
+                    .map(move |&[o, s, p, g]| Ok(quad(s, p, o, g))),
+            ),
+        }
+    }
 
     fn scan_default(
         &self,
