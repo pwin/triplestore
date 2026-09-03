@@ -36,8 +36,13 @@
 //!   on the theory. Worth retrying where the dictionary does not fit in memory.
 //!
 //! ```text
-//! cargo run --release -p holos-bench --bin loadprofile [file.nt]
+//! cargo run --release -p holos-bench --bin loadprofile [file.nt] [bulk] [spill]
 //! ```
+//!
+//! `bulk` runs only the phases a bulk load goes through, which is what an A/B of the write
+//! path needs. `spill` is a buffer size in quads, passed to `set_ingest_limit`: forcing a
+//! small buffer is how the external merge sort gets measured at a scale a person will wait
+//! for, rather than by loading four million quads to reach the first spill.
 
 use holos_engine::Engine;
 use holos_store::Store;
