@@ -61,6 +61,13 @@ pub struct DatasetView<'a> {
     /// Quads the policy withheld during this view's lifetime. Operator telemetry only —
     /// never returned to the principal, because the count reveals that hidden data exists.
     filtered: Cell<u64>,
+    /// How many scans were bounded by a span rather than read whole.
+    ///
+    /// A pushdown is a pure optimisation: turning it off changes no answer, so no
+    /// differential test can tell whether it happened. This is what a test asserts on
+    /// instead — and what answers an operator asking "did my filter actually push down",
+    /// which is otherwise only visible in a profile.
+    bounded: Cell<u64>,
 }
 
 impl<'a> DatasetView<'a> {
@@ -72,7 +79,16 @@ impl<'a> DatasetView<'a> {
             policy,
             ephemeral: RefCell::new(Ephemeral::default()),
             filtered: Cell::new(0),
+            bounded: Cell::new(0),
         }
+    }
+
+    /// How many scans through this view were bounded by a span.
+    ///
+    /// Zero means every scan read its whole pattern. See [`Self::quads_with_object_in`].
+    #[must_use]
+    pub fn bounded_scans(&self) -> u64 {
+        self.bounded.get()
     }
 
     /// Quads matching the pattern whose **object** lies inside `span`, subject to policy.
@@ -96,6 +112,7 @@ impl<'a> DatasetView<'a> {
         span: holos_store::IdRange,
         graph: GraphFilter,
     ) -> Box<dyn Iterator<Item = Result<InternalQuad<TermId>, ViewError>> + 'a> {
+        self.bounded.set(self.bounded.get() + 1);
         if let Some(answer) = denied_graph(self, graph) {
             return answer;
         }

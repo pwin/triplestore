@@ -20,7 +20,6 @@
 //! ```
 
 use holos_core::{Tag, TermId};
-use holos_engine::Engine;
 use holos_security::Session;
 use holos_store::{GraphFilter, IdRange, Store};
 use oxrdf::vocab::xsd;
@@ -80,10 +79,8 @@ fn scan_and_filter(
     for quad in
         QueryableDataset::internal_quads_for_pattern(&view, None, p.as_ref(), None, Some(None))
     {
-        if let Ok(q) = quad {
-            if span.contains(q.object) {
-                kept += 1;
-            }
+        if quad.is_ok_and(|q| span.contains(q.object)) {
+            kept += 1;
         }
     }
     kept
@@ -110,13 +107,8 @@ fn best(mut f: impl FnMut() -> usize) -> (Duration, usize) {
 }
 
 fn measure(label: &str, store: &Store) {
-    let session = Session::unrestricted(store).expect("session");
-    let engine = Engine::with_store(Store::new());
-    let _ = engine;
-    let policy = {
-        let mut session = session;
-        session.policy(store).expect("policy").clone()
-    };
+    let mut session = Session::unrestricted(store).expect("session");
+    let policy = session.policy(store).expect("policy").clone();
     let view = holos_engine::view::DatasetView::new(store, &policy);
     let age = store
         .lookup_term(ex("age").as_ref().into())
