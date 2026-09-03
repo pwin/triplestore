@@ -194,6 +194,14 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
         false
     }
 
+    /// How many times the most recent bulk load spilled its buffer to disk.
+    ///
+    /// Zero for a backend that holds everything in memory anyway, which is why the default
+    /// is zero rather than an error: "it did not spill" is true of them.
+    fn bulk_spills(&self) -> usize {
+        0
+    }
+
     /// How many bytes this store occupies on disk, if it is on disk at all.
     ///
     /// `None` for a backend with no files. Used to decide whether a maintenance operation

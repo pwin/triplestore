@@ -287,6 +287,15 @@ impl Store {
         self.inner.in_scope()
     }
 
+    /// How many times the most recent bulk load spilled its buffer to disk.
+    ///
+    /// Always zero for a backend that does not spill. See
+    /// [`RocksStorage::spills`](crate::RocksStorage::spills).
+    #[must_use]
+    pub fn bulk_spills(&self) -> usize {
+        self.inner.bulk_spills()
+    }
+
     /// How many bytes this store occupies on disk, or `None` for an in-memory one.
     ///
     /// What a maintenance operation has to fit: see [`Storage::on_disk_bytes`].

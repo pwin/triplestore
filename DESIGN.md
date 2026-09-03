@@ -191,10 +191,13 @@ But use the RocksDB features Oxigraph currently leaves on the table:
   **1.7× on a whole load** — 10.7 s to 6.4 s for 753k quads, interleaved, eight pairs.
   `loadprofile` says why it is not more: the index writes were 55% of a load and are now
   almost none, so what is left is parsing and the dictionary.
-  What is *not* built is the external merge sort. A load past `MAX_SST_QUADS` falls back to
-  the buffered-batch path rather than spilling sorted runs to disk and merging them, so the
-  win has a memory budget attached to it. That budget is what stands between this and the
-  billion triples; `RocksStorage::set_ingest_limit` is where it is set.
+  **The external merge sort is built too.** A load fills a buffer, sorts it, writes it out as
+  a run per index order and starts again; at the end the runs are merged back into one sorted
+  stream per order. So `SPILL_QUADS` is not a limit on the load, only on its memory, which now
+  stays flat at around half a gigabyte however much is loaded. Spilling costs about **12%** —
+  measured interleaved, thirty runs against none — where before, exceeding the budget dropped
+  the load onto the batch path at a fifth of the speed. `RocksStorage::set_ingest_limit` moves
+  the buffer for a machine with more or less memory to spare.
 - **Merge operators** for dictionary refcounts and for the statistics counters in §7 — no
   read-modify-write on the write path.
 - **Checkpoints** for consistent backups *and* for holon branching: a checkpoint is a cheap
@@ -616,7 +619,7 @@ the measurement.
 | Phase | Deliverable | Exit criterion |
 |---|---|---|
 | **P0** ✅ | Oxigraph crates + store + evaluator | *Done, in-memory.* SPARQL 1.2 and RDF 1.2 triple terms evaluate end to end, and the W3C suites pass with no HOLOS-attributable failure (§15). Still owes the RocksDB substrate. |
-| **P1** ◐ | Dense `TermId` dictionary, order-preserving encodings, SST-ingest bulk loader | *Encoding, the RocksDB tier and sorted ingestion done.* `SstFileWriter` + `IngestExternalFile` is built and worth **1.7× on a whole load**; `loadprofile` shows why not more, and where the remaining time is. Owes the external merge sort that would lift its memory budget, and range filters compiled into index scans. **The original 500k/s exit criterion was written before any measurement and is withdrawn** — see §16 for what replaces it. |
+| **P1** ✅ | Dense `TermId` dictionary, order-preserving encodings, SST-ingest bulk loader | *Done.* `SstFileWriter` + `IngestExternalFile` is worth **1.7× on a whole load**, over an external merge sort that keeps a load's memory flat whatever its size — `loadprofile` shows why not more, and where the remaining time is. Range filters compiled into index scans are the one thing left, and they are a query concern rather than a loading one. **The original 500k/s exit criterion was written before any measurement and is withdrawn** — see §16 for what replaces it. |
 | **P2** ◐ | Characteristic-set statistics, cost-based optimizer, vectorized binary joins | *Statistics built and measured, and consumed.* Characteristic sets estimate 6 of 7 query shapes exactly — mean q-error **1.1** against the reused optimiser's **2×10⁸** — and bad estimates cost a measured **3×** (§16). `bindjoin` is an owned planner over them for the fragment it accepts, re-estimating at each step. Owes the rest of the language: `ORDER BY` and aggregation are refused on principle (§7), the remainder for want of the work. |
 | **P3** | Hypertrie hot tier + WCO multi-join + hybrid planner | Wins on cyclic and join-heavy queries without regressing star and chain queries; memory overhead measured and within budget. **Gated on P2's planner**, not just its statistics — §13 Q2 compares against a *well-planned* binary join, which does not exist yet. |
 | **P4** ✅ | SHACL subsystem on native indexes + incremental revalidation | *Done.* **98/98** W3C SHACL 1.0 Core and **138/138** SHACL 1.2 Core, through both validators (§15). Both revalidate a delta: the native one at **161×** a full pass, the adapted one at **0.08 ms against 150 ms** to prepare and validate at 250,000 quads. SPARQL constraints, SHACL-AF rules and node expressions are the adapted engine's; the native evaluator refuses them rather than dropping them. |

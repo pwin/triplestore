@@ -19,8 +19,9 @@
 //! - **Nine orders, nine permutations.** Each is written from the same rows sorted a
 //!   different way, and a permutation that disagrees with the one `insert_encoded` uses
 //!   produces a file that is internally consistent and indexes the wrong thing.
-//! - **A fallback.** Past a memory budget the load abandons sorted ingestion mid-way, so one
-//!   load can use both paths and the join between them has to be seamless.
+//! - **Spilling.** Past a memory budget the load sorts what it has, writes it to a run file
+//!   and starts again, then merges the runs back at the end. A row that appears either side
+//!   of a spill reaches the merge from two places and must come out of it once.
 
 #![cfg(feature = "rocksdb")]
 
@@ -208,6 +209,9 @@ fn a_sorted_ingest_matches_an_ordinary_load() -> Result<()> {
     let mut bulk = opened(&bulk_dir)?;
     load(&mut bulk, &quads, true)?;
 
+    // And the other half of the pair: a load this size fits in one buffer, so the spill
+    // machinery must stay out of its way entirely.
+    assert_eq!(bulk.bulk_spills(), 0, "a small load spilled");
     assert_eq!(read(&bulk)?, read(&plain)?);
     Ok(())
 }
@@ -230,13 +234,14 @@ fn an_ingested_store_survives_a_reopen() -> Result<()> {
     Ok(())
 }
 
-/// A load that outgrows its memory budget finishes on the old path, and the join between the
-/// two has to be invisible.
+/// A load that spills to disk must produce exactly the store one that did not produces.
 ///
-/// The limit is set low enough that most of this load happens after the fallback, so both
-/// halves are exercised and the seam is in the middle of the data rather than at one end.
+/// The budget is set to 100 quads against a fixture of about 1,500, so this load spills
+/// fifteen times and every order is merged from fifteen runs plus an in-memory tail. That is
+/// the machinery lifting the memory ceiling, exercised at a scale where a test can check the
+/// answer exactly rather than approximately.
 #[test]
-fn a_load_that_outgrows_its_budget_still_matches() -> Result<()> {
+fn a_load_that_spills_to_disk_still_matches() -> Result<()> {
     let quads = fixture();
 
     let plain_dir = tempfile::tempdir().expect("temp dir");
@@ -249,6 +254,14 @@ fn a_load_that_outgrows_its_budget_still_matches() -> Result<()> {
     let mut bulk = Store::with_storage(storage);
     load(&mut bulk, &quads, true)?;
 
+    // That it *spilled* is the point, and equality alone cannot show it: a load that
+    // buffered everything would produce exactly the same store, so without this the test
+    // passes with the spill removed entirely.
+    assert!(
+        bulk.bulk_spills() > 10,
+        "expected this load to spill repeatedly, got {}",
+        bulk.bulk_spills()
+    );
     assert_eq!(read(&bulk)?, read(&plain)?);
     Ok(())
 }
