@@ -84,7 +84,7 @@ impl Frame {
         use polars::prelude::*;
 
         let mut columns = Vec::with_capacity(frame.width());
-        for series in frame.get_columns() {
+        for series in frame.columns() {
             let name = series.name().to_string();
             let mut values = Vec::with_capacity(frame.height());
             for i in 0..frame.height() {
