@@ -110,6 +110,7 @@
 use crate::view::{DatasetView, ViewError};
 use holos_core::TermId;
 use holos_stats::Statistics;
+use holos_store::GraphFilter;
 use oxrdf::NamedNode;
 use rustc_hash::FxHashMap;
 use spareval::{CancellationToken, QueryableDataset};
@@ -209,6 +210,32 @@ impl Run<'_> {
     }
 }
 
+/// Which of the two scans a probe is running.
+///
+/// An enum rather than `Box<dyn Iterator>`. The first version boxed both branches, which put
+/// dynamic dispatch on *every* scan the operator makes — including the unbounded ones, which
+/// are the common case and the reason the operator exists. `rangequery` found it: a query at
+/// 90% selectivity, where a span saves almost no reading, came out 34% slower than before
+/// the pushdown was wired in at all.
+///
+/// The bounded arm is still boxed inside, because the view returns a boxed iterator; that is
+/// one indirection on the rarer path rather than one on all of them.
+enum Probe<A, B> {
+    Plain(A),
+    Bounded(B),
+}
+
+impl<T, A: Iterator<Item = T>, B: Iterator<Item = T>> Iterator for Probe<A, B> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        match self {
+            Self::Plain(inner) => inner.next(),
+            Self::Bounded(inner) => inner.next(),
+        }
+    }
+}
+
 /// One `FILTER`, ready to evaluate.
 struct Filter {
     /// `sparopt`'s form, because that is what the evaluator's public entry point takes.
@@ -217,6 +244,12 @@ struct Filter {
     /// The variables it mentions, every one of which the patterns bind. Used to decide the
     /// depth at which the filter becomes evaluable, and to decode only what it needs.
     needs: Vec<Variable>,
+    /// The comparison this filter is, when it is one that can bound a scan.
+    ///
+    /// Read from the parsed form rather than from `sparopt`'s, because that is the shape
+    /// `range::comparison` understands and it is available here for free. The filter still
+    /// runs: a bound narrows what is *read*, and what matches is decided as it always was.
+    bounds: Option<crate::range::Comparison>,
 }
 
 /// What an [`OptionalItem`] does with a match.
@@ -644,7 +677,12 @@ fn collect(
                     return None;
                 }
                 let expression = to_sparopt(conjunct)?;
-                filters.push(Filter { expression, needs });
+                let bounds = crate::range::comparison(conjunct);
+                filters.push(Filter {
+                    expression,
+                    needs,
+                    bounds,
+                });
             }
             Some(bound)
         }
@@ -717,6 +755,7 @@ fn collect(
                         return None;
                     }
                     inner_filters.push(Filter {
+                        bounds: crate::range::comparison(conjunct),
                         expression: to_sparopt(conjunct)?,
                         needs,
                     });
@@ -1375,6 +1414,57 @@ impl Plan {
         Ok(())
     }
 
+    /// The spans a pending filter puts on this pattern's object, if any does.
+    ///
+    /// `None` means scan as usual: no filter bounds the object, the object is already known,
+    /// or the comparison is one `range` declines to bound. Returning the predicate alongside
+    /// is what lets the caller ask for `pos` rather than `osp` — a span with the predicate
+    /// bound reads one predicate's slice, and without it reads every predicate's.
+    fn spans_for(
+        &self,
+        view: &DatasetView<'_>,
+        pattern: &PatternItem,
+        object: Option<TermId>,
+        pending: &[usize],
+        bindings: &FxHashMap<&Variable, TermId>,
+    ) -> Option<(Option<TermId>, Vec<holos_store::IdRange>)> {
+        // Only worth it when the object is a variable this scan has not already fixed. A
+        // bound object is an exact lookup, which no range can improve on.
+        //
+        // Purely about speed, so no test can falsify it: scanning a span and letting the
+        // binding check reject everything outside it gives the same answer, slowly. The same
+        // situation as the graph narrowing below, and recorded for the same reason — a
+        // mutation run reports this guard as dead, and it is not.
+        let TermPattern::Variable(v) = &pattern.triple.object else {
+            return None;
+        };
+        if bindings.contains_key(v) || object.is_some() {
+            return None;
+        }
+        let comparison = pending.iter().find_map(|i| {
+            let filter = self.filters.get(*i)?;
+            let bounds = filter.bounds.as_ref()?;
+            (bounds.variable == *v).then_some(bounds)
+        })?;
+        let spans = crate::range::spans(view.store(), comparison)?;
+        // The predicate, when the pattern fixes one. Resolved through the dictionary rather
+        // than the bindings because a predicate variable this scan has bound is already in
+        // `object`'s sibling and would have been resolved with it.
+        let predicate = match &pattern.triple.predicate {
+            NamedNodePattern::NamedNode(p) => {
+                match lookup(view, oxrdf::Term::from(p.clone()).as_ref()).ok()? {
+                    Slot::Fixed(id) => Some(id),
+                    // A predicate the dictionary never saw matches nothing, and the ordinary
+                    // path already handles that; do not take over the scan to say so.
+                    Slot::Missing => return None,
+                    Slot::Any => None,
+                }
+            }
+            NamedNodePattern::Variable(p) => bindings.get(p).copied(),
+        };
+        Some((predicate, spans))
+    }
+
     /// One triple pattern: resolve what is already known, then scan what is not.
     #[allow(clippy::too_many_arguments)]
     fn probe<'p>(
@@ -1419,14 +1509,38 @@ impl Plan {
             },
         };
 
+        // A filter that bounds this pattern's object turns the scan into a range read.
+        // Measured at 226x in memory and 108x on RocksDB for a filter keeping 1% of a
+        // predicate, and — the reason there is no cost model here — 1.1x at 90%, so it never
+        // costs anything to try. `rangescan` is that measurement.
+        //
+        // The filter is *not* removed from `pending`: a span says what to read and the
+        // filter still says what matches. See `crate::range`.
+        let spans = self.spans_for(view, pattern, object, pending, bindings);
+
         // The probe. Where the previous depth bound the subject, this is a prefix lookup
         // rather than a scan — which is the entire operator.
-        for quad in view.internal_quads_for_pattern(
-            subject.as_ref(),
-            predicate.as_ref(),
-            object.as_ref(),
-            graph.as_ref().map(Option::as_ref),
-        ) {
+        let scan = match &spans {
+            Some((span_predicate, spans)) => {
+                // `Option<Option<TermId>>` is this operator's spelling of a graph slot;
+                // `GraphFilter` is the store's. The two say the same three things.
+                let filter = match graph {
+                    Some(None) => GraphFilter::Default,
+                    Some(Some(g)) => GraphFilter::Named(g),
+                    None => GraphFilter::AnyNamed,
+                };
+                Probe::Bounded(spans.iter().flat_map(move |span| {
+                    view.quads_with_object_in(subject, *span_predicate, *span, filter)
+                }))
+            }
+            None => Probe::Plain(view.internal_quads_for_pattern(
+                subject.as_ref(),
+                predicate.as_ref(),
+                object.as_ref(),
+                graph.as_ref().map(Option::as_ref),
+            )),
+        };
+        for quad in scan {
             let quad = quad?;
             // Checked here as well as on entry to the next frame, because a quad that fails
             // to bind never reaches one. `?s ?p ?s` over a large store rejects almost every

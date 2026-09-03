@@ -190,10 +190,10 @@ nothing; there is no geospatial exemption.
 deploy/load.sh data/*.ttl        # stop the service first
 ```
 
-`--bulk` buffers writes and skips the write-ahead log: **3.3–3.6× faster** (see
-[BENCHMARKS.md](BENCHMARKS.md)), and the advantage grows with the dataset because the
-write-ahead log it skips grows with it too. Measured 36k vs 10k quads/s at 7.5M quads
-on a million triples), at the cost of a part-way-interrupted load having to be discarded
+`--bulk` buffers writes, skips the write-ahead log, and since 0.3.0 hands the index
+orders to RocksDB as pre-sorted files rather than writing them key by key: **5.4–8.5× faster**
+(see [BENCHMARKS.md](BENCHMARKS.md)). Measured 156k vs 18k quads/s at 7.5M quads, at the cost
+of a part-way-interrupted load having to be discarded
 rather than resumed. That is the right trade for a load you can simply re-run.
 
 **Only one process may hold the store directory.** RocksDB takes an exclusive lock on
@@ -515,6 +515,56 @@ it, the same way `deploy/backup.sh` calls `/backup`.
 
 ---
 
+## Disk headroom
+
+The store grows and nothing shrinks it on its own. Two maintenance operations need room
+beyond what the store already occupies, and both now refuse rather than filling the disk and
+failing part-way.
+
+**`holos stats --store DIR` is the thing to look at.** It reports what the store occupies,
+what is free on that filesystem, and whether a compaction would fit:
+
+```
+quads            1000000
+dictionary terms 489479
+named graphs     0
+on disk          48.2 MiB
+free here        112.0 GiB
+room to compact  yes (needs up to 48.2 MiB)
+```
+
+### What each operation costs
+
+| Operation | Needs | Why |
+|---|---|---|
+| **`holos compact`** | The store's size again, immediately | It writes a **second** store beside the first and leaves the original untouched, which is what makes it safe to abandon |
+| **`holos backup`** / `POST /backup` onto the same filesystem | Nothing at first, the store's size eventually | It hard-links, so the copy is free — but the links **pin files compaction can no longer delete**, so the space is owed as soon as anything churns |
+| **`holos backup`** onto another filesystem | The store's size, immediately | Hard links do not cross a mount, so RocksDB copies |
+| **A bulk load** | Roughly the index size again, briefly | Sorted ingestion writes its files under the store directory and then moves them in |
+
+The estimate is the source store's size on disk — the whole directory, not just the SST
+files, because the write-ahead log and the manifest have to be copied too. For `compact` it
+is deliberately generous: the point of compacting is that the result is smaller, often much
+smaller, so a store with a lot of deleted data in it will need far less than the check
+demands. `--force` is there for exactly that case.
+
+`POST /backup` answers **507 Insufficient Storage** rather than 500 when it will not fit —
+the request was fine and the server is healthy, so a scheduler can alert on it differently
+from a fault. That endpoint is the one worth watching: it is called nightly by something that
+is not looking, and its hard links are what stop the space coming back.
+
+### If it is already full
+
+A write that runs out of space fails and, since 0.3.0, fails **atomically** — an update or a
+holon tick either lands whole or not at all, so a full disk costs you the write rather than
+the store's consistency. That is the recovery position, not a substitute for headroom.
+
+Order of operations from there: drop what you do not need with `DROP GRAPH` or `DELETE`,
+then `holos compact --to` somewhere with room, because deletion alone reclaims nothing — the
+dictionary is append-only and compaction is the only thing that shrinks it.
+
+---
+
 ## Monitoring
 
 | Endpoint | Use |
@@ -529,9 +579,10 @@ are refusals, and that the graph store answers if it was configured.
 
 Memory goes to RocksDB's block cache plus the term dictionary. Size from `/stats` before
 setting a container limit — a store whose dictionary does not fit will thrash rather than
-fail. For scale: a million triples produced 489,479 dictionary terms and 48 MB on disk,
-because the `TermId` encoding inlines every integer, float and short string into the id
-itself so they never reach storage at all.
+fail. For scale: 7.5 million quads produced 2,002,681 dictionary terms and 253 MB on disk —
+about 35 bytes per quad across three index copies of each — because the `TermId` encoding
+inlines every integer, float and short string into the id itself so they never reach storage
+at all. `holos stats --store DIR` reports both for a store you have.
 
 ---
 

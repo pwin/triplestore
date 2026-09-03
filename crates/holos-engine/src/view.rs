@@ -61,6 +61,13 @@ pub struct DatasetView<'a> {
     /// Quads the policy withheld during this view's lifetime. Operator telemetry only —
     /// never returned to the principal, because the count reveals that hidden data exists.
     filtered: Cell<u64>,
+    /// How many scans were bounded by a span rather than read whole.
+    ///
+    /// A pushdown is a pure optimisation: turning it off changes no answer, so no
+    /// differential test can tell whether it happened. This is what a test asserts on
+    /// instead — and what answers an operator asking "did my filter actually push down",
+    /// which is otherwise only visible in a profile.
+    bounded: Cell<u64>,
 }
 
 impl<'a> DatasetView<'a> {
@@ -72,7 +79,48 @@ impl<'a> DatasetView<'a> {
             policy,
             ephemeral: RefCell::new(Ephemeral::default()),
             filtered: Cell::new(0),
+            bounded: Cell::new(0),
         }
+    }
+
+    /// How many scans through this view were bounded by a span.
+    ///
+    /// Zero means every scan read its whole pattern. See [`Self::quads_with_object_in`].
+    #[must_use]
+    pub fn bounded_scans(&self) -> u64 {
+        self.bounded.get()
+    }
+
+    /// Quads matching the pattern whose **object** lies inside `span`, subject to policy.
+    ///
+    /// The same answer as scanning the pattern and keeping the quads whose object is in the
+    /// span — and it must stay the same answer, which is the whole difficulty. `DESIGN.md`
+    /// §14's guarantee is that policy is decided per quad as it comes off the index and that
+    /// no operator has another way to reach the data. A faster scan that reached the index
+    /// by a different route would be a hole in that, not an optimisation, so this shares
+    /// `decide` and `denied_graph` with the unbounded path rather than reimplementing them.
+    ///
+    /// The span narrows what is *read*. It does not decide what matches, and it does not
+    /// decide what is *visible*: a quad inside the span that policy denies is denied here
+    /// exactly as it would be anywhere else.
+    ///
+    /// `tests/range_policy.rs` is the check that those two sentences stay true.
+    pub fn quads_with_object_in(
+        &'a self,
+        subject: Option<TermId>,
+        predicate: Option<TermId>,
+        span: holos_store::IdRange,
+        graph: GraphFilter,
+    ) -> Box<dyn Iterator<Item = Result<InternalQuad<TermId>, ViewError>> + 'a> {
+        self.bounded.set(self.bounded.get() + 1);
+        if let Some(answer) = denied_graph(self, graph) {
+            return answer;
+        }
+        Box::new(
+            self.store
+                .quads_with_object_in(subject, predicate, span, graph)
+                .filter_map(move |quad| decide(self, quad)),
+        )
     }
 
     /// The underlying store.
@@ -189,6 +237,57 @@ fn visible_named_graphs(view: &DatasetView<'_>) -> Result<Vec<TermId>, ViewError
     Ok(out)
 }
 
+/// Applies read policy to one quad off the index.
+///
+/// Lifted out of [`QueryableDataset::internal_quads_for_pattern`] so that every way of
+/// reaching the index shares *the same* decision rather than a copy of it. `DESIGN.md` §14's
+/// guarantee is that no operator can route around this, and the cheapest way to keep that
+/// true as scan shapes multiply is to leave exactly one place where it happens.
+fn decide<'a>(
+    view: &'a DatasetView<'a>,
+    quad: std::result::Result<holos_store::EncodedQuad, holos_store::StorageError>,
+) -> Option<Result<InternalQuad<TermId>, ViewError>> {
+    let quad = match quad {
+        Ok(quad) => quad,
+        Err(e) => return Some(Err(ViewError::from(e))),
+    };
+    match view.policy.decide_quad(quad, Modes::READ) {
+        Decision::Allow => Some(Ok(InternalQuad {
+            subject: quad.subject,
+            predicate: quad.predicate,
+            object: quad.object,
+            graph_name: quad.graph_name,
+        })),
+        Decision::Filter => {
+            view.filtered.set(view.filtered.get() + 1);
+            None
+        }
+        Decision::Fail => Some(Err(ViewError::AccessDenied)),
+    }
+}
+
+/// What a wholly denied graph answers, before any scan runs.
+///
+/// Not just an optimisation: under `Fail` semantics it makes the refusal about the graph the
+/// query named rather than about whichever quad happened to be read first.
+fn denied_graph<'a>(
+    view: &'a DatasetView<'a>,
+    graph: GraphFilter,
+) -> Option<Box<dyn Iterator<Item = Result<InternalQuad<TermId>, ViewError>> + 'a>> {
+    let GraphFilter::Named(g) = graph else {
+        return None;
+    };
+    if !view.policy.graph_is_wholly_denied(Some(g)) {
+        return None;
+    }
+    Some(match view.policy.semantics() {
+        // Under Filter semantics the graph is simply empty for this principal, which is
+        // exactly what "the answer over the visible sub-dataset" means.
+        Semantics::Filter => Box::new(std::iter::empty()),
+        Semantics::Fail => Box::new(std::iter::once(Err(ViewError::AccessDenied))),
+    })
+}
+
 impl<'a> QueryableDataset<'a> for &'a DatasetView<'a> {
     type InternalTerm = TermId;
     type Error = ViewError;
@@ -208,46 +307,15 @@ impl<'a> QueryableDataset<'a> for &'a DatasetView<'a> {
             None => GraphFilter::AnyNamed,
         };
 
-        // Skipping a wholly denied graph is not just an optimisation: under Fail
-        // semantics it makes the refusal about the graph the query asked for, rather
-        // than about whichever quad happened to be scanned first.
-        if let GraphFilter::Named(g) = graph {
-            if view.policy.graph_is_wholly_denied(Some(g)) {
-                return match view.policy.semantics() {
-                    // Under Filter semantics the graph is simply empty for this
-                    // principal, which is exactly what "the answer over the visible
-                    // sub-dataset" means.
-                    Semantics::Filter => {
-                        Box::new(std::iter::empty()) as Box<dyn Iterator<Item = _> + 'a>
-                    }
-                    Semantics::Fail => Box::new(std::iter::once(Err(ViewError::AccessDenied))),
-                };
-            }
+        if let Some(answer) = denied_graph(view, graph) {
+            return answer;
         }
 
         let (s, p, o) = (subject.copied(), predicate.copied(), object.copied());
         Box::new(
             view.store
                 .quads_for_pattern(s, p, o, graph)
-                .filter_map(move |quad| {
-                    let quad = match quad {
-                        Ok(quad) => quad,
-                        Err(e) => return Some(Err(ViewError::from(e))),
-                    };
-                    match view.policy.decide_quad(quad, Modes::READ) {
-                        Decision::Allow => Some(Ok(InternalQuad {
-                            subject: quad.subject,
-                            predicate: quad.predicate,
-                            object: quad.object,
-                            graph_name: quad.graph_name,
-                        })),
-                        Decision::Filter => {
-                            view.filtered.set(view.filtered.get() + 1);
-                            None
-                        }
-                        Decision::Fail => Some(Err(ViewError::AccessDenied)),
-                    }
-                }),
+                .filter_map(move |quad| decide(view, quad)),
         )
     }
 

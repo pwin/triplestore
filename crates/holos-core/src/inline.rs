@@ -18,12 +18,18 @@
 //! every literal the encoders accept, and [`tests`] checks the non-canonical rejections
 //! explicitly.
 //!
-//! # Deviation from the design document
+//! # Why six bytes and not seven
 //!
-//! `DESIGN.md` §5 says short strings of up to 7 bytes inline. This implementation caps them
-//! at 6. Keeping short strings in lexicographic order requires the bytes to occupy the
-//! *high* bits of the payload with the length below them, and the length and kind fields
-//! need 12 bits between them. Six ordered bytes is worth more than seven unordered ones.
+//! `DESIGN.md` §5 asked for seven, and this caps them at six. Keeping short strings in
+//! lexicographic order requires the bytes to occupy the *high* bits of the payload with the
+//! length below them, and the length and kind fields need 12 bits between them. Six ordered
+//! bytes is worth more than seven unordered ones, so the design document now says six.
+//!
+//! The same correction went the other way for two of its rows: §5's table claimed
+//! `xsd:decimal` and `xsd:double` were inlined, and `xsd:date` alongside `xsd:dateTime`.
+//! None of them is. That mattered more than a byte of string: a numeric comparison can be
+//! satisfied by a decimal, so a range scan built from the integer region alone would drop
+//! rows. See `holos_engine::range`.
 
 use crate::{Tag, TermId};
 use oxrdf::vocab::xsd;

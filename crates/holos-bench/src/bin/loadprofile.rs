@@ -36,8 +36,13 @@
 //!   on the theory. Worth retrying where the dictionary does not fit in memory.
 //!
 //! ```text
-//! cargo run --release -p holos-bench --bin loadprofile [file.nt]
+//! cargo run --release -p holos-bench --bin loadprofile [file.nt] [bulk] [spill]
 //! ```
+//!
+//! `bulk` runs only the phases a bulk load goes through, which is what an A/B of the write
+//! path needs. `spill` is a buffer size in quads, passed to `set_ingest_limit`: forcing a
+//! small buffer is how the external merge sort gets measured at a scale a person will wait
+//! for, rather than by loading four million quads to reach the first spill.
 
 use holos_engine::Engine;
 use holos_store::Store;
@@ -110,6 +115,19 @@ fn parse_and_encode(
     Ok(started.elapsed())
 }
 
+/// A store for the persistent phases, with the spill threshold a third argument can set.
+///
+/// Forcing a small buffer is how the external merge sort gets measured at a scale a person
+/// will wait for: the alternative is loading four million quads to reach the first spill.
+#[cfg(feature = "rocksdb")]
+fn rocks_at(dir: std::path::PathBuf) -> Result<Store, Box<dyn std::error::Error>> {
+    let mut storage = RocksStorage::open(dir)?;
+    if let Some(limit) = std::env::args().nth(3).and_then(|a| a.parse().ok()) {
+        storage.set_ingest_limit(limit);
+    }
+    Ok(Store::with_storage(storage))
+}
+
 /// The whole pipeline.
 fn full_load(
     path: &str,
@@ -180,22 +198,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "rocksdb")]
     if only_bulk {
-        let bulk_encode = parse_and_encode(
-            &path,
-            Store::with_storage(RocksStorage::open(scratch("bulkencode")?)?),
-            true,
-        )?;
+        let bulk_encode = parse_and_encode(&path, rocks_at(scratch("bulkencode")?)?, true)?;
         report(
             "6. + dictionary, bulk mode",
             quads,
             bulk_encode,
             Some(parse),
         );
-        let rocks_bulk = full_load(
-            &path,
-            Store::with_storage(RocksStorage::open(scratch("bulk")?)?),
-            true,
-        )?;
+        let rocks_bulk = full_load(&path, rocks_at(scratch("bulk")?)?, true)?;
         report(
             "7. + index, bulk mode",
             quads,

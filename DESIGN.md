@@ -142,18 +142,37 @@ makes impossible.
 | `0x2` | Blank node (graph-scoped; see §13) |
 | `0x3` | **Well-known vocabulary** — static, compile-time-constant ids for `rdf:`, `rdfs:`, `owl:`, `xsd:`, `sh:`, `prov:`. `rdf:type` becomes a constant the optimizer can pattern-match on. |
 | `0x4` | Inline `xsd:integer` (60-bit, order-preserving two's-complement bias) |
-| `0x5` | Inline `xsd:decimal` / `xsd:double` (order-preserving IEEE-754 flip) |
-| `0x6` | Inline `xsd:date` / `xsd:dateTime` (order-preserving, UTC-normalised) |
-| `0x7` | Inline `xsd:boolean`, and short strings of 7 bytes or fewer |
+| `0x5` | Inline `xsd:float` (order-preserving IEEE-754 flip), where the canonical form round-trips |
+| `0x6` | Inline `xsd:dateTime` (order-preserving, UTC-normalised) |
+| `0x7` | Inline `xsd:boolean`, and `xsd:string` of 6 bytes or fewer |
 | `0x8` | **Triple term** — index into the triple-term side table |
 | `0x9`–`0xF` | Reserved (vector-embedding handles, geometry handles, …) |
 
 Two consequences worth stating explicitly:
 
-- **Order-preserving encodings turn `FILTER(?d > "2020-01-01"^^xsd:date)` into an index range
-  scan** — the cheapest large win available, and one most stores don't take.
+- **Order-preserving encodings turn `FILTER(?d > "2020-01-01"^^xsd:dateTime)` into an index
+  range scan** — the cheapest large win available, and one most stores don't take. **Built.**
+  A filter that bounds a pattern's object bounds its scan: 69× at 1% selectivity, 1.2× at
+  90%, never slower. The bound decides what is read and the filter still decides what
+  matches, so the answer cannot move.
 - **Inline values never enter the dictionary**, so a dataset of measurements doesn't pay dictionary
   cost for its numbers.
+
+> **What is *not* inlined matters as much, and this table used to be wrong about it.** It
+> claimed `xsd:decimal` and `xsd:double` at `0x5` and `xsd:date` at `0x6`; the encoder takes
+> neither. Nor does it take an `xsd:float` whose canonical form does not round-trip, or an
+> integer past 60 bits. All of those are numbers, all are dictionary literals, and a
+> dictionary id says nothing about its value.
+>
+> That is why a range-bounded scan reads the dictionary region alongside the ordered one — a
+> span built from the integer region alone silently drops `30.5` from `?o > 30`. The cost is
+> nothing in the case the inlining exists for: under a numeric predicate, the dictionary's
+> slice is empty. `crates/holos-engine/src/range.rs` is where this is enforced, and
+> `tests/range_soundness.rs` is what holds it to it.
+>
+> The short-string cap is 6 bytes rather than 7 for a reason `crates/holos-core/src/inline.rs`
+> gives: keeping them in lexicographic order needs the bytes in the payload's high bits with
+> length and kind below, and six ordered bytes beat seven unordered.
 
 **Dictionary** lives in two RocksDB column families, `id2str` and `str2id`, with a merge-operator
 refcount so deletion can reclaim. Large literals go to BlobDB. Dense id allocation is a single
@@ -191,10 +210,13 @@ But use the RocksDB features Oxigraph currently leaves on the table:
   **1.7× on a whole load** — 10.7 s to 6.4 s for 753k quads, interleaved, eight pairs.
   `loadprofile` says why it is not more: the index writes were 55% of a load and are now
   almost none, so what is left is parsing and the dictionary.
-  What is *not* built is the external merge sort. A load past `MAX_SST_QUADS` falls back to
-  the buffered-batch path rather than spilling sorted runs to disk and merging them, so the
-  win has a memory budget attached to it. That budget is what stands between this and the
-  billion triples; `RocksStorage::set_ingest_limit` is where it is set.
+  **The external merge sort is built too.** A load fills a buffer, sorts it, writes it out as
+  a run per index order and starts again; at the end the runs are merged back into one sorted
+  stream per order. So `SPILL_QUADS` is not a limit on the load, only on its memory, which now
+  stays flat at around half a gigabyte however much is loaded. Spilling costs about **12%** —
+  measured interleaved, thirty runs against none — where before, exceeding the budget dropped
+  the load onto the batch path at a fifth of the speed. `RocksStorage::set_ingest_limit` moves
+  the buffer for a machine with more or less memory to spare.
 - **Merge operators** for dictionary refcounts and for the statistics counters in §7 — no
   read-modify-write on the write path.
 - **Checkpoints** for consistent backups *and* for holon branching: a checkpoint is a cheap
@@ -616,7 +638,7 @@ the measurement.
 | Phase | Deliverable | Exit criterion |
 |---|---|---|
 | **P0** ✅ | Oxigraph crates + store + evaluator | *Done, in-memory.* SPARQL 1.2 and RDF 1.2 triple terms evaluate end to end, and the W3C suites pass with no HOLOS-attributable failure (§15). Still owes the RocksDB substrate. |
-| **P1** ◐ | Dense `TermId` dictionary, order-preserving encodings, SST-ingest bulk loader | *Encoding, the RocksDB tier and sorted ingestion done.* `SstFileWriter` + `IngestExternalFile` is built and worth **1.7× on a whole load**; `loadprofile` shows why not more, and where the remaining time is. Owes the external merge sort that would lift its memory budget, and range filters compiled into index scans. **The original 500k/s exit criterion was written before any measurement and is withdrawn** — see §16 for what replaces it. |
+| **P1** ✅ | Dense `TermId` dictionary, order-preserving encodings, SST-ingest bulk loader | *Done.* `SstFileWriter` + `IngestExternalFile` is worth **1.7× on a whole load**, over an external merge sort that keeps a load's memory flat whatever its size — `loadprofile` shows why not more, and where the remaining time is. Range filters are compiled into index scans: a selective `FILTER` on an inline value is **69× faster** end to end, and never slower (§16). **The original 500k/s exit criterion was written before any measurement and is withdrawn** — see §16 for what replaces it. |
 | **P2** ◐ | Characteristic-set statistics, cost-based optimizer, vectorized binary joins | *Statistics built and measured, and consumed.* Characteristic sets estimate 6 of 7 query shapes exactly — mean q-error **1.1** against the reused optimiser's **2×10⁸** — and bad estimates cost a measured **3×** (§16). `bindjoin` is an owned planner over them for the fragment it accepts, re-estimating at each step. Owes the rest of the language: `ORDER BY` and aggregation are refused on principle (§7), the remainder for want of the work. |
 | **P3** | Hypertrie hot tier + WCO multi-join + hybrid planner | Wins on cyclic and join-heavy queries without regressing star and chain queries; memory overhead measured and within budget. **Gated on P2's planner**, not just its statistics — §13 Q2 compares against a *well-planned* binary join, which does not exist yet. |
 | **P4** ✅ | SHACL subsystem on native indexes + incremental revalidation | *Done.* **98/98** W3C SHACL 1.0 Core and **138/138** SHACL 1.2 Core, through both validators (§15). Both revalidate a delta: the native one at **161×** a full pass, the adapted one at **0.08 ms against 150 ms** to prepare and validate at 250,000 quads. SPARQL constraints, SHACL-AF rules and node expressions are the adapted engine's; the native evaluator refuses them rather than dropping them. |
@@ -1022,36 +1044,45 @@ much as the first, because a stale list is a list nobody trusts. Re-baseline del
 
 ## 16. What the store measures
 
-One million triples, N-Triples, eight predicates, 489,479 distinct dictionary terms, on a
-Windows laptop. Release build. Numbers include parsing.
+7.5 million quads from 1,000,000 generated people, N-Triples, 2,002,681 distinct
+dictionary terms, on a Windows laptop. Release build. Numbers include parsing.
 
 | Configuration | Throughput | On disk |
 |---|---|---|
-| In memory | 208,161 quads/s | — |
-| RocksDB, `--bulk` | 40,782 quads/s | 48 MB |
-| RocksDB, no `--bulk` | 17,782 quads/s | — |
+| In memory | 176,475 quads/s | — |
+| RocksDB, `--bulk` | 155,849 quads/s | 253 MB |
+| RocksDB, no `--bulk` | 18,436 quads/s | 284 MB |
 
 ### The P1 target was wrong, and here is the evidence
 
 §11 originally set P1's exit criterion at 500k triples/s. That number was written before
-anything had been measured. It is roughly 12× the persistent path's actual rate and is
-withdrawn rather than left standing as an unearned claim.
+anything had been measured. It is withdrawn rather than left standing as an unearned claim —
+though the gap has closed considerably: sorted ingestion took the persistent path from 41k
+to **156k quads/s**, so what was 12× off is now about 3×.
 
 Three measurements say where the time goes, and rule out the guesses:
 
 - **Re-loading the same file into an already-populated store runs at 45k quads/s** — only 11%
   faster than the cold load, despite allocating no ids and writing no dictionary rows. Term
   interning is not the bottleneck.
-- **`--bulk` is 3.3–3.6× faster than not**, measured across three scales in
-  [BENCHMARKS.md](BENCHMARKS.md) — the advantage grows with the dataset. So the write-ahead log and
-  per-quad batching do cost real time, and buffering recovers it.
-- **100k and 1M load at the same rate**, so the cost is linear. There is no algorithmic defect
-  to find.
+- **`--bulk` is 5.4–8.5× faster than not**, measured across three scales in
+  [BENCHMARKS.md](BENCHMARKS.md). So the write-ahead log and per-quad batching do cost real
+  time, and buffering recovers it.
+- **100k and 1M load at the same rate** — 155,040 against 155,849 quads/s — so the cost is
+  linear. There is no algorithmic defect to find.
 
-What remains is the per-quad cost of pushing three to six index keys through the memtable,
-and it is the same whether a key is new or an overwrite. That is precisely the work
-`SstFileWriter` ingestion skips: sorted SST files are handed to the LSM directly, bypassing
-the memtable. §6.1 named it; it is not built.
+What remained was the per-quad cost of pushing three to six index keys through the memtable,
+the same whether a key is new or an overwrite. That is precisely the work `SstFileWriter`
+ingestion skips: sorted files are handed to the LSM directly.
+
+**That prediction held.** Sorted ingestion is built as of 0.3.0, and the ratio above is how
+much: `--bulk` was 3.3–3.6× the ordinary path before it and is 5.4–8.5× after, measured
+within the same runs so the comparison owes nothing to the machine. An interleaved A/B of the
+two write paths on identical hardware put the ingestion itself at **1.7× on a whole load** —
+the difference between that and the ratio above is that a whole load is not only index
+writes. `loadprofile` gives the split: parsing 11%, the dictionary 32%, index writes 55%. It
+is the last of those that went to almost nothing, and the first two are what a further 2×
+would now have to come out of.
 
 **The replacement criterion:** P1 exits when SST ingestion lands and the persistent bulk path
 is measured again — against this 41k/s baseline, on a dataset large enough that it cannot be
@@ -1145,28 +1176,40 @@ non-trivial scene — the alternative being 4/s if each commit revalidated every
 
 ### Two other numbers worth keeping
 
-**The dictionary holds 489,479 terms for a million triples.** Every `xsd:integer`, every
-`xsd:float` and every city name of six bytes or fewer inlined into its id and never reached
-storage — the §5 encoding doing exactly what it was designed to do.
+**The dictionary holds two terms per person** — 2,002,681 for the 7.5M-quad dataset,
+which is the person's IRI and their name literal and nothing else. Every `xsd:integer`, every
+`xsd:float` and every string of six bytes or fewer is inlined into its id and never reaches
+storage at all: the §5 encoding doing exactly what it was designed to do.
 
-**48 MB on disk for a 90 MB source file**, with three index copies of every triple. Dense
-64-bit ids plus LZ4 are why; a 128-bit hashed key would roughly double the index.
+**253 MB on disk for 7.5M quads**, with three index copies of every one — about 35 bytes per
+quad. Dense 64-bit ids plus LZ4 are why; a 128-bit hashed key would roughly double the
+index.
 
 ### How far it goes
 
-> **Measured.** 10,000,000 triples, eight predicates, on the same laptop.
+> **Measured.** Two ends of a 14× span, from the same generator and the same laptop.
 
-| | 1M | 10M |
+| | 753k quads | 10.5M quads |
 |---|---:|---:|
-| Bulk load | 41k quads/s | **35.6k quads/s** |
-| On disk | 48 MB | **453 MB** |
-| Dictionary terms | 489,479 | 3,755,433 |
-| Bytes per quad on disk | ~48 | **~47** |
+| Bulk load | 155k quads/s | **94k quads/s** |
+| On disk | 25 MB | **354 MB** |
+| Dictionary terms | 200,881 | 2,803,481 |
+| Bytes per quad on disk | ~35 | **~35** |
 
-Load throughput fell **13%** going up an order of magnitude, and bytes-per-quad did not
-move at all — so nothing in the storage layer degrades super-linearly across that range.
-Three index copies of every quad plus LZ4, over dense 64-bit ids, is what holds the figure
-flat.
+**Bytes-per-quad does not move**, across fourteen times the data — 34.8 at the small end and
+35.2 at the large one. Three index copies of every quad plus LZ4, over dense 64-bit ids, is
+what holds it flat, and it is the figure that says nothing in the storage layer degrades
+super-linearly.
+
+Throughput does fall, by 39% across that span. It is worth saying what that is *not*: the
+in-memory backend, which has no LSM, no write-ahead log and no files at all, falls 47% over
+the same range. So the decline is the dictionary and the cache behaviour of a working set
+that outgrows L3, not the storage layer. Sorted ingestion is also why the absolute figures
+are four times what they were: this table read 41k → 35.6k before it.
+
+The 35 bytes is itself down from ~48 in 0.2.0, and that was not a design goal — files written
+pre-sorted into the levels simply do not carry the fragmentation compaction is otherwise
+still working through.
 
 Query cost at 10M, from a cold process (about 0.4s of that is start-up):
 

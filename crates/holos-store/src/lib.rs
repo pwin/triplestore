@@ -30,7 +30,7 @@ pub mod storage;
 
 pub use dictionary::Dictionary;
 pub use error::{Result, StorageError};
-pub use index::{EncodedQuad, GraphFilter, QuadIndex, QuadScan};
+pub use index::{EncodedQuad, GraphFilter, IdRange, QuadIndex, QuadScan};
 pub use memory::MemoryStorage;
 #[cfg(feature = "rocksdb")]
 pub use rocks::RocksStorage;
@@ -285,6 +285,39 @@ impl Store {
     #[must_use]
     pub fn in_scope(&self) -> bool {
         self.inner.in_scope()
+    }
+
+    /// Quads matching the pattern whose object lies inside `span`.
+    ///
+    /// See [`Storage::quads_with_object_in`]. The span narrows the scan; the caller's own
+    /// filter still decides what matches.
+    #[must_use]
+    pub fn quads_with_object_in(
+        &self,
+        subject: Option<TermId>,
+        predicate: Option<TermId>,
+        span: IdRange,
+        graph: GraphFilter,
+    ) -> QuadScan<'_> {
+        self.inner
+            .quads_with_object_in(subject, predicate, span, graph)
+    }
+
+    /// How many times the most recent bulk load spilled its buffer to disk.
+    ///
+    /// Always zero for a backend that does not spill. See
+    /// [`RocksStorage::spills`](crate::RocksStorage::spills).
+    #[must_use]
+    pub fn bulk_spills(&self) -> usize {
+        self.inner.bulk_spills()
+    }
+
+    /// How many bytes this store occupies on disk, or `None` for an in-memory one.
+    ///
+    /// What a maintenance operation has to fit: see [`Storage::on_disk_bytes`].
+    #[must_use]
+    pub fn on_disk_bytes(&self) -> Option<u64> {
+        self.inner.on_disk_bytes()
     }
 
     /// Announces a bulk load, so the backend can buffer writes and skip its log.

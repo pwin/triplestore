@@ -518,10 +518,15 @@ fn read_and_parse_query(test: &TestEntry) -> Result<spargebra::Query> {
         .ok_or_else(|| anyhow!("no query file"))?;
     let text = std::fs::read_to_string(path)?;
     let base = manifest::base_for(test, path);
-    Ok(SparqlParser::new()
+    let parsed = SparqlParser::new()
         .with_base_iri(base)
         .map_err(|e| anyhow!("{e}"))?
-        .parse_query(&text)?)
+        .parse_query(&text)?;
+    // The store's answer to "is this query valid" is the parser *and* the checks the engine
+    // applies after it. A negative syntax test that the parser accepts and the engine then
+    // refuses is a query the store rejects, which is what the test is asking.
+    holos_engine::validate::check(&parsed).map_err(|e| anyhow!("{e}"))?;
+    Ok(parsed)
 }
 
 fn run_query_evaluation(test: &TestEntry) -> Outcome {

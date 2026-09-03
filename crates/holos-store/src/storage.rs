@@ -18,7 +18,7 @@
 //! [`Result`](crate::Result) for the same reason.
 
 use crate::error::Result;
-use crate::index::{EncodedQuad, GraphFilter, QuadScan};
+use crate::index::{EncodedQuad, GraphFilter, IdRange, QuadScan};
 use holos_core::TermId;
 use oxrdf::{Term, TermRef};
 
@@ -192,6 +192,57 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// Whether a commit scope is open.
     fn in_scope(&self) -> bool {
         false
+    }
+
+    /// Quads matching the pattern whose **object** lies inside `span`.
+    ///
+    /// The narrowing `DESIGN.md` §5's order-preserving encodings exist for: an inline
+    /// integer, float or dateTime has an id whose order is its value's order, so a
+    /// comparison against a constant is a bound on the index rather than a test applied to
+    /// everything the index returns.
+    ///
+    /// **The span narrows what is read; it does not decide what matches.** A caller still
+    /// applies its own filter, and must pass a span admitting at least everything that
+    /// could match — a numeric comparison, for instance, can be satisfied by an
+    /// `xsd:decimal`, which the inline codec declines and the dictionary therefore holds in
+    /// no particular order.
+    ///
+    /// The default implementation scans and filters, which is correct and buys nothing. A
+    /// backend overrides it when its index can be bounded.
+    fn quads_with_object_in(
+        &self,
+        subject: Option<TermId>,
+        predicate: Option<TermId>,
+        span: IdRange,
+        graph: GraphFilter,
+    ) -> QuadScan<'_> {
+        Box::new(
+            self.scan(subject, predicate, None, graph)
+                .filter(move |quad| match quad {
+                    Ok(quad) => span.contains(quad.object),
+                    Err(_) => true,
+                }),
+        )
+    }
+
+    /// How many times the most recent bulk load spilled its buffer to disk.
+    ///
+    /// Zero for a backend that holds everything in memory anyway, which is why the default
+    /// is zero rather than an error: "it did not spill" is true of them.
+    fn bulk_spills(&self) -> usize {
+        0
+    }
+
+    /// How many bytes this store occupies on disk, if it is on disk at all.
+    ///
+    /// `None` for a backend with no files. Used to decide whether a maintenance operation
+    /// will fit before it starts: a checkpoint eventually owes this much, and a compaction
+    /// needs it immediately because it writes a second store beside the first.
+    ///
+    /// Everything is counted, not just the SST files — the write-ahead log, the manifest and
+    /// anything else in the directory all have to be copied by a backup that cannot hard-link.
+    fn on_disk_bytes(&self) -> Option<u64> {
+        None
     }
 
     /// Announces a bulk load, so a backend can buffer writes and skip its log.

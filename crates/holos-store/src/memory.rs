@@ -6,7 +6,7 @@
 
 use crate::dictionary::Dictionary;
 use crate::error::{Result, StorageError};
-use crate::index::{EncodedQuad, GraphFilter, QuadIndex, QuadScan};
+use crate::index::{EncodedQuad, GraphFilter, IdRange, QuadIndex, QuadScan};
 use crate::storage::Storage;
 use holos_core::TermId;
 use oxrdf::{Term, TermRef};
@@ -240,6 +240,17 @@ impl Storage for MemoryStorage {
             self.record(Undo::GraphDropped(graph));
         }
         self.index.remove_named_graph(graph)
+    }
+
+    fn quads_with_object_in(
+        &self,
+        subject: Option<TermId>,
+        predicate: Option<TermId>,
+        span: IdRange,
+        graph: GraphFilter,
+    ) -> QuadScan<'_> {
+        self.index
+            .quads_with_object_in(subject, predicate, span, graph)
     }
 
     fn contains_named_graph(&self, graph: TermId) -> Result<bool> {

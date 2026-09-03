@@ -17,9 +17,10 @@
 //! first.
 
 mod codec;
+mod sort;
 
 use crate::error::{Result, StorageError};
-use crate::index::{EncodedQuad, GraphFilter, QuadScan};
+use crate::index::{EncodedQuad, GraphFilter, IdRange, QuadScan};
 use crate::storage::Storage;
 use codec::{key, prefix_upper_bound, put_id, put_term, read_id, split_key, StoredTerm};
 use holos_core::{inline, vocab, Tag, TermId, FORMAT_VERSION};
@@ -89,8 +90,10 @@ pub struct RocksStorage {
     /// Where the database lives, so a bulk load can write its sorted files beside it —
     /// the same filesystem, which is what lets the ingest move them instead of copying.
     path: std::path::PathBuf,
-    /// How many quads a load may hold before it gives up on sorted ingestion.
+    /// How many quads a load may hold before it spills them to a sorted run.
     ingest_limit: usize,
+    /// How many times the current or most recent bulk load spilled.
+    spills: usize,
 }
 
 /// How many buffered operations a commit scope may hold.
@@ -179,16 +182,16 @@ enum Pending {
     Delete(&'static str, Box<[u8]>),
 }
 
-/// How many quads a load will hold in memory to sort before it stops trying to.
+/// How many quads a load holds before it sorts them and writes them out to a run file.
 ///
-/// An `EncodedQuad` is 40 bytes and the partitioned key rows are another 24 or 32, so this is
-/// a few hundred megabytes at the peak. Past it the load finishes the way it used to, in
-/// batches: slower, but it completes rather than running the machine out of memory.
+/// Not a cap on the load: a load larger than this spills, and goes on spilling, and the runs
+/// are merged back into one sorted stream per order at the end. What it caps is *memory* — an
+/// `EncodedQuad` is 40 bytes and the partitioned key rows another 24 or 32, so a buffer this
+/// size peaks somewhere around half a gigabyte and stays there however much is loaded.
 ///
-/// Lifting the cap means an external merge sort — spill sorted runs to disk, merge them into
-/// one stream per order — which is what `DESIGN.md` §6.1 has in mind for a billion triples.
-/// Not built, and the cap is where that would go.
-const MAX_SST_QUADS: usize = 24 << 20;
+/// Larger is faster, up to a point, because it means fewer runs to merge and fewer bytes
+/// written to disk and read back. Smaller is friendlier to a machine doing other things.
+const SPILL_QUADS: usize = 4 << 20;
 
 #[derive(Default)]
 struct BulkState {
@@ -208,9 +211,22 @@ struct BulkState {
     quads: Vec<EncodedQuad>,
     /// Named graphs seen, so the catalogue can be written once at the end.
     graphs: FxHashSet<TermId>,
-    /// Whether the sorted-ingestion path is still on. Turned off when the load outgrows
-    /// [`MAX_SST_QUADS`], after which it behaves exactly as it used to.
+    /// Whether the sorted-ingestion path is on.
     sst: bool,
+    /// Sorted runs already written, per index order, once the load outgrew its buffer.
+    ///
+    /// Empty for any load that fits in one buffer, which is the common case: the merge then
+    /// collapses to sorting a vector and nothing touches the disk.
+    spilled: Option<Box<Spilled>>,
+}
+
+/// The sorted runs on disk, one set per index order.
+///
+/// Boxed inside `BulkState` because it is `None` for most loads and holds nine vectors of
+/// paths when it is not.
+struct Spilled {
+    triples: [sort::Runs<3>; 3],
+    named: [sort::Runs<4>; 6],
 }
 
 impl std::fmt::Debug for BulkState {
@@ -221,6 +237,7 @@ impl std::fmt::Debug for BulkState {
             .field("buffered_quads", &self.quads.len())
             .field("named_graphs", &self.graphs.len())
             .field("sorted_ingestion", &self.sst)
+            .field("spilled", &self.spilled.is_some())
             .finish()
     }
 }
@@ -304,16 +321,33 @@ impl RocksStorage {
             bulk: None,
             scope: None,
             path,
-            ingest_limit: MAX_SST_QUADS,
+            ingest_limit: SPILL_QUADS,
+            spills: 0,
         })
     }
 
-    /// How many quads a bulk load may hold in memory before it stops sorting them.
+    /// How many times the current or most recent bulk load spilled to disk.
     ///
-    /// The default is [`MAX_SST_QUADS`], a few hundred megabytes at the peak. Lower it on a
-    /// machine that cannot spare that: the load falls back to the buffered-batch path, which
-    /// is slower and bounded. Raising it above what the machine has is how a load gets killed
-    /// rather than slowed.
+    /// Zero means the whole load fitted in one buffer and never touched the scratch
+    /// directory, which is the fast case. A large number against a load that had memory to
+    /// spare is the signal to raise [`Self::set_ingest_limit`]: each spill is the buffer
+    /// written out and read back again.
+    #[must_use]
+    pub fn spills(&self) -> usize {
+        self.spills
+    }
+
+    /// How many quads a bulk load holds before spilling them to a sorted run.
+    ///
+    /// The default is [`SPILL_QUADS`], which peaks somewhere around half a gigabyte. This is
+    /// not a limit on the load — a load larger than this spills and goes on spilling, and the
+    /// runs are merged at the end — it is the load's memory ceiling, and it holds whatever
+    /// the load's size.
+    ///
+    /// Lower it on a machine that cannot spare that: the load writes and reads more scratch,
+    /// and still finishes. Raise it and there is less scratch and less merging, up to the
+    /// point where the buffer stops fitting in memory, which is the one direction that turns
+    /// a slow load into a killed one.
     pub fn set_ingest_limit(&mut self, quads: usize) {
         self.ingest_limit = quads;
     }
@@ -326,6 +360,7 @@ impl RocksStorage {
     /// `SstFileWriter` ingestion here eventually, which is faster still *and* keeps crash
     /// safety, at the cost of needing its input sorted.
     fn start_bulk(&mut self) {
+        self.spills = 0;
         self.bulk = Some(BulkState {
             sst: true,
             ..BulkState::default()
@@ -357,43 +392,59 @@ impl RocksStorage {
                 quads,
                 graphs,
                 sst,
+                spilled,
                 ..
             } = state;
             // The dictionary first: the index files name term ids, and a store holding an id
             // it cannot decode is corrupt in a way no later step would notice.
             self.write_pending(pending, true)?;
-            if sst && !quads.is_empty() {
-                self.ingest_quads(quads, &graphs)?;
+            if sst && !(quads.is_empty() && spilled.is_none()) {
+                self.ingest_quads(quads, &graphs, spilled)?;
             }
         }
         self.set_compactions(true);
         self.recount()
     }
 
-    /// Gives up on sorted ingestion and writes what has been collected the old way.
+    /// Sorts what has been collected and writes it out as a run per index order.
     ///
-    /// Called when a load outgrows [`MAX_SST_QUADS`]. Everything collected so far goes
-    /// through the ordinary buffered path, and so does everything after it — the load gets
-    /// slower and still finishes, which is the right way round for a limit that exists to
-    /// bound memory rather than to express a rule.
-    fn abandon_sorted_ingestion(&mut self) -> Result<()> {
-        let (quads, graphs) = match self.bulk.as_mut() {
-            Some(state) => {
-                state.sst = false;
-                (
-                    std::mem::take(&mut state.quads),
-                    std::mem::take(&mut state.graphs),
-                )
-            }
-            None => return Ok(()),
+    /// Called when the buffer reaches its size, which is what keeps a load's memory flat
+    /// however large the load is. The runs are merged back at the end.
+    fn spill(&mut self) -> Result<()> {
+        let dir = self.ingest_dir()?;
+        self.spills += 1;
+        let Some(state) = self.bulk.as_mut() else {
+            return Ok(());
         };
-        for graph in graphs {
-            self.put(GRAPHS, put_id(graph).to_vec(), Vec::new())?;
+        let quads = std::mem::take(&mut state.quads);
+        let spilled = state
+            .spilled
+            .get_or_insert_with(|| Box::new(Spilled::new(&dir)));
+
+        let (mut triples, mut named) = partition(&quads);
+        drop(quads);
+        // One buffer, nine orders, sorted in place each time. Copying it per order would
+        // multiply by nine the memory this whole mechanism exists to bound.
+        for (runs, perm) in spilled.triples.iter_mut().zip(TRIPLE_PERMS.map(|(_, p)| p)) {
+            runs.spill(&mut triples, perm)?;
         }
-        for quad in quads {
-            self.insert_encoded(quad)?;
+        for (runs, perm) in spilled.named.iter_mut().zip(QUAD_PERMS.map(|(_, p)| p)) {
+            runs.spill(&mut named, perm)?;
         }
         Ok(())
+    }
+
+    /// The scratch directory, made if it is not there.
+    ///
+    /// Beside the database rather than in the system temp directory, so the ingest can move
+    /// the files instead of copying them across a filesystem boundary — and so a load's
+    /// scratch lands on the volume the operator sized for the store.
+    fn ingest_dir(&self) -> Result<std::path::PathBuf> {
+        let dir = self.path.join("holos-ingest");
+        if !dir.exists() {
+            std::fs::create_dir_all(&dir).map_err(StorageError::Io)?;
+        }
+        Ok(dir)
     }
 
     /// Writes one sorted file per index order and hands them to `RocksDB`.
@@ -406,41 +457,33 @@ impl RocksStorage {
     /// The quads are sorted once per order, in place, and the keys are generated while each
     /// file is written. Keeping nine key sets instead would cost nine times the memory for
     /// the same result.
-    fn ingest_quads(&mut self, quads: Vec<EncodedQuad>, graphs: &FxHashSet<TermId>) -> Result<()> {
-        // Beside the database rather than in the system temp directory, so the ingest can
-        // move the files instead of copying them across a filesystem boundary.
-        let dir = self.path.join("holos-ingest");
-        if dir.exists() {
-            // Left by a load that did not finish. A load is already documented as
-            // all-or-nothing-and-discard-on-failure, so there is nothing here to keep.
-            std::fs::remove_dir_all(&dir).map_err(StorageError::Io)?;
-        }
-        std::fs::create_dir_all(&dir).map_err(StorageError::Io)?;
-
-        let mut triples: Vec<[TermId; 3]> = Vec::new();
-        let mut named: Vec<[TermId; 4]> = Vec::new();
-        for quad in &quads {
-            match quad.graph_name {
-                None => triples.push([quad.subject, quad.predicate, quad.object]),
-                Some(g) => named.push([quad.subject, quad.predicate, quad.object, g]),
-            }
-        }
+    fn ingest_quads(
+        &mut self,
+        quads: Vec<EncodedQuad>,
+        graphs: &FxHashSet<TermId>,
+        spilled: Option<Box<Spilled>>,
+    ) -> Result<()> {
+        let dir = self.ingest_dir()?;
+        let (mut triples, mut named) = partition(&quads);
         drop(quads);
 
+        // No spills means no runs, and the merge below is then a sort of what is in memory —
+        // the same work the first version of this did, reached by the same path.
+        let spilled = spilled.unwrap_or_else(|| Box::new(Spilled::new(&dir)));
+
         let outcome = (|| -> Result<()> {
-            for (family, perm) in [(DSPO, [0, 1, 2]), (DPOS, [1, 2, 0]), (DOSP, [2, 0, 1])] {
-                self.write_and_ingest(&dir, family, &mut triples, perm)?;
+            for (i, (family, perm)) in TRIPLE_PERMS.into_iter().enumerate() {
+                // Re-sorted in place for each order rather than copied. The borrow ends when
+                // `write_and_ingest` consumes the merge, which is what lets the next order
+                // sort the same buffer again.
+                let merged = spilled.triples[i].merge(&mut triples, perm)?;
+                self.write_and_ingest(&dir, family, merged)?;
             }
-            for (family, perm) in [
-                (SPOG, [0, 1, 2, 3]),
-                (POSG, [1, 2, 0, 3]),
-                (OSPG, [2, 0, 1, 3]),
-                (GSPO, [3, 0, 1, 2]),
-                (GPOS, [3, 1, 2, 0]),
-                (GOSP, [3, 2, 0, 1]),
-            ] {
-                self.write_and_ingest(&dir, family, &mut named, perm)?;
+            for (i, (family, perm)) in QUAD_PERMS.into_iter().enumerate() {
+                let merged = spilled.named[i].merge(&mut named, perm)?;
+                self.write_and_ingest(&dir, family, merged)?;
             }
+
             // The catalogue is one row per graph, so a batch is the right tool.
             let mut batch = WriteBatch::default();
             let handle = cf(&self.db, GRAPHS)?;
@@ -450,8 +493,9 @@ impl RocksStorage {
             self.db.write(batch).map_err(rocks_err)
         })();
 
-        // Whatever happened, the scratch files are not wanted. A failure to tidy them is not
-        // worth failing a load that otherwise worked.
+        // The runs delete themselves; this takes the directory with them. A failure to tidy
+        // is not worth failing a load that otherwise worked.
+        drop(spilled);
         let _ = std::fs::remove_dir_all(&dir);
         outcome
     }
@@ -465,26 +509,28 @@ impl RocksStorage {
         &self,
         dir: &std::path::Path,
         family: &'static str,
-        rows: &mut Vec<[TermId; N]>,
-        perm: [usize; N],
+        mut merged: sort::Merged<'_, N>,
     ) -> Result<()> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let permuted = |row: &[TermId; N]| perm.map(|i| row[i]);
-        rows.sort_unstable_by_key(permuted);
-        // An SST demands *strictly* increasing keys, where a `WriteBatch` would have taken
-        // the same key twice and shrugged. That is why the bulk path could defer duplicate
-        // detection and this cannot.
-        rows.dedup_by(|a, b| permuted(a) == permuted(b));
-
         let path = dir.join(format!("{family}.sst"));
         // Held in a binding: the writer borrows its options for its whole life.
         let opts = index_opts(codec::ID);
         let mut writer = rocksdb::SstFileWriter::create(&opts);
         writer.open(&path).map_err(rocks_err)?;
-        for row in rows.iter() {
-            writer.put(key(&permuted(row)), []).map_err(rocks_err)?;
+
+        // The merge is already sorted and already deduplicated, which is what an
+        // `SstFileWriter` requires and a `WriteBatch` never did.
+        let width = sort::Merged::<N>::width();
+        let mut wrote = false;
+        while let Some(row) = merged.next()? {
+            writer.put(&row[..width], []).map_err(rocks_err)?;
+            wrote = true;
+        }
+        if !wrote {
+            // An empty file is not ingestable, and an order with nothing in it is ordinary:
+            // a load of only default-graph triples writes no quad orders at all.
+            drop(writer);
+            let _ = std::fs::remove_file(&path);
+            return Ok(());
         }
         writer.finish().map_err(rocks_err)?;
 
@@ -820,6 +866,45 @@ impl RocksStorage {
         Ok(())
     }
 
+    /// A scan bounded by a prefix *and* a span on the component after it.
+    ///
+    /// The keys are big-endian ids laid end to end, so a span on one component is a
+    /// contiguous byte range and `RocksDB`'s own iterate bounds do the work — the same
+    /// mechanism as a prefix seek, one component further in.
+    ///
+    /// `total_order_seek` for the same reason `scan_order` uses it when there is no prefix:
+    /// with an empty prefix the range starts at a span rather than at a value the column
+    /// family's prefix extractor knows about, and a prefix-constrained iterator would stop
+    /// early.
+    fn scan_order_span(
+        &self,
+        order: &'static str,
+        prefix: &[TermId],
+        span: IdRange,
+    ) -> Result<RowScan<'_>> {
+        let mut lower = key(prefix);
+        lower.extend_from_slice(&put_id(span.first));
+        let mut upper = key(prefix);
+        upper.extend_from_slice(&put_id(span.last));
+        let mut opts = ReadOptions::default();
+        if prefix.is_empty() {
+            opts.set_total_order_seek(true);
+        }
+        opts.set_iterate_lower_bound(lower);
+        // The iterate bound is exclusive and the span is inclusive, so the bound is the
+        // first key that cannot match: one past the span's last id. `None` means every byte
+        // was 0xFF and there is no such key — the span reaches the end of the keyspace, so
+        // there is nothing to bound it with and nothing beyond it to exclude.
+        if let Some(next) = prefix_upper_bound(&upper) {
+            opts.set_iterate_upper_bound(next);
+        }
+        Ok(RowScan {
+            inner: self
+                .db
+                .iterator_cf_opt(cf(&self.db, order)?, opts, IteratorMode::Start),
+        })
+    }
+
     fn scan_order(&self, order: &'static str, prefix: &[TermId]) -> Result<RowScan<'_>> {
         let lower = key(prefix);
         let upper = prefix_upper_bound(&lower);
@@ -979,8 +1064,8 @@ impl Storage for RocksStorage {
                 if let Some(g) = quad.graph_name {
                     state.graphs.insert(g);
                 }
-                if state.quads.len() > self.ingest_limit {
-                    self.abandon_sorted_ingestion()?;
+                if state.quads.len() >= self.ingest_limit {
+                    self.spill()?;
                 }
                 return Ok(true);
             }
@@ -1084,6 +1169,53 @@ impl Storage for RocksStorage {
             return Ok(known.present);
         }
         self.db_contains(quad)
+    }
+
+    fn quads_with_object_in(
+        &self,
+        subject: Option<TermId>,
+        predicate: Option<TermId>,
+        span: IdRange,
+        graph: GraphFilter,
+    ) -> QuadScan<'_> {
+        if span.is_empty() {
+            return Box::new(std::iter::empty());
+        }
+        // A scope buffers, so its quads are not in the index the span is about to bound.
+        // Falling back to the trait's scan-and-filter keeps the answer right; a load or an
+        // update is not where a range scan earns anything anyway.
+        if self.scope.is_some() {
+            return Box::new(self.scan(subject, predicate, None, graph).filter(
+                move |quad| match quad {
+                    Ok(quad) => span.contains(quad.object),
+                    Err(_) => true,
+                },
+            ));
+        }
+        let rows: QuadScan<'_> = match graph {
+            GraphFilter::Any => Box::new(
+                self.quads_with_object_in(subject, predicate, span, GraphFilter::Default)
+                    .chain(self.quads_with_object_in(
+                        subject,
+                        predicate,
+                        span,
+                        GraphFilter::AnyNamed,
+                    )),
+            ),
+            _ => match self.routed_span(predicate, span, graph) {
+                Ok(iter) => iter,
+                Err(e) => Box::new(std::iter::once(Err(e))),
+            },
+        };
+        // The subject sits behind the object in every order a span can bound, so it cannot
+        // narrow the range and is checked on the way out.
+        match subject {
+            None => rows,
+            Some(s) => Box::new(rows.filter(move |q| match q {
+                Ok(quad) => quad.subject == s,
+                Err(_) => true,
+            })),
+        }
     }
 
     fn scan(
@@ -1280,6 +1412,14 @@ impl Storage for RocksStorage {
         self.scope.is_some()
     }
 
+    fn bulk_spills(&self) -> usize {
+        self.spills
+    }
+
+    fn on_disk_bytes(&self) -> Option<u64> {
+        Some(directory_bytes(&self.path))
+    }
+
     fn begin_bulk_load(&mut self) -> Result<()> {
         if self.scope.is_some() {
             return Err(StorageError::corruption(
@@ -1317,6 +1457,47 @@ impl Storage for RocksStorage {
 impl RocksStorage {
     /// Routes a pattern to the one order whose prefix it binds — the same decision
     /// [`QuadIndex::plan`](crate::QuadIndex::plan) makes for the in-memory tier.
+    /// Picks the order whose key puts the object where a span can bound it.
+    ///
+    /// With a predicate bound that is `pos`, where the object follows the prefix; without
+    /// one it is `osp`, where the object leads. Those are the only two shapes: in every
+    /// other order the object sits behind something unbound, and a span on it is not a
+    /// contiguous range.
+    fn routed_span(
+        &self,
+        p: Option<TermId>,
+        span: IdRange,
+        graph: GraphFilter,
+    ) -> Result<QuadScan<'_>> {
+        Ok(match (graph, p) {
+            (GraphFilter::Default, Some(p)) => Box::new(
+                self.scan_order_span(DPOS, &[p], span)?
+                    .map(move |k| Ok(un_dpos(split_key::<3>(&k?)?))),
+            ),
+            (GraphFilter::Default, None) => Box::new(
+                self.scan_order_span(DOSP, &[], span)?
+                    .map(move |k| Ok(un_dosp(split_key::<3>(&k?)?))),
+            ),
+            (GraphFilter::Named(g), Some(p)) => Box::new(
+                self.scan_order_span(GPOS, &[g, p], span)?
+                    .map(move |k| Ok(un_gpos(split_key::<4>(&k?)?))),
+            ),
+            (GraphFilter::Named(g), None) => Box::new(
+                self.scan_order_span(GOSP, &[g], span)?
+                    .map(move |k| Ok(un_gosp(split_key::<4>(&k?)?))),
+            ),
+            (GraphFilter::AnyNamed, Some(p)) => Box::new(
+                self.scan_order_span(POSG, &[p], span)?
+                    .map(move |k| Ok(un_posg(split_key::<4>(&k?)?))),
+            ),
+            (GraphFilter::AnyNamed, None) => Box::new(
+                self.scan_order_span(OSPG, &[], span)?
+                    .map(move |k| Ok(un_ospg(split_key::<4>(&k?)?))),
+            ),
+            (GraphFilter::Any, _) => unreachable!("handled by the caller"),
+        })
+    }
+
     fn routed_scan(
         &self,
         s: Option<TermId>,
@@ -1379,6 +1560,48 @@ impl RocksStorage {
             GraphFilter::Any => unreachable!("handled by the caller"),
         })
     }
+}
+
+/// The default-graph index orders, and which components each one's key is made of.
+///
+/// One table, used by the spill, the merge and the file writer, so those three cannot come to
+/// disagree about what `dpos` means. `[1, 2, 0]` is `pos` over `spo`.
+const TRIPLE_PERMS: [(&str, [usize; 3]); 3] =
+    [(DSPO, [0, 1, 2]), (DPOS, [1, 2, 0]), (DOSP, [2, 0, 1])];
+
+/// The named-graph index orders, likewise, over `spog`.
+const QUAD_PERMS: [(&str, [usize; 4]); 6] = [
+    (SPOG, [0, 1, 2, 3]),
+    (POSG, [1, 2, 0, 3]),
+    (OSPG, [2, 0, 1, 3]),
+    (GSPO, [3, 0, 1, 2]),
+    (GPOS, [3, 1, 2, 0]),
+    (GOSP, [3, 2, 0, 1]),
+];
+
+impl Spilled {
+    fn new(dir: &std::path::Path) -> Self {
+        Self {
+            triples: TRIPLE_PERMS.map(|(family, _)| sort::Runs::new(dir, family)),
+            named: QUAD_PERMS.map(|(family, _)| sort::Runs::new(dir, family)),
+        }
+    }
+}
+
+/// Splits quads into the two key shapes the index uses.
+///
+/// Default-graph triples and named-graph quads are stored in different column families with
+/// different key widths, so they sort separately from here on.
+fn partition(quads: &[EncodedQuad]) -> (Vec<[TermId; 3]>, Vec<[TermId; 4]>) {
+    let mut triples = Vec::new();
+    let mut named = Vec::new();
+    for quad in quads {
+        match quad.graph_name {
+            None => triples.push([quad.subject, quad.predicate, quad.object]),
+            Some(g) => named.push([quad.subject, quad.predicate, quad.object, g]),
+        }
+    }
+    (triples, named)
 }
 
 /// Whether a quad answers a scan's pattern.
@@ -1490,6 +1713,26 @@ fn checkpoint_to(storage: &RocksStorage, destination: &std::path::Path) -> Resul
 fn cf<'a>(db: &'a DB, name: &str) -> Result<&'a rocksdb::ColumnFamily> {
     db.cf_handle(name)
         .ok_or_else(|| StorageError::corruption(format!("column family {name} is missing")))
+}
+
+/// Bytes a directory occupies, through its whole tree.
+///
+/// An entry that cannot be read is skipped rather than fatal. This answers "roughly how much
+/// space does a copy of this need", and refusing to answer because one file could not be
+/// stat'd would be less useful than answering slightly low.
+fn directory_bytes(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0;
+    for entry in entries.flatten() {
+        match entry.metadata() {
+            Ok(meta) if meta.is_dir() => total += directory_bytes(&entry.path()),
+            Ok(meta) => total += meta.len(),
+            Err(_) => {}
+        }
+    }
+    total
 }
 
 fn rocks_err(e: rocksdb::Error) -> StorageError {

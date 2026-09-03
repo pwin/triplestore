@@ -27,9 +27,9 @@ The full argument, the layer design, the roadmap and the risks are in **[DESIGN.
 | **L4** SHACL | ◐ Two validators behind one trait: [SHACL_Engine](https://github.com/pwin/SHACL_Engine) adapted for coverage, and a native evaluator for **incremental revalidation at 161× a full pass** |
 | **GeoSPARQL** | ✅ 45 functions — 43 via `spargeo`, plus `geof:buffer` and `geof:boundary` implemented here — composing with policy and the term encoding — see [DESIGN.md §17](DESIGN.md#17-geospatial) |
 | **L5** Holon layer | ◐ Walking skeleton: scene, boundary enforced on the write path, event log with per-triple RDF 1.2 provenance, **165 validated commits/s at 41× a full pass**, boundary rules fired per tick, each tick one atomic commit. Owes isolation, maintained projections, time travel |
-| **L6** Protocol server | ◐ SPARQL 1.2 Protocol over HTTP (**34/34** W3C protocol tests) + **Graph Store Protocol** (**13/13**) + YASGUI console, **`POST /update`**, and **Python bindings** packaged as `holosdb` (built, tested, not yet published). Owes WASM |
+| **L6** Protocol server | ◐ SPARQL 1.2 Protocol over HTTP (**34/34** W3C protocol tests) + **Graph Store Protocol** (**13/13**) + YASGUI console, **`POST /update`**, and **Python bindings** on PyPI as [`holosdb`](https://pypi.org/project/holosdb/) — five abi3 wheels plus an sdist, `pip install holosdb`. Owes WASM |
 
-703 unit and property tests pass (`cargo test --workspace`), plus the W3C suites below.
+759 unit and property tests pass (`cargo test --workspace`), plus the W3C suites below.
 
 **Documentation** — [MINTING-TRIPLES.md](MINTING-TRIPLES.md) is the getting-started guide to
 every route for getting data in, including RDF 1.2 triple terms and holons;
@@ -45,13 +45,19 @@ manual; [DESIGN.md](DESIGN.md) carries the reasoning and the measurements.
 
 ## Performance
 
-One million triples, release build, on a Windows laptop. Numbers include parsing.
+7.5 million quads, release build, on a Windows laptop. Numbers include parsing.
 
 | Configuration | Throughput | On disk |
 |---|---|---|
-| In memory | 208,161 quads/s | — |
-| RocksDB, `--bulk` | 40,782 quads/s | 48 MB |
-| RocksDB, no `--bulk` | 17,782 quads/s | — |
+| In memory | 176,475 quads/s | — |
+| RocksDB, `--bulk` | 155,849 quads/s | 253 MB |
+| RocksDB, no `--bulk` | 18,436 quads/s | 284 MB |
+
+`--bulk` went from 3.6× the ordinary write path to **8.5×** in 0.3.0, when bulk loads
+started being ingested as sorted files rather than written key by key. It also produces a
+*smaller* store than the ordinary path — 253 MB against 284 MB — because files written
+pre-sorted into levels do not carry the fragmentation that compaction is still working
+through.
 
 A holon tick — SHACL validation inside every commit, on a 300k-triple scene:
 
@@ -109,9 +115,9 @@ passes; **coverage** is how much of the suite runs at all.
 
 | Suite | Correctness | Coverage | Not run |
 |---|---:|---:|---|
-| SPARQL 1.1 | **523/524** · 99.8% | 524/625 · **84%** | Entailment (70), upstream (25), result formats (6) |
-| SPARQL 1.2 | **262/266** · 98.5% | 266/269 · **99%** | 3 differing only in blank-node labels |
-| SPARQL 1.0 | **262/263** · 99.6% | 263/283 · **93%** | 20 the parser rejects (upstream) |
+| SPARQL 1.1 | **512/512** · 100% | 512/625 · **82%** | Entailment, upstream parser gaps, result formats |
+| SPARQL 1.2 | **268/269** · 99.6% | 269/269 · **100%** | — |
+| SPARQL 1.0 | **275/276** · 99.6% | 276/283 · **98%** | 7 the parser rejects (upstream) |
 | SPARQL Protocol | **34/34** · 100% | 34/34 · **100%** | — |
 | Graph Store Protocol | **13/13** · 100% | 13/13 · **100%** | — |
 
@@ -136,23 +142,29 @@ expected results as RDF in the DAWG `rs:` vocabulary. Reading that format took c
 from **45% to 93%**, and 135 of the 136 newly-running tests pass. Entailment is what is
 left, and needs the reasoner at L4.
 
-**3,145 of 3,284 W3C tests pass, and all 139 failures are upstream — none is a HOLOS bug.**
+**3,975 of 4,021 W3C tests pass, and all 46 failures are upstream — none is a HOLOS bug.**
 
 | Suite | Passing | Failing | Skipped | HOLOS bugs |
 |---|---|---|---|---|
-| RDF 1.1 | 987 / 1041 | 54 | 0 | **0** |
-| RDF 1.2 | 1326 / 1406 | 80 | 0 | **0** |
-| SPARQL 1.1 | 523 / 524 | 1 | 101 | **0** |
-| SPARQL 1.2 | 262 / 266 | 4 | 3 | **0** |
+| RDF 1.1 | 1019 / 1040 | 21 | 1 | **0** |
+| RDF 1.2 | 1382 / 1405 | 23 | 1 | **0** |
+| SPARQL 1.1 | **512 / 512** | 0 | 113 | **0** |
+| SPARQL 1.2 | 268 / 269 | 1 | 0 | **0** |
+| SPARQL 1.0 | 275 / 276 | 1 | 7 | **0** |
 | SPARQL Protocol | **34 / 34** | 0 | 0 | **0** |
 | Graph Store Protocol | **13 / 13** | 0 | 0 | **0** |
-| SHACL Core | 92 / 97 | 5 | 1 | 5 |
-| SHACL 1.2 Core (native) | 94 / 138 | 44 | 0 | 44 |
-| SHACL Core (adapted engine) | 90 / 98 | 8 | 0 | 8 |
-| SHACL 1.2 Core (adapted engine) | **127 / 138** | 11 | 0 | 11 |
+| SHACL Core | **98 / 98** | 0 | 0 | **0** |
+| SHACL 1.2 Core (native) | **138 / 138** | 0 | 0 | **0** |
+| SHACL Core (adapted engine) | **98 / 98** | 0 | 0 | **0** |
+| SHACL 1.2 Core (adapted engine) | **138 / 138** | 0 | 0 | **0** |
 
-SHACL is the exception to the "all failures are upstream" line: `holos-shacl` is new code,
-so every SHACL failure is a HOLOS failure and the table says so.
+SHACL used to be the exception to the "all failures are upstream" line — `holos-shacl` is
+this project's own code, so a SHACL failure was a HOLOS failure and the table said so. All
+four SHACL suites are now complete through both validators.
+
+The counts come from `conformance/*.failures`, which the suites regenerate and then refuse
+to let drift in either direction: a test that starts failing fails the build, and one that
+starts passing fails it too, until the list is re-baselined.
 
 The parsers and the evaluator come from Oxigraph and are tested upstream, so the suites are
 run in a shape that isolates the new code instead. The RDF suites **round-trip through the
