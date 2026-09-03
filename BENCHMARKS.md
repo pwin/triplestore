@@ -88,6 +88,13 @@ Regenerate with `cargo run --release -p holos-bench`.
 
 ## Load timings
 
+> **These load timings predate sorted ingestion.** They were measured before
+> `SstFileWriter` + `IngestExternalFile` replaced the buffered-batch write path, which an
+> interleaved A/B put at **1.7× on a whole `--bulk` load**. The `--bulk` rows below are
+> therefore pessimistic by roughly that much, and the no-`--bulk` rows are unaffected.
+> Re-running `cargo run --release -p holos-bench` is what replaces them; until someone does,
+> this note is more honest than numbers carried over from a different measurement.
+
 | People | Quads | Backend | Time | Rate | On disk | Dictionary |
 |---:|---:|---|---:|---:|---:|---:|
 | 100,000 | 753,218 | in memory | 3.87s | 194,384 quads/s | — | 200,881 |

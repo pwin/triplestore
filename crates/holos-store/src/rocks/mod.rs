@@ -28,7 +28,7 @@ use rocksdb::{
     ColumnFamilyDescriptor, DBCompressionType, IteratorMode, Options, ReadOptions, WriteBatch,
     WriteOptions, DB,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -86,6 +86,11 @@ pub struct RocksStorage {
     bulk: Option<BulkState>,
     /// `Some` while a commit scope is open: see [`Storage::begin`].
     scope: Option<ScopeState>,
+    /// Where the database lives, so a bulk load can write its sorted files beside it —
+    /// the same filesystem, which is what lets the ingest move them instead of copying.
+    path: std::path::PathBuf,
+    /// How many quads a load may hold before it gives up on sorted ingestion.
+    ingest_limit: usize,
 }
 
 /// How many buffered operations a commit scope may hold.
@@ -174,6 +179,17 @@ enum Pending {
     Delete(&'static str, Box<[u8]>),
 }
 
+/// How many quads a load will hold in memory to sort before it stops trying to.
+///
+/// An `EncodedQuad` is 40 bytes and the partitioned key rows are another 24 or 32, so this is
+/// a few hundred megabytes at the peak. Past it the load finishes the way it used to, in
+/// batches: slower, but it completes rather than running the machine out of memory.
+///
+/// Lifting the cap means an external merge sort — spill sorted runs to disk, merge them into
+/// one stream per order — which is what `DESIGN.md` §6.1 has in mind for a billion triples.
+/// Not built, and the cap is where that would go.
+const MAX_SST_QUADS: usize = 24 << 20;
+
 #[derive(Default)]
 struct BulkState {
     pending: Vec<Pending>,
@@ -184,6 +200,17 @@ struct BulkState {
     /// verifying candidates against `id2str`, but a buffered term is not on disk yet, so
     /// the buffer has to be exact.
     terms: FxHashMap<Vec<u8>, TermId>,
+    /// Quads held back for sorted ingestion rather than written as index keys.
+    ///
+    /// One `EncodedQuad` here replaces the nine or ten key copies the batch path would have
+    /// built, which is why holding the whole load is affordable at all: the keys are
+    /// generated one order at a time, while that order's file is being written.
+    quads: Vec<EncodedQuad>,
+    /// Named graphs seen, so the catalogue can be written once at the end.
+    graphs: FxHashSet<TermId>,
+    /// Whether the sorted-ingestion path is still on. Turned off when the load outgrows
+    /// [`MAX_SST_QUADS`], after which it behaves exactly as it used to.
+    sst: bool,
 }
 
 impl std::fmt::Debug for BulkState {
@@ -191,6 +218,9 @@ impl std::fmt::Debug for BulkState {
         f.debug_struct("BulkState")
             .field("buffered_ops", &self.pending.len())
             .field("distinct_terms", &self.terms.len())
+            .field("buffered_quads", &self.quads.len())
+            .field("named_graphs", &self.graphs.len())
+            .field("sorted_ingestion", &self.sst)
             .finish()
     }
 }
@@ -226,7 +256,8 @@ impl RocksStorage {
             families.push(ColumnFamilyDescriptor::new(name, index_opts(codec::ID)));
         }
 
-        let db = DB::open_cf_descriptors(&db_opts, path, families).map_err(rocks_err)?;
+        let path = path.as_ref().to_path_buf();
+        let db = DB::open_cf_descriptors(&db_opts, &path, families).map_err(rocks_err)?;
 
         // Refuse a store written by an incompatible encoding rather than silently
         // decoding its term ids as something else (`holos_core::FORMAT_VERSION`).
@@ -272,7 +303,19 @@ impl RocksStorage {
             predicate_counts,
             bulk: None,
             scope: None,
+            path,
+            ingest_limit: MAX_SST_QUADS,
         })
+    }
+
+    /// How many quads a bulk load may hold in memory before it stops sorting them.
+    ///
+    /// The default is [`MAX_SST_QUADS`], a few hundred megabytes at the peak. Lower it on a
+    /// machine that cannot spare that: the load falls back to the buffered-batch path, which
+    /// is slower and bounded. Raising it above what the machine has is how a load gets killed
+    /// rather than slowed.
+    pub fn set_ingest_limit(&mut self, quads: usize) {
+        self.ingest_limit = quads;
     }
 
     /// Starts a bulk load: writes are buffered into large batches and the write-ahead
@@ -283,7 +326,10 @@ impl RocksStorage {
     /// `SstFileWriter` ingestion here eventually, which is faster still *and* keeps crash
     /// safety, at the cost of needing its input sorted.
     fn start_bulk(&mut self) {
-        self.bulk = Some(BulkState::default());
+        self.bulk = Some(BulkState {
+            sst: true,
+            ..BulkState::default()
+        });
         // Auto-compaction during a load is wasted work: it rewrites levels that the rest
         // of the load is about to invalidate. Turned off here and re-enabled, followed by
         // one deliberate compaction, when the load ends.
@@ -306,10 +352,148 @@ impl RocksStorage {
     /// Ends a bulk load, writing what is buffered and rebuilding the counters.
     fn finish_bulk(&mut self) -> Result<()> {
         if let Some(state) = self.bulk.take() {
-            self.write_pending(state.pending, true)?;
+            let BulkState {
+                pending,
+                quads,
+                graphs,
+                sst,
+                ..
+            } = state;
+            // The dictionary first: the index files name term ids, and a store holding an id
+            // it cannot decode is corrupt in a way no later step would notice.
+            self.write_pending(pending, true)?;
+            if sst && !quads.is_empty() {
+                self.ingest_quads(quads, &graphs)?;
+            }
         }
         self.set_compactions(true);
         self.recount()
+    }
+
+    /// Gives up on sorted ingestion and writes what has been collected the old way.
+    ///
+    /// Called when a load outgrows [`MAX_SST_QUADS`]. Everything collected so far goes
+    /// through the ordinary buffered path, and so does everything after it — the load gets
+    /// slower and still finishes, which is the right way round for a limit that exists to
+    /// bound memory rather than to express a rule.
+    fn abandon_sorted_ingestion(&mut self) -> Result<()> {
+        let (quads, graphs) = match self.bulk.as_mut() {
+            Some(state) => {
+                state.sst = false;
+                (
+                    std::mem::take(&mut state.quads),
+                    std::mem::take(&mut state.graphs),
+                )
+            }
+            None => return Ok(()),
+        };
+        for graph in graphs {
+            self.put(GRAPHS, put_id(graph).to_vec(), Vec::new())?;
+        }
+        for quad in quads {
+            self.insert_encoded(quad)?;
+        }
+        Ok(())
+    }
+
+    /// Writes one sorted file per index order and hands them to `RocksDB`.
+    ///
+    /// This is `DESIGN.md` §6.1's `SstFileWriter` + `IngestExternalFile`. The batch path
+    /// writes every key through the memtable and the write-ahead log, and the levels then
+    /// compact it all again; a sorted file that does not overlap what is already there can be
+    /// adopted at the bottom level without any of that.
+    ///
+    /// The quads are sorted once per order, in place, and the keys are generated while each
+    /// file is written. Keeping nine key sets instead would cost nine times the memory for
+    /// the same result.
+    fn ingest_quads(&mut self, quads: Vec<EncodedQuad>, graphs: &FxHashSet<TermId>) -> Result<()> {
+        // Beside the database rather than in the system temp directory, so the ingest can
+        // move the files instead of copying them across a filesystem boundary.
+        let dir = self.path.join("holos-ingest");
+        if dir.exists() {
+            // Left by a load that did not finish. A load is already documented as
+            // all-or-nothing-and-discard-on-failure, so there is nothing here to keep.
+            std::fs::remove_dir_all(&dir).map_err(StorageError::Io)?;
+        }
+        std::fs::create_dir_all(&dir).map_err(StorageError::Io)?;
+
+        let mut triples: Vec<[TermId; 3]> = Vec::new();
+        let mut named: Vec<[TermId; 4]> = Vec::new();
+        for quad in &quads {
+            match quad.graph_name {
+                None => triples.push([quad.subject, quad.predicate, quad.object]),
+                Some(g) => named.push([quad.subject, quad.predicate, quad.object, g]),
+            }
+        }
+        drop(quads);
+
+        let outcome = (|| -> Result<()> {
+            for (family, perm) in [(DSPO, [0, 1, 2]), (DPOS, [1, 2, 0]), (DOSP, [2, 0, 1])] {
+                self.write_and_ingest(&dir, family, &mut triples, perm)?;
+            }
+            for (family, perm) in [
+                (SPOG, [0, 1, 2, 3]),
+                (POSG, [1, 2, 0, 3]),
+                (OSPG, [2, 0, 1, 3]),
+                (GSPO, [3, 0, 1, 2]),
+                (GPOS, [3, 1, 2, 0]),
+                (GOSP, [3, 2, 0, 1]),
+            ] {
+                self.write_and_ingest(&dir, family, &mut named, perm)?;
+            }
+            // The catalogue is one row per graph, so a batch is the right tool.
+            let mut batch = WriteBatch::default();
+            let handle = cf(&self.db, GRAPHS)?;
+            for graph in graphs {
+                batch.put_cf(handle, put_id(*graph), []);
+            }
+            self.db.write(batch).map_err(rocks_err)
+        })();
+
+        // Whatever happened, the scratch files are not wanted. A failure to tidy them is not
+        // worth failing a load that otherwise worked.
+        let _ = std::fs::remove_dir_all(&dir);
+        outcome
+    }
+
+    /// Sorts `rows` into one order, writes them as a single SST, and ingests it.
+    ///
+    /// `perm` says which components the order's key is made of, in which positions —
+    /// `[1, 2, 0]` is `pos` over `spo`. It is applied in the sort key and again when the key
+    /// bytes are written, so the two cannot drift apart.
+    fn write_and_ingest<const N: usize>(
+        &self,
+        dir: &std::path::Path,
+        family: &'static str,
+        rows: &mut Vec<[TermId; N]>,
+        perm: [usize; N],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let permuted = |row: &[TermId; N]| perm.map(|i| row[i]);
+        rows.sort_unstable_by_key(permuted);
+        // An SST demands *strictly* increasing keys, where a `WriteBatch` would have taken
+        // the same key twice and shrugged. That is why the bulk path could defer duplicate
+        // detection and this cannot.
+        rows.dedup_by(|a, b| permuted(a) == permuted(b));
+
+        let path = dir.join(format!("{family}.sst"));
+        // Held in a binding: the writer borrows its options for its whole life.
+        let opts = index_opts(codec::ID);
+        let mut writer = rocksdb::SstFileWriter::create(&opts);
+        writer.open(&path).map_err(rocks_err)?;
+        for row in rows.iter() {
+            writer.put(key(&permuted(row)), []).map_err(rocks_err)?;
+        }
+        writer.finish().map_err(rocks_err)?;
+
+        let mut opts = rocksdb::IngestExternalFileOptions::default();
+        // The file was written for this store and is of no use afterwards.
+        opts.set_move_files(true);
+        self.db
+            .ingest_external_file_cf_opts(cf(&self.db, family)?, &opts, vec![path])
+            .map_err(rocks_err)
     }
 
     /// Recomputes the quad count and predicate statistics from the index.
@@ -786,6 +970,22 @@ impl Storage for RocksStorage {
         if self.bulk.is_none() && self.contains_encoded(quad)? {
             return Ok(false);
         }
+        // Sorted ingestion holds the quad instead of writing nine or ten keys for it now.
+        // The keys are built later, one order at a time, in the order that order wants —
+        // which is what lets each become a single file RocksDB can adopt whole.
+        if let Some(state) = self.bulk.as_mut() {
+            if state.sst {
+                state.quads.push(quad);
+                if let Some(g) = quad.graph_name {
+                    state.graphs.insert(g);
+                }
+                if state.quads.len() > self.ingest_limit {
+                    self.abandon_sorted_ingestion()?;
+                }
+                return Ok(true);
+            }
+        }
+
         let EncodedQuad {
             subject: s,
             predicate: p,

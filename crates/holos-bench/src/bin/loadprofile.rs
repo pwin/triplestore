@@ -169,9 +169,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into_owned()
     });
 
+    // `bulk` runs only the phases a bulk load actually goes through, which is what an A/B of
+    // the ingest path needs: the one-write-at-a-time phases cost half a minute, say nothing
+    // about it, and their noise crowds out the signal.
+    let only_bulk = std::env::args().nth(2).as_deref() == Some("bulk");
+
     let (quads, parse) = parse_only(&path)?;
     println!("{quads} quads from {path}\n");
     report("1. parse only", quads, parse, None);
+
+    #[cfg(feature = "rocksdb")]
+    if only_bulk {
+        let bulk_encode = parse_and_encode(
+            &path,
+            Store::with_storage(RocksStorage::open(scratch("bulkencode")?)?),
+            true,
+        )?;
+        report(
+            "6. + dictionary, bulk mode",
+            quads,
+            bulk_encode,
+            Some(parse),
+        );
+        let rocks_bulk = full_load(
+            &path,
+            Store::with_storage(RocksStorage::open(scratch("bulk")?)?),
+            true,
+        )?;
+        report(
+            "7. + index, bulk mode",
+            quads,
+            rocks_bulk,
+            Some(bulk_encode),
+        );
+        return Ok(());
+    }
 
     let memory_encode = parse_and_encode(&path, Store::new(), false)?;
     report(
