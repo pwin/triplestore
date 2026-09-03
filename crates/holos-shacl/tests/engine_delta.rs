@@ -270,3 +270,204 @@ fn a_change_to_the_shapes_graph_is_refused() {
         "a shapes change must be refused rather than half-applied"
     );
 }
+
+// ------------------------------------------------------------------ checkpoint and revert
+
+/// The bridge tracks what it was told, not the store — so a caller must be able to untell it.
+///
+/// This is the trap `apply` documents. A caller applies a delta, something goes wrong, the
+/// store goes back, and the run is left holding triples that no longer exist. Nothing here
+/// can notice: not going and looking is the entire point of applying a delta.
+///
+/// The property is the same one the rest of this file checks, asked of the undo: after
+/// `checkpoint`, `apply`, `revert`, the run must report exactly what a freshly prepared one
+/// reports over the store as it now stands.
+#[test]
+fn reverting_a_checkpoint_matches_a_fresh_bridge() {
+    let mut store = Store::new();
+    load(&mut store, SHAPES_AND_DATA);
+
+    let mut run = EngineRun::prepare(&store, options()).expect("prepare");
+    let before = canonical(&mut run);
+
+    // A delta that moves the verdict, so a revert that did nothing would be caught.
+    let bad = "@prefix ex: <http://example.com/> . ex:carol a ex:Person ; ex:age 900 .";
+    run.checkpoint();
+    let changes = apply_to_store(&mut store, bad, true);
+    run.apply(&store, &changes).expect("apply");
+    assert_ne!(
+        canonical(&mut run),
+        before,
+        "the delta must change the report"
+    );
+
+    // The store goes back, as it would after a refused commit, and so must the run.
+    for change in &changes {
+        store.remove_encoded_quad(change.quad).expect("remove");
+    }
+    run.revert(&store);
+
+    assert!(!run.is_stale());
+    assert_eq!(
+        canonical(&mut run),
+        before,
+        "revert did not restore the graph"
+    );
+
+    let mut fresh = EngineRun::prepare(&store, options()).expect("prepare");
+    assert_eq!(
+        canonical(&mut run),
+        canonical(&mut fresh),
+        "a reverted run disagrees with a bridge built from the store"
+    );
+}
+
+/// Accepting is the other half, and it must not undo anything.
+///
+/// Worth its own test because `revert` doing nothing would pass a test that only checked
+/// `accept`, and `accept` behaving like `revert` would pass a test that only checked the
+/// happy path of a tick.
+#[test]
+fn accepting_a_checkpoint_keeps_the_delta() {
+    let mut store = Store::new();
+    load(&mut store, SHAPES_AND_DATA);
+
+    let mut run = EngineRun::prepare(&store, options()).expect("prepare");
+    let before = canonical(&mut run);
+
+    let bad = "@prefix ex: <http://example.com/> . ex:carol a ex:Person ; ex:age 900 .";
+    run.checkpoint();
+    let changes = apply_to_store(&mut store, bad, true);
+    run.apply(&store, &changes).expect("apply");
+    run.accept();
+
+    let after = canonical(&mut run);
+    assert_ne!(after, before);
+
+    let mut fresh = EngineRun::prepare(&store, options()).expect("prepare");
+    assert_eq!(after, canonical(&mut fresh), "accept lost the delta");
+
+    // Accepting must *close* the checkpoint, not just decline to undo. Applying more
+    // afterwards and then reverting proves it: with the checkpoint still open, this second
+    // change would be swept up and undone by a revert nobody asked for.
+    let more = apply_to_store(
+        &mut store,
+        "@prefix ex: <http://example.com/> . ex:dave a ex:Person ; ex:name \"Dave\" .",
+        true,
+    );
+    run.apply(&store, &more).expect("apply");
+    let with_dave = canonical(&mut run);
+    assert_ne!(with_dave, after);
+
+    run.revert(&store);
+    assert_eq!(
+        canonical(&mut run),
+        with_dave,
+        "revert undid a change made after the checkpoint had been accepted"
+    );
+}
+
+// ------------------------------------------------------------------------- ordered deltas
+
+/// A delta is an ordered sequence, and a row touched twice in one must end where the
+/// sequence leaves it.
+///
+/// The graph underneath takes two unordered sets — remove all of these, then add all of
+/// those — so partitioning a sequence into them loses the order, and a row that appears in
+/// both lists comes out present whichever way round the caller meant it. A holon delta that
+/// adds a triple and removes it again arrives here as exactly that pair.
+#[test]
+fn a_row_added_and_then_removed_in_one_delta_ends_absent() {
+    let mut store = Store::new();
+    load(&mut store, SHAPES_AND_DATA);
+    let mut run = EngineRun::prepare(&store, options()).expect("prepare");
+    let before = canonical(&mut run);
+
+    // Added and removed again, in that order, in one delta. The store never keeps it, so a
+    // fresh bridge is the `before` graph and the run must agree.
+    let carol = "@prefix ex: <http://example.com/> . ex:carol a ex:Person ; ex:age 900 .";
+    let mut changes = apply_to_store(&mut store, carol, true);
+    changes.extend(apply_to_store(&mut store, carol, false));
+    run.apply(&store, &changes).expect("apply");
+
+    assert_eq!(
+        canonical(&mut run),
+        before,
+        "a row added and removed in one delta was left in the graph"
+    );
+    let mut fresh = EngineRun::prepare(&store, options()).expect("prepare");
+    assert_eq!(canonical(&mut run), canonical(&mut fresh));
+}
+
+/// And the other way round: removed then added again must end present.
+#[test]
+fn a_row_removed_and_then_added_in_one_delta_ends_present() {
+    let mut store = Store::new();
+    load(&mut store, SHAPES_AND_DATA);
+    let mut run = EngineRun::prepare(&store, options()).expect("prepare");
+    let before = canonical(&mut run);
+
+    let alices_name = "@prefix ex: <http://example.com/> . ex:alice ex:name \"Alice\" .";
+    let mut changes = apply_to_store(&mut store, alices_name, false);
+    changes.extend(apply_to_store(&mut store, alices_name, true));
+    run.apply(&store, &changes).expect("apply");
+
+    assert_eq!(canonical(&mut run), before);
+    let mut fresh = EngineRun::prepare(&store, options()).expect("prepare");
+    assert_eq!(canonical(&mut run), canonical(&mut fresh));
+}
+
+/// Reverting a checkpoint that touched one row twice must restore what it started as, not
+/// what it last was.
+///
+/// This is what makes the reversal in `revert` more than decoration: undoing the *last*
+/// change to a row leaves it wherever the middle of the sequence put it.
+#[test]
+fn reverting_restores_a_row_touched_twice() {
+    let mut store = Store::new();
+    load(&mut store, SHAPES_AND_DATA);
+    let mut run = EngineRun::prepare(&store, options()).expect("prepare");
+    let before = canonical(&mut run);
+
+    // Alice's name goes away and comes back, inside the checkpoint. The row is present at
+    // the checkpoint and present at the end, so undoing only the last change would remove
+    // it — and the report would then complain that Alice has no name.
+    let alices_name = "@prefix ex: <http://example.com/> . ex:alice ex:name \"Alice\" .";
+    run.checkpoint();
+    let mut changes = apply_to_store(&mut store, alices_name, false);
+    changes.extend(apply_to_store(&mut store, alices_name, true));
+    run.apply(&store, &changes).expect("apply");
+    run.revert(&store);
+
+    assert_eq!(
+        canonical(&mut run),
+        before,
+        "revert left a row where the middle of the delta put it"
+    );
+    let mut fresh = EngineRun::prepare(&store, options()).expect("prepare");
+    assert_eq!(canonical(&mut run), canonical(&mut fresh));
+}
+
+/// Without a checkpoint, nothing is recorded — so a run that never asks pays no memory for
+/// a log it will not use, and `revert` has nothing to undo.
+#[test]
+fn a_revert_without_a_checkpoint_does_nothing() {
+    let mut store = Store::new();
+    load(&mut store, SHAPES_AND_DATA);
+
+    let mut run = EngineRun::prepare(&store, options()).expect("prepare");
+    let changes = apply_to_store(
+        &mut store,
+        "@prefix ex: <http://example.com/> . ex:carol a ex:Person ; ex:age 900 .",
+        true,
+    );
+    run.apply(&store, &changes).expect("apply");
+    let after = canonical(&mut run);
+
+    run.revert(&store);
+    assert_eq!(
+        canonical(&mut run),
+        after,
+        "revert undid a change no checkpoint was open for"
+    );
+}

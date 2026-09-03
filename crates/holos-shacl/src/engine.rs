@@ -32,6 +32,7 @@ use holos_shacl_engine::shapes::{ShapeId, Shapes as EngineShapes};
 use holos_shacl_engine::{validate as engine_validate, TermId as EngineId};
 use holos_store::Store;
 use oxrdf::Graph as OxGraph;
+use rustc_hash::FxHashMap;
 
 /// Whether a quad could change what the shapes compile to.
 ///
@@ -100,6 +101,14 @@ pub struct EngineRun {
     /// Kept so [`Self::apply`] can tell which graph a changed quad belongs to. A delta is
     /// reported over the whole store; only what lands in the data graph is this run's.
     options: Options,
+    /// Changes applied since [`Self::checkpoint`], or `None` when no checkpoint is open.
+    ///
+    /// `None` rather than an always-on log so a caller that never checkpoints pays nothing
+    /// and, more importantly, does not accumulate one for the life of the run. The same
+    /// shape as `MemoryStorage`'s undo journal, for the same reason.
+    pending: Option<Vec<Change>>,
+    /// Set when the bridge could not be returned to its checkpoint.
+    stale: bool,
 }
 
 impl std::fmt::Debug for EngineRun {
@@ -127,7 +136,64 @@ impl EngineRun {
             shapes_graph,
             shapes,
             options,
+            pending: None,
+            stale: false,
         })
+    }
+
+    /// Marks a point this run can be returned to, for a caller that may not keep what it
+    /// is about to apply.
+    ///
+    /// Between here and [`Self::accept`] or [`Self::revert`], every change handed to
+    /// [`Self::apply`] is remembered so it can be applied backwards. Nesting is not a thing:
+    /// a second checkpoint replaces the first, because there is one question being asked —
+    /// "did the thing I just did stick?" — and it has one answer.
+    pub fn checkpoint(&mut self) {
+        self.pending = Some(Vec::new());
+    }
+
+    /// Keeps everything applied since the checkpoint, and closes it.
+    pub fn accept(&mut self) {
+        self.pending = None;
+    }
+
+    /// Returns the graph to what it held at the checkpoint, and closes it.
+    ///
+    /// Cheaper than it looks and safe after the store has moved on: every term named by the
+    /// changes being undone was interned on the way in and is still in this run's own table,
+    /// so nothing here needs a lookup that the store could now fail to answer.
+    ///
+    /// Infallible, because it is the failure path. If the graph cannot be put back the run is
+    /// marked stale and every later [`Self::apply`] refuses — an inference or a validation
+    /// drawn from a graph that disagrees with the store is not a slower answer, it is a wrong
+    /// one, and the caller would act on it.
+    pub fn revert(&mut self, store: &Store) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        // Backwards, so that a row touched more than once inside the checkpoint is restored
+        // to what it was at the start rather than to whatever happened to it last. Reversing
+        // makes the *first* change for a row the last one seen, and `apply` resolves a row by
+        // its last change — so flipping that one puts the row back where it began.
+        let inverse: Vec<Change> = pending
+            .iter()
+            .rev()
+            .map(|change| Change {
+                quad: change.quad,
+                added: !change.added,
+            })
+            .collect();
+        if self.apply(store, &inverse).is_err() {
+            self.stale = true;
+        }
+    }
+
+    /// Whether this run's graph is known to disagree with the store.
+    ///
+    /// Only [`Self::prepare`] fixes it. See [`Self::revert`].
+    #[must_use]
+    pub fn is_stale(&self) -> bool {
+        self.stale
     }
 
     /// Brings the bridged graph up to date with a store delta, instead of bridging again.
@@ -141,13 +207,34 @@ impl EngineRun {
     /// Changes outside the data graph are ignored — a delta is reported over the whole store
     /// and most of it is not this run's business.
     ///
+    /// # Keeping this in step with the store
+    ///
+    /// **The bridge tracks the history it is told about, not the store.** That is what makes
+    /// it cheap, and it is a trap: a caller that applies a delta and then does not keep it —
+    /// a refused commit, a rolled-back transaction, an error partway through — leaves this
+    /// holding triples the store does not have, and every later validation reads them.
+    ///
+    /// Nothing here can detect that, because the whole point is not to go and look. So a
+    /// caller that might not keep what it applies must say so: [`Self::checkpoint`] before,
+    /// then [`Self::accept`] or [`Self::revert`] after. A caller that only ever applies
+    /// changes that are already durable can ignore all three.
+    ///
     /// # Errors
     ///
     /// [`ShaclError::Unsupported`] when a change lands in the *shapes* graph. Those cannot be
     /// applied incrementally at all: the shapes are compiled into a flat IR at `prepare`
     /// time, and a changed shape invalidates that wholesale. Saying so is the point — the
     /// alternative is validating new data against shapes that no longer exist.
+    ///
+    /// Also when the bridge is stale: see [`Self::revert`].
     pub fn apply(&mut self, store: &Store, changes: &[Change]) -> Result<(), ShaclError> {
+        if self.stale {
+            return Err(ShaclError::Unsupported(
+                "this run's graph is out of step with the store and must be rebuilt with \
+                 EngineRun::prepare"
+                    .to_owned(),
+            ));
+        }
         for change in changes {
             if in_graph(change.quad.graph_name, self.options.shapes_graph)
                 && affects_shapes(store, change.quad)?
@@ -160,8 +247,17 @@ impl EngineRun {
             }
         }
 
-        let mut added = Vec::new();
-        let mut removed = Vec::new();
+        // Reduced to a net effect per row, last change winning, *before* the two lists are
+        // built. A delta is an ordered sequence and the graph's `apply` takes two unordered
+        // sets — it removes everything in one and then adds everything in the other — so
+        // partitioning a sequence into those sets loses the order. A row both added and
+        // removed within one delta then lands in both lists, and the graph resolves that as
+        // "present" whichever way round the caller meant it.
+        //
+        // Rare, and reachable: a holon delta that adds a triple and removes it again reaches
+        // here as exactly that pair, and left the run holding a triple the scene does not.
+        let mut net: FxHashMap<[EngineId; 3], bool> = FxHashMap::default();
+        let mut order: Vec<[EngineId; 3]> = Vec::new();
         for change in changes {
             if !in_graph(change.quad.graph_name, self.options.data_graph) {
                 continue;
@@ -171,13 +267,25 @@ impl EngineRun {
                 self.bridged.intern_id(store, change.quad.predicate)?,
                 self.bridged.intern_id(store, change.quad.object)?,
             ];
-            if change.added {
+            // `order` keeps the result deterministic, which matters because the graph is
+            // compared against a freshly bridged one in the tests and a set would not be.
+            if net.insert(row, change.added).is_none() {
+                order.push(row);
+            }
+        }
+        let mut added = Vec::new();
+        let mut removed = Vec::new();
+        for row in order {
+            if net[&row] {
                 added.push(row);
             } else {
                 removed.push(row);
             }
         }
         self.bridged.graph.apply(&added, &removed);
+        if let Some(pending) = self.pending.as_mut() {
+            pending.extend_from_slice(changes);
+        }
         Ok(())
     }
 
