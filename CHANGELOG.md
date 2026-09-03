@@ -3,7 +3,108 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## Unreleased
+## 0.3.0 — 2026-09-03
+
+The release that made every write path atomic, and finished SHACL 1.2 Core.
+
+A store that validates on commit is only worth having if a commit is a commit. Before this,
+an update or a holon tick was a *sequence* of individually-atomic quad writes, and a crash
+between two of them left half of one behind. Four separate places could leave a failed write
+partly applied, and one of them could destroy a graph it was asked to replace. That is the
+theme; the SHACL, entailment and join work below is the rest of it.
+
+### A commit is one batch
+
+`Storage::begin` / `commit` / `rollback` accumulate a whole update or tick into a single
+RocksDB `WriteBatch`, written once. A process that dies mid-commit now leaves the store as it
+was, rather than with the operations that happened to have been written already.
+
+Buffering is what makes it atomic and is also the hazard: a buffered write is invisible to a
+`get` and to an iterator, and SPARQL requires each update operation to see the effects of the
+ones before it. So the scope carries a read overlay for quads, named graphs and the
+dictionary — including the reverse id-to-term map, which the bulk path has no use for because
+a load does not read. `tests/commit_scope.rs` runs one script inside a scope and outside it
+and requires every read to agree at every step.
+
+It replaces two hand-rolled undo logs — `update.rs`'s `Journal` and the tick's compensating
+writes — which rolled back by writing the inverse of each change, so a rollback could itself
+fail and leave a state nobody could describe. Abandoning a batch that was never written
+cannot. Three bugs turned up under it, all of the shape "a write that did not go through the
+place that knows about buffering": `put` and `delete` wrote straight to the database, `lookup`
+resolved terms against it alone so `contains` could not see a quad the scope had just written,
+and the in-memory store created a quad's graph through the index directly so its journal never
+learned about it.
+
+A scope past a few hundred thousand quads is refused rather than silently split, because a
+split batch keeps the interface and drops the guarantee.
+
+### Four places a failed write left half of itself behind
+
+- **`PUT /gsp` could destroy the graph it was replacing.** A replace is clear-then-merge and
+  the body is not parsed until the merge, so a malformed body emptied the graph, failed, and
+  returned the client a 400 saying the request had not happened. A policy refusal partway
+  through did the same, later. The sequence lived as a comment in the HTTP handler, which is
+  why it was never tested; it is now `gsp::write`, where the atomicity belongs to the
+  operation and the failure can be tested.
+- **`branch` left half a branch.** The scene and boundary are copied without a policy check
+  and only then does `register` ask for `ADMIN`, so a principal who may write but may not
+  register got all the way through the copying before failing — leaving a scene under a name
+  nothing pointed at.
+- **`register` and `set_version`** could leave a holon definition missing its admission quad,
+  or a holon with no version at all between the remove and the insert.
+- **`POST` and `DELETE` on the Graph Store Protocol** wrote quad by quad, and `drop_graph`
+  could leave the existing-but-empty graph its own documentation exists to prevent.
+
+### Boundary rules stopped believing in refused commits
+
+`Rules` keeps its bridged copy of the scene current *by delta*, which is what makes firing
+rules per commit affordable. It was told about a tick's delta before anyone knew whether the
+delta would be kept, and nothing told it when the tick was refused. The bridge went on holding
+triples the scene had never accepted, and every later tick inferred from them — with the
+damage surfacing one commit later, on a different subject, as an inference with no visible
+cause.
+
+The fix belongs one level down, with the thing that owns the graph: `EngineRun::checkpoint`,
+then `accept` or `revert`. A caller that never checkpoints records nothing and pays nothing.
+
+Writing it exposed an older bug in `EngineRun::apply`. A delta is an ordered sequence; the
+graph underneath takes two unordered sets and removes everything in one before adding
+everything in the other. Partitioning a sequence into those sets loses the order, so a row
+both added *and* removed within one delta came out **present**, whichever way round the caller
+meant it. `apply` now reduces to a net effect per row, last change winning.
+
+### Bulk loads are ingested as sorted files
+
+`SstFileWriter` + `IngestExternalFile`, which `DESIGN.md` §6.1 has wanted since the start. A
+load holds the encoded quads, sorts them once per index order, writes one file per order and
+hands them to RocksDB, which can adopt a non-overlapping file at the bottom level instead of
+pushing every key through the memtable, the log, and then the levels again.
+
+**1.7× on a whole load** — 10.7 s to 6.4 s for 753k quads, interleaved, eight pairs. The
+`loadprofile` benchmark was written *first*, and it is why the number is 1.7× rather than the
+order of magnitude the roadmap implied: the index writes were 55% of a load and are now almost
+none, so what is left is parsing and the dictionary. It also settled a change made on a
+misreading — a bloom filter on `str2id` — which measured as worth nothing and was reverted
+rather than kept on the theory.
+
+Not the external merge sort: past `MAX_SST_QUADS` a load falls back to the buffered-batch
+path, so the win comes with a memory budget.
+
+### A guide to holon models
+
+[HOLONS.md](HOLONS.md) and `examples/holon/`, driven by `cargo run -p holos-holon --example
+tour` — a maintenance work-order model with four commits chosen so each shows a different
+answer a boundary can give: one accepted, one refused, one where a rule fires, and one where
+the rule is what causes the refusal. The tour is a program rather than a transcript because a
+transcript goes stale in silence and a program that stops compiling fails the build.
+
+### Removed
+
+- **`holos-tabular`.** The TARQL-style CSV → RDF loader was never wired into the CLI, the
+  server or the Python binding, and shipping a crate nothing consumes is worse than not
+  shipping it. Its route is gone from `MINTING-TRIPLES.md`. The code is in the history if it
+  is wanted back, and the licence reasoning that produced it is still in `THIRD-PARTY.md`
+  because the constraint has not changed.
 
 ### SHACL 1.2 Core is complete
 

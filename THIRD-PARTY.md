@@ -30,7 +30,7 @@ covers, and reimplementing one avoids inheriting its terms.
 
 | Idea | Origin | Its licence | Why not copied |
 |---|---|---|---|
-| CSV → RDF via a TARQL-style `CONSTRUCT` | [semanticarts/oxi-gen](https://github.com/semanticarts/oxi-gen) | Apache-2.0 **only** | Copying Apache-only source would force this project to Apache-only, dropping the MIT arm. See [`holos-tabular`](crates/holos-tabular) |
+| CSV → RDF via a TARQL-style `CONSTRUCT` | [semanticarts/oxi-gen](https://github.com/semanticarts/oxi-gen) | Apache-2.0 **only** | Copying Apache-only source would force this project to Apache-only, dropping the MIT arm. A clean-room implementation was written and then dropped before 0.3.0 as an unwired feature; the licence reasoning is kept because the constraint has not changed |
 | Hypertrie / worst-case-optimal joins | [Tentris](https://dice-research.org/Tentris) | varies | `DESIGN.md` §12: implement from the papers rather than copy code whose licence is unverified |
 
 The `fn:`, `afn:` and `spif:` function libraries are implemented from their

@@ -29,7 +29,7 @@ The full argument, the layer design, the roadmap and the risks are in **[DESIGN.
 | **L5** Holon layer | ◐ Walking skeleton: scene, boundary enforced on the write path, event log with per-triple RDF 1.2 provenance, **165 validated commits/s at 41× a full pass**, boundary rules fired per tick, each tick one atomic commit. Owes isolation, maintained projections, time travel |
 | **L6** Protocol server | ◐ SPARQL 1.2 Protocol over HTTP (**34/34** W3C protocol tests) + **Graph Store Protocol** (**13/13**) + YASGUI console, **`POST /update`**, and **Python bindings** packaged as `holosdb` (built, tested, not yet published). Owes WASM |
 
-345 unit and property tests pass (`cargo test --workspace`), plus the W3C suites below.
+703 unit and property tests pass (`cargo test --workspace`), plus the W3C suites below.
 
 **Documentation** — [MINTING-TRIPLES.md](MINTING-TRIPLES.md) is the getting-started guide to
 every route for getting data in, including RDF 1.2 triple terms and holons;
