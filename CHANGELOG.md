@@ -3,6 +3,90 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## Unreleased
+
+### Range filters reach the index
+
+`DESIGN.md` §5 has said since the beginning that order-preserving encodings exist so
+`FILTER(?d > "2020-01-01")` can bound an index scan rather than be tested against everything
+the scan returns. It does now. A filter that bounds a pattern's object bounds that pattern's
+scan, measured end to end against the same build with the pushdown disabled:
+
+| selectivity | off | on | speed-up |
+|---:|---:|---:|---:|
+| 1% | 397 ms | 5.7 ms | **69×** |
+| 10% | 410 ms | 61 ms | 6.7× |
+| 50% | 495 ms | 314 ms | 1.6× |
+| 90% | 627 ms | 540 ms | 1.2× |
+
+The whole feature turns on one asymmetry: **the span decides what is read, the filter still
+decides what matches**. A span may admit too much, which costs time; if it admits too little
+the row is never seen, and a row lost that way looks like data that was never stored.
+
+Which makes "what could satisfy this comparison" the only question, and §5's own table was
+wrong about the answer. It claimed `xsd:decimal` and `xsd:double` were inlined at tag `0x5`;
+the encoder takes `xsd:float` only, and only when its canonical form round-trips. Decimals,
+doubles, integers past 60 bits and awkwardly-spelled floats are all dictionary literals whose
+ids say nothing about their values — and all still numbers. So every span includes the whole
+dictionary region, and a numeric one includes the other numeric tag too. The table is
+corrected.
+
+Three things this needed, each with its own guarantee:
+
+- **A bounded scan in the store**, on both backends — RocksDB iterate bounds one component
+  past the prefix, `BTreeSet::range` in memory. Checked against scan-and-filter for every
+  span, graph shape and binding combination.
+- **A bounded path through the view**, which is `DESIGN.md` §14's chokepoint. A second way to
+  reach the index is a second chance to reach it without asking policy, so `decide` and
+  `denied_graph` are shared rather than reimplemented, and `range_policy.rs` asserts equality
+  of *visibility* — what is seen, and when a request is refused. That test found the suite
+  had no `Fail`-semantics policy, which is the only mode where the denied-graph short circuit
+  is observable at all.
+- **The pushdown itself**, in the bind join, verified against `spareval` the way the rest of
+  that operator is.
+
+### Queries the specifications call invalid are refused
+
+Three of them were being evaluated: a triple term as another triple term's subject, a literal
+as one, and `COUNT(COUNT(*))`. Inside `VALUES` the parser catches these; inside `BIND` it does
+not, because there the term becomes an ordinary function call whose arguments are
+unconstrained.
+
+`holos_engine::validate` refuses them after parsing — the same judgement `holos-shacl` makes
+when it declines a shapes graph it cannot check, and for the same reason: a query with no
+defined answer still produces something that looks like data. All three had been recorded as
+`upstream:` failures and were not. SPARQL 1.2 is **268/269**.
+
+### A bulk load's memory no longer grows with the load
+
+Sorted ingestion held everything in memory to sort it and, past a cap, fell back to writing
+keys one at a time. The cap is now a spill threshold: fill a buffer, sort it, write a run per
+index order, merge the runs at the end. Memory stays flat around half a gigabyte whatever is
+loaded, and spilling costs about **12%** at thirty runs — where exceeding the budget used to
+drop the load onto a path five times slower.
+
+`P1` is complete.
+
+### Maintenance commands refuse what will not fit
+
+The store grows and nothing shrinks it unasked. `holos compact` writes a second store beside
+the first and could discover at 90% that the disk was full; `holos backup` hard-links, so it
+fits immediately and then pins the files compaction can no longer reclaim.
+
+Both now check. `compact` refuses with both numbers and a `--force` for when the estimate is
+too conservative, `backup` warns because the same-filesystem case genuinely fits, `POST
+/backup` answers **507** so a scheduler can tell insufficient storage from a fault, and
+`holos stats` reports size, free space and whether a compaction would fit — so the question
+can be asked before a maintenance window rather than during one.
+
+### Every benchmark table re-measured
+
+The tables in `BENCHMARKS.md` predated both the bind join and sorted ingestion; the old query
+rows had a 3-way star at 385 ms where it is now 0.22 ms. All four are replaced from one run,
+and `DESIGN.md`'s scaling table is re-measured at both ends of a 14× span. Bytes-per-quad does
+not move across it — 34.8 at 753k quads, 35.2 at 10.5M — which is the figure that says nothing
+in the storage layer degrades super-linearly.
+
 ## 0.3.0 — 2026-09-03
 
 The release that made every write path atomic, and finished SHACL 1.2 Core.

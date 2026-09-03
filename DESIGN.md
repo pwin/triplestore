@@ -142,18 +142,37 @@ makes impossible.
 | `0x2` | Blank node (graph-scoped; see §13) |
 | `0x3` | **Well-known vocabulary** — static, compile-time-constant ids for `rdf:`, `rdfs:`, `owl:`, `xsd:`, `sh:`, `prov:`. `rdf:type` becomes a constant the optimizer can pattern-match on. |
 | `0x4` | Inline `xsd:integer` (60-bit, order-preserving two's-complement bias) |
-| `0x5` | Inline `xsd:decimal` / `xsd:double` (order-preserving IEEE-754 flip) |
-| `0x6` | Inline `xsd:date` / `xsd:dateTime` (order-preserving, UTC-normalised) |
-| `0x7` | Inline `xsd:boolean`, and short strings of 7 bytes or fewer |
+| `0x5` | Inline `xsd:float` (order-preserving IEEE-754 flip), where the canonical form round-trips |
+| `0x6` | Inline `xsd:dateTime` (order-preserving, UTC-normalised) |
+| `0x7` | Inline `xsd:boolean`, and `xsd:string` of 6 bytes or fewer |
 | `0x8` | **Triple term** — index into the triple-term side table |
 | `0x9`–`0xF` | Reserved (vector-embedding handles, geometry handles, …) |
 
 Two consequences worth stating explicitly:
 
-- **Order-preserving encodings turn `FILTER(?d > "2020-01-01"^^xsd:date)` into an index range
-  scan** — the cheapest large win available, and one most stores don't take.
+- **Order-preserving encodings turn `FILTER(?d > "2020-01-01"^^xsd:dateTime)` into an index
+  range scan** — the cheapest large win available, and one most stores don't take. **Built.**
+  A filter that bounds a pattern's object bounds its scan: 69× at 1% selectivity, 1.2× at
+  90%, never slower. The bound decides what is read and the filter still decides what
+  matches, so the answer cannot move.
 - **Inline values never enter the dictionary**, so a dataset of measurements doesn't pay dictionary
   cost for its numbers.
+
+> **What is *not* inlined matters as much, and this table used to be wrong about it.** It
+> claimed `xsd:decimal` and `xsd:double` at `0x5` and `xsd:date` at `0x6`; the encoder takes
+> neither. Nor does it take an `xsd:float` whose canonical form does not round-trip, or an
+> integer past 60 bits. All of those are numbers, all are dictionary literals, and a
+> dictionary id says nothing about its value.
+>
+> That is why a range-bounded scan reads the dictionary region alongside the ordered one — a
+> span built from the integer region alone silently drops `30.5` from `?o > 30`. The cost is
+> nothing in the case the inlining exists for: under a numeric predicate, the dictionary's
+> slice is empty. `crates/holos-engine/src/range.rs` is where this is enforced, and
+> `tests/range_soundness.rs` is what holds it to it.
+>
+> The short-string cap is 6 bytes rather than 7 for a reason `crates/holos-core/src/inline.rs`
+> gives: keeping them in lexicographic order needs the bytes in the payload's high bits with
+> length and kind below, and six ordered bytes beat seven unordered.
 
 **Dictionary** lives in two RocksDB column families, `id2str` and `str2id`, with a merge-operator
 refcount so deletion can reclaim. Large literals go to BlobDB. Dense id allocation is a single
@@ -619,7 +638,7 @@ the measurement.
 | Phase | Deliverable | Exit criterion |
 |---|---|---|
 | **P0** ✅ | Oxigraph crates + store + evaluator | *Done, in-memory.* SPARQL 1.2 and RDF 1.2 triple terms evaluate end to end, and the W3C suites pass with no HOLOS-attributable failure (§15). Still owes the RocksDB substrate. |
-| **P1** ✅ | Dense `TermId` dictionary, order-preserving encodings, SST-ingest bulk loader | *Done.* `SstFileWriter` + `IngestExternalFile` is worth **1.7× on a whole load**, over an external merge sort that keeps a load's memory flat whatever its size — `loadprofile` shows why not more, and where the remaining time is. Range filters compiled into index scans are the one thing left, and they are a query concern rather than a loading one. **The original 500k/s exit criterion was written before any measurement and is withdrawn** — see §16 for what replaces it. |
+| **P1** ✅ | Dense `TermId` dictionary, order-preserving encodings, SST-ingest bulk loader | *Done.* `SstFileWriter` + `IngestExternalFile` is worth **1.7× on a whole load**, over an external merge sort that keeps a load's memory flat whatever its size — `loadprofile` shows why not more, and where the remaining time is. Range filters are compiled into index scans: a selective `FILTER` on an inline value is **69× faster** end to end, and never slower (§16). **The original 500k/s exit criterion was written before any measurement and is withdrawn** — see §16 for what replaces it. |
 | **P2** ◐ | Characteristic-set statistics, cost-based optimizer, vectorized binary joins | *Statistics built and measured, and consumed.* Characteristic sets estimate 6 of 7 query shapes exactly — mean q-error **1.1** against the reused optimiser's **2×10⁸** — and bad estimates cost a measured **3×** (§16). `bindjoin` is an owned planner over them for the fragment it accepts, re-estimating at each step. Owes the rest of the language: `ORDER BY` and aggregation are refused on principle (§7), the remainder for want of the work. |
 | **P3** | Hypertrie hot tier + WCO multi-join + hybrid planner | Wins on cyclic and join-heavy queries without regressing star and chain queries; memory overhead measured and within budget. **Gated on P2's planner**, not just its statistics — §13 Q2 compares against a *well-planned* binary join, which does not exist yet. |
 | **P4** ✅ | SHACL subsystem on native indexes + incremental revalidation | *Done.* **98/98** W3C SHACL 1.0 Core and **138/138** SHACL 1.2 Core, through both validators (§15). Both revalidate a delta: the native one at **161×** a full pass, the adapted one at **0.08 ms against 150 ms** to prepare and validate at 250,000 quads. SPARQL constraints, SHACL-AF rules and node expressions are the adapted engine's; the native evaluator refuses them rather than dropping them. |
