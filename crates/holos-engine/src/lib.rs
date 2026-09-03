@@ -24,6 +24,7 @@ pub mod entailment;
 pub mod functions;
 pub mod geo_ext;
 pub mod options;
+pub mod range;
 pub mod service;
 pub mod source;
 pub mod spatial;
