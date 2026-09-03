@@ -394,3 +394,121 @@ fn a_rule_cannot_write_where_the_principal_cannot() {
         "and nothing is left behind, the caller's own triple included"
     );
 }
+
+/// A tick the boundary refuses must leave the rules where it found them.
+///
+/// The bridge a `Rules` holds is kept current *by delta* — that is what makes firing rules on
+/// every commit affordable rather than a full re-bridge each time. The cost of that is that
+/// it tracks the history it was told about rather than the store, and a tick tells it about
+/// its delta *before* anyone knows whether the delta will be kept.
+///
+/// So a refused commit used to leave the bridge holding triples the scene had never accepted,
+/// and every later tick inferred from them. Nothing about the refused tick looked wrong; the
+/// damage showed up one commit later, in a different order, as an inference with no visible
+/// cause. That is the worst shape a bug can have, and it is why this test asserts on the tick
+/// *after* the refusal rather than on the refusal itself.
+#[test]
+fn a_refused_tick_does_not_leave_its_delta_in_the_rules() {
+    let mut engine = engine_with(VALUE_BOUNDARY, "");
+    let holon = holon();
+    let mut session = Session::unrestricted(engine.store()).expect("session");
+    let mut rules = Rules::prepare(&mut engine, &holon)
+        .expect("prepare")
+        .expect("both graphs");
+
+    // Refused: the rule infers a status `sh:in` forbids.
+    let refused = holos_holon::tick_with_rules(
+        &mut engine,
+        &holon,
+        &mut session,
+        &added(vec![a("widget", "Thing")]),
+        Some(&mut rules),
+    )
+    .expect("tick");
+    assert!(!refused.admitted, "the setup tick must be refused");
+    assert!(scene(&engine).is_empty(), "and leave the scene empty");
+
+    // Now a commit that has nothing to do with widgets. If the bridge still believes
+    // `ex:widget a ex:Thing`, the rule fires for it again and this tick is refused for a
+    // violation belonging to a node the delta never mentioned.
+    let outcome = holos_holon::tick_with_rules(
+        &mut engine,
+        &holon,
+        &mut session,
+        &added(vec![named("gadget", "Gadget")]),
+        Some(&mut rules),
+    )
+    .expect("tick");
+
+    assert!(
+        outcome.admitted,
+        "the second tick was refused for something the first tick left in the rules"
+    );
+    let scene = scene(&engine);
+    assert!(
+        !scene.iter().any(|t| t.contains("widget")),
+        "the refused tick's subject came back: {scene:?}"
+    );
+    assert_eq!(
+        scene.len(),
+        1,
+        "only the second commit's own triple: {scene:?}"
+    );
+}
+
+/// The same, for a tick that *fails* rather than being refused.
+///
+/// A refusal and a failure unwind through different code — one is a compensating write inside
+/// the commit, the other abandons the store's commit scope — so a fix for one is not a fix
+/// for the other, and this is the half that would otherwise go untested.
+#[test]
+fn a_failed_tick_does_not_leave_its_delta_in_the_rules() {
+    use holos_security::policy::{PrincipalMatch, Rule, Scope};
+    use holos_security::{Modes, Policy, Principal};
+
+    let mut engine = engine_with(VALUE_BOUNDARY, "");
+    let holon = holon();
+    let mut rules = Rules::prepare(&mut engine, &holon)
+        .expect("prepare")
+        .expect("both graphs");
+
+    // Denying the predicate the rule writes makes the tick fail partway through, after its
+    // delta has already been handed to the rules.
+    let mut policy = Policy::permit_all();
+    policy.rules.push(Rule::deny(
+        Modes::WRITE,
+        Scope::GraphPredicate(iri("scene"), iri("status")),
+        PrincipalMatch::Everyone,
+    ));
+    let mut denied =
+        Session::open(engine.store(), Principal::anonymous(), policy).expect("session");
+    holos_holon::tick_with_rules(
+        &mut engine,
+        &holon,
+        &mut denied,
+        &added(vec![a("widget", "Thing")]),
+        Some(&mut rules),
+    )
+    .expect_err("the rule's write is denied");
+    assert!(scene(&engine).is_empty());
+
+    // A principal that may write everything, committing something unrelated.
+    let mut session = Session::unrestricted(engine.store()).expect("session");
+    let outcome = holos_holon::tick_with_rules(
+        &mut engine,
+        &holon,
+        &mut session,
+        &added(vec![named("gadget", "Gadget")]),
+        Some(&mut rules),
+    )
+    .expect("tick");
+
+    assert!(
+        outcome.admitted,
+        "the failed tick left its delta in the rules and poisoned the next commit"
+    );
+    assert!(
+        !scene(&engine).iter().any(|t| t.contains("widget")),
+        "the failed tick's subject came back"
+    );
+}

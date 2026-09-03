@@ -202,13 +202,21 @@ pub fn tick_with_rules(
     if owned {
         engine.store_mut().begin()?;
     }
-    let outcome = tick_body(engine, holon, session, delta, rules);
+    let mut rules = rules;
+    let outcome = tick_body(engine, holon, session, delta, rules.as_deref_mut());
     if owned {
         if outcome.is_ok() {
             engine.store_mut().commit()?;
         } else {
             engine.store_mut().rollback();
         }
+    }
+    // After the scope, so the bridge is squared against the store as it finally stands rather
+    // than as it stood mid-tick. A refused commit counts as not kept: the boundary turned the
+    // delta away, so the bridge must not go on believing in it.
+    if let Some(rules) = rules {
+        let kept = matches!(&outcome, Ok(o) if o.committed());
+        rules.settle(engine.store(), kept);
     }
     outcome
 }
@@ -393,6 +401,21 @@ pub struct Rules {
     run: holos_shacl::engine::EngineRun,
     /// The scene these rules were bridged against, so using them on another is caught.
     scene: NamedNode,
+    /// What the tick in progress has pushed into the bridge.
+    ///
+    /// The bridge is kept current *by delta*, which is what makes firing rules per commit
+    /// affordable. The cost of that is that it tracks the history it was told about rather
+    /// than the store — so a tick whose delta it was told about, and which then did not
+    /// commit, leaves it holding triples the scene does not have. Every later tick would
+    /// then infer from data that is not there.
+    ///
+    /// Kept here so it can be taken back out. See [`Rules::settle`].
+    applied: Vec<Change>,
+    /// Set when the bridge could not be put back, which makes every later use refuse.
+    ///
+    /// Fail-closed: an inference drawn from a bridge that is out of step with the store is
+    /// not a slower answer, it is a wrong one, and it would be written into the scene.
+    stale: bool,
 }
 
 impl Rules {
@@ -445,6 +468,8 @@ impl Rules {
             },
         )?;
         Ok(Some(Self {
+            applied: Vec::new(),
+            stale: false,
             run,
             scene: holon.scene.clone(),
         }))
@@ -465,8 +490,50 @@ impl Rules {
                 ),
             )));
         }
+        if self.stale {
+            return Err(HolonError::Shacl(holos_shacl::ShaclError::Unsupported(
+                "these rules are out of step with the scene and must be rebuilt with \
+                 Rules::prepare"
+                    .to_owned(),
+            )));
+        }
         self.run.apply(engine.store(), changes)?;
+        // Remembered before inferring, so a failure anywhere after this point still has
+        // something to unwind.
+        self.applied.extend_from_slice(changes);
         Ok(self.run.infer(Self::MAX_ROUNDS)?)
+    }
+
+    /// Brings the bridge back into step with the scene once the tick has finished.
+    ///
+    /// `committed` is what the tick did with the delta the bridge was told about: kept it, or
+    /// did not. Kept, there is nothing to do and the record is cleared. Not kept — refused by
+    /// the boundary, or the whole tick failed — the changes are applied backwards and the
+    /// bridge returns to what it held before.
+    ///
+    /// The inverse costs nothing extra to compute: every term it names was interned on the
+    /// way in and is still in the bridge's own table, so it needs no lookup and works even
+    /// after the store has rolled the terms away.
+    ///
+    /// Infallible on purpose, like every other unwind here: it is called on the failure path.
+    /// A failure to unwind sets [`Rules::stale`] instead, which makes the next tick refuse
+    /// rather than infer from a bridge nobody can describe.
+    fn settle(&mut self, store: &Store, committed: bool) {
+        let applied = std::mem::take(&mut self.applied);
+        if committed || applied.is_empty() {
+            return;
+        }
+        let inverse: Vec<Change> = applied
+            .iter()
+            .rev()
+            .map(|change| Change {
+                quad: change.quad,
+                added: !change.added,
+            })
+            .collect();
+        if self.run.apply(store, &inverse).is_err() {
+            self.stale = true;
+        }
     }
 }
 
