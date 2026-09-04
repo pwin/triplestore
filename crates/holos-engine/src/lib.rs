@@ -20,6 +20,7 @@
 #![allow(clippy::many_single_char_names)]
 
 pub mod bindjoin;
+pub mod crs;
 pub mod entailment;
 pub mod functions;
 pub mod geo_ext;
@@ -287,10 +288,16 @@ impl Engine {
     pub fn evaluator() -> QueryEvaluator {
         let mut evaluator = QueryEvaluator::new();
         for (name, function) in spargeo::GEOSPARQL_EXTENSION_FUNCTIONS {
-            evaluator = evaluator.with_custom_function(name.into_owned(), function);
+            // Wrapped rather than registered directly: `spargeo` refuses any literal that
+            // is not CRS84, so all 43 would be the one part of the geometry surface where
+            // British National Grid data did not work. `crs_aware` rewrites the arguments
+            // into CRS84 first, which fixes them together and leaves `spargeo` unchanged.
+            evaluator =
+                evaluator.with_custom_function(name.into_owned(), geo_ext::crs_aware(function));
         }
         // spargeo does not carry geof:buffer or geof:boundary; §17 claimed them before
         // anything checked, so they are implemented here rather than quietly dropped.
+        // Registered second, so the replacements among them win.
         for (name, function) in geo_ext::EXTRA_GEOSPARQL_FUNCTIONS {
             evaluator = evaluator.with_custom_function(name.into_owned(), function);
         }

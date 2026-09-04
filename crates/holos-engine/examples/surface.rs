@@ -14,6 +14,7 @@ use holos_security::Session;
 use oxrdf::vocab::rdf;
 use oxrdf::{GraphName, Literal, NamedNode, Quad, Term};
 use spareval::QueryResults;
+use std::collections::BTreeSet;
 
 const EX: &str = "http://example.org/";
 const GEOF: &str = "http://www.opengis.net/def/function/geosparql/";
@@ -169,7 +170,8 @@ fn prefixes() -> String {
          PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
          PREFIX geo: <http://www.opengis.net/ont/geosparql#> \
          PREFIX geof: <{GEOF}> \
-         PREFIX uom: <{UOM}> "
+         PREFIX uom: <{UOM}> \
+         PREFIX holos: <https://holos.dev/ns#> "
     )
 }
 
@@ -421,6 +423,9 @@ fn sparql12() -> Vec<Probe> {
 fn geosparql() -> Vec<Probe> {
     let wkt = r#""POINT(1 1)"^^geo:wktLiteral"#;
     let poly = r#""POLYGON((0 0,0 3,3 3,3 0,0 0))"^^geo:wktLiteral"#;
+    // Cardiff Castle, on the British National Grid.
+    let grid = r#""<http://www.opengis.net/def/crs/EPSG/0/27700> POINT(318086.06 176511.05)"^^geo:wktLiteral"#;
+    let bng = r#""http://www.opengis.net/def/crs/EPSG/0/27700"^^xsd:anyURI"#;
     vec![
         p(
             "geof:distance",
@@ -489,6 +494,24 @@ fn geosparql() -> Vec<Probe> {
             "GeoSPARQL",
             expr(&format!("STRLEN(STR(geof:asGeoJSON({wkt})))")),
             "",
+        ),
+        p(
+            "geof:getSRID",
+            "GeoSPARQL",
+            expr(&format!("geof:getSRID({grid})")),
+            "**replaced**: reports the declared system, not CRS84",
+        ),
+        p(
+            "reference systems",
+            "GeoSPARQL",
+            expr(&format!("geof:distance({grid}, {wkt}, uom:metre)")),
+            "**added by HOLOS**: EPSG:4326, 27700 and 3857, not CRS84 alone",
+        ),
+        p(
+            "holos:transform",
+            "HOLOS",
+            expr(&format!("STR(holos:transform({wkt}, {bng}))")),
+            "**added by HOLOS**: GeoSPARQL has no transform",
         ),
     ]
 }
@@ -893,7 +916,7 @@ fn main() {
         &session,
     );
     section(
-        "GeoSPARQL (sample of 45)",
+        "GeoSPARQL (sample of 45, plus holos:transform)",
         "Function",
         geosparql(),
         &engine,
@@ -918,7 +941,7 @@ fn main() {
         "\nAn unregistered function is **not** a parse error: it parses, and fails at\n\
          evaluation. Adding more is small, because they are ordinary\n\
          `fn(&[Term]) -> Option<Term>` entries on the evaluator, which is exactly how\n\
-         `geof:buffer` and `geof:boundary` were added.\n\n\
+         `geof:buffer`, `geof:boundary` and `holos:transform` were added.\n\n\
          For `fn:`, the SPARQL built-ins cover the same ground under different names:\n\
          `UCASE` for `fn:upper-case`, `REPLACE` for `fn:replace`, `REGEX` for\n\
          `fn:matches`, `STRLEN` for `fn:string-length`.\n"
@@ -926,19 +949,42 @@ fn main() {
 
     println!(
         "\n---\n\n## The complete GeoSPARQL set\n\n\
-         45 functions: 43 from `spargeo`, plus `geof:buffer` and `geof:boundary`\n\
-         implemented here. The table above samples them; the full list is:\n"
+         All 45 `geof:` functions are registered — 43 from `spargeo`, plus `geof:buffer`\n\
+         and `geof:boundary` implemented here — and `holos:transform` alongside them.\n\
+         Six of the 43 are **replaced** rather than reused: `distance`, `getSRID` and the\n\
+         four set operations, where `spargeo`'s answer was narrower than the\n\
+         specification's. The table above samples them; the full list is:\n"
     );
-    let mut names: Vec<String> = spargeo::GEOSPARQL_EXTENSION_FUNCTIONS
+    let local = |iri: &str| iri.rsplit(['/', '#']).next().unwrap_or("").to_owned();
+    let ours: BTreeSet<String> = holos_engine::geo_ext::function_iris()
         .iter()
-        .map(|(iri, _)| iri.as_str().rsplit('/').next().unwrap_or("").to_owned())
+        .map(|iri| local(iri.as_str()))
         .collect();
-    names.extend(
-        holos_engine::geo_ext::function_iris()
-            .iter()
-            .map(|n| format!("**{}**", n.as_str().rsplit('/').next().unwrap_or(""))),
+    let mut names: BTreeSet<String> = spargeo::GEOSPARQL_EXTENSION_FUNCTIONS
+        .iter()
+        .map(|(iri, _)| local(iri.as_str()))
+        .collect();
+    names.extend(ours.iter().cloned());
+    let listed: Vec<String> = names
+        .iter()
+        .map(|name| {
+            if ours.contains(name) {
+                format!("**{name}**")
+            } else {
+                name.clone()
+            }
+        })
+        .collect();
+    println!("{}\n", listed.join(" - "));
+    println!(
+        "Names in **bold** are implemented or replaced by HOLOS. `transform` is in the\n\
+         `holos:` namespace rather than `geof:`, because GeoSPARQL defines no transform\n\
+         function and putting one in the OGC namespace would claim a sanction it does not\n\
+         have.\n\n\
+         Every one of them reads geometry literals in **CRS84, EPSG:4326, EPSG:27700 and\n\
+         EPSG:3857**, converting to CRS84 on the way in, so data published on the British\n\
+         National Grid can be queried against data in degrees. An unrecognised reference\n\
+         system is refused rather than assumed to be CRS84. See `crates/holos-engine/src/crs.rs`\n\
+         for the transformations and the accuracy they are good for."
     );
-    names.sort_by_key(|n| n.replace('*', ""));
-    println!("{}\n", names.join(" - "));
-    println!("Names in **bold** are the two added by HOLOS.");
 }

@@ -25,11 +25,11 @@ The full argument, the layer design, the roadmap and the risks are in **[DESIGN.
 | **L3** Query engine | ◐ SPARQL 1.2 **query and update** evaluate end to end. Query timeouts, dataset selection, parameter binding and plan explanation all wired. Characteristic-set statistics built and measured — **mean q-error 1.1 against the reused optimiser's 2×10⁸**. Owes the planner that consumes them, and WCO joins |
 | **Security** | ✅ Principals, compiled fine-grained policy, classification lattice, audit sink — enforced at the scan, at **8 ns/quad**. See [ACCESS-CONTROL.md](ACCESS-CONTROL.md) |
 | **L4** SHACL | ◐ Two validators behind one trait: [SHACL_Engine](https://github.com/pwin/SHACL_Engine) adapted for coverage, and a native evaluator for **incremental revalidation at 161× a full pass** |
-| **GeoSPARQL** | ✅ 45 functions — 43 via `spargeo`, plus `geof:buffer` and `geof:boundary` implemented here — composing with policy and the term encoding — see [DESIGN.md §17](DESIGN.md#17-geospatial) |
+| **GeoSPARQL** | ✅ 45 functions — 43 via `spargeo`, plus `geof:buffer` and `geof:boundary` implemented here — reading **CRS84, EPSG:4326, EPSG:27700 and EPSG:3857**, so British National Grid data queries against GPS data. Composes with policy and the term encoding — see [DESIGN.md §17](DESIGN.md#17-geospatial) |
 | **L5** Holon layer | ◐ Walking skeleton: scene, boundary enforced on the write path, event log with per-triple RDF 1.2 provenance, **165 validated commits/s at 41× a full pass**, boundary rules fired per tick, each tick one atomic commit. Owes isolation, maintained projections, time travel |
 | **L6** Protocol server | ◐ SPARQL 1.2 Protocol over HTTP (**34/34** W3C protocol tests) + **Graph Store Protocol** (**13/13**) + YASGUI console, **`POST /update`**, and **Python bindings** on PyPI as [`holosdb`](https://pypi.org/project/holosdb/) — five abi3 wheels plus an sdist, `pip install holosdb`. Owes WASM |
 
-759 unit and property tests pass (`cargo test --workspace`), plus the W3C suites below.
+796 unit and property tests pass (`cargo test --workspace`), plus the W3C suites below.
 
 **Documentation** — [MINTING-TRIPLES.md](MINTING-TRIPLES.md) is the getting-started guide to
 every route for getting data in, including RDF 1.2 triple terms and holons;
@@ -261,6 +261,35 @@ SELECT ?name WHERE {
   FILTER(geof:sfWithin(?point, ?region))
 }
 ```
+
+### Data in one reference system, queried against data in another
+
+GeoSPARQL stores the coordinate reference system in the literal and gives you no way to
+change it, which is fine until two datasets meet. Four systems are read — **CRS84**,
+**EPSG:4326**, **EPSG:27700** (British National Grid) and **EPSG:3857** (Web Mercator) —
+converted to CRS84 on the way in, so an Ordnance Survey grid reference and a GPS fix are
+comparable without the query doing anything about it:
+
+```sparql
+PREFIX geof:  <http://www.opengis.net/def/function/geosparql/>
+PREFIX uom:   <http://www.opengis.net/def/uom/OGC/1.0/>
+PREFIX holos: <https://holos.dev/ns#>
+SELECT ?name ?metres ?grid WHERE {
+  ?site  geo:asWKT ?a .          # "<...EPSG/0/27700> POINT(318086.06 176511.05)"
+  ?phone geo:asWKT ?b .          # "POINT(-2.5879 51.4545)"
+  BIND(geof:distance(?a, ?b, uom:metre) AS ?metres)
+  BIND(holos:transform(?b, "http://www.opengis.net/def/crs/EPSG/0/27700"^^xsd:anyURI) AS ?grid)
+}
+```
+
+`geof:distance` answers in metres for any pair of geometries, `geof:buffer` takes a radius
+in metres, and `holos:transform` hands the answer back as a grid reference — GeoSPARQL
+defines no transform function, so that one is in this project's namespace rather than the
+OGC's. An unrecognised system is **refused**, never assumed to be CRS84.
+
+EPSG:27700 uses the Ordnance Survey 7-parameter Helmert datum shift: no data files, and
+**2.0 m mean / 5.8 m worst** against OSTN15, measured over 1330 points across Great Britain.
+Right for which-ward-is-this; wrong for setting out a boundary.
 
 They are *filter* functions: a spatial join still scans every candidate geometry. The R-tree
 that would turn that into an index probe needs the cost-based planner to route to it —
