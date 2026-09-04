@@ -3,7 +3,15 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## Unreleased
+## 0.5.0 — 2026-09-04
+
+The release that let two datasets in different coordinate reference systems be
+queried against each other.
+
+0.4.0 was about making a filter reach the index. This one is about geometry, and about a
+gap the specification leaves rather than one this project had: GeoSPARQL stores the
+reference system inside the literal and then provides no way to change it. Everything else
+here follows from closing that.
 
 ### GeoSPARQL reads more than one coordinate reference system
 
