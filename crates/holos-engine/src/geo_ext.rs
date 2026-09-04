@@ -6,11 +6,32 @@
 //! relations, so they are implemented here and registered alongside the rest.
 //!
 //! Everything about the literal handling matches `spargeo`'s conventions deliberately, so
-//! the two sets compose: CRS84 only, `geo:wktLiteral` and `geo:geoJSONLiteral` accepted on
-//! input, output in whichever of the two the arguments used, and the same OGC unit IRIs.
-//! A function that round-tripped literals differently from its neighbours would be worse
+//! the two sets compose: `geo:wktLiteral` and `geo:geoJSONLiteral` accepted on input,
+//! output in whichever of the two the arguments used, and the same OGC unit IRIs. A
+//! function that round-tripped literals differently from its neighbours would be worse
 //! than one that did not exist.
+//!
+//! # Reference systems
+//!
+//! One convention is deliberately *not* matched. `spargeo` accepts CRS84 and refuses every
+//! other reference system, which makes a dataset published on the British National Grid
+//! unqueryable rather than merely awkward. This module reads any system [`crate::crs`]
+//! knows, converts it to CRS84 on the way in, and works in CRS84 from there.
+//!
+//! That single decision is what lets data in one system be queried against data in
+//! another: two operands reach a function already in the same space, so
+//! `geof:distance(?ordnance_survey_point, ?gps_point, uom:metre)` is an ordinary distance
+//! rather than a category error. It also means the 43 functions this module does *not*
+//! implement gain the same behaviour, because [`crs_aware`] rewrites their arguments before
+//! `spargeo` ever sees them.
+//!
+//! Two consequences worth stating rather than discovering:
+//!
+//! - **Output is always CRS84**, whatever went in. `holos:transform` converts it back.
+//! - **`geof:getSRID` reports what the literal says**, not what this module converted it
+//!   to, so it is the one function that must not be wrapped.
 
+use crate::crs::Crs;
 use geo::algorithm::{Buffer, Centroid};
 use geo::{
     Coord, Geometry, GeometryCollection, LineString, MultiLineString, MultiPoint, MultiPolygon,
@@ -28,8 +49,8 @@ const WKT_LITERAL: NamedNodeRef<'_> =
 /// `geo:geoJSONLiteral`.
 const GEO_JSON_LITERAL: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.opengis.net/ont/geosparql#geoJSONLiteral");
-/// The only reference system either `spargeo` or this module accepts.
-const CRS84_URI: &str = "http://www.opengis.net/def/crs/OGC/1.3/CRS84";
+/// The reference system this module works in, and writes.
+const CRS84_URI: &str = crate::crs::CRS84_URI;
 /// Root of the OGC unit-of-measure IRIs.
 const OGC_UOM_PREFIX: &str = "http://www.opengis.net/def/uom/OGC/1.0/";
 
@@ -49,11 +70,26 @@ const BOUNDARY: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.opengis.net/def/function/geosparql/boundary");
 const DISTANCE: NamedNodeRef<'_> =
     NamedNodeRef::new_unchecked("http://www.opengis.net/def/function/geosparql/distance");
+/// `geof:getSRID`.
+const GET_SRID: NamedNodeRef<'_> =
+    NamedNodeRef::new_unchecked("http://www.opengis.net/def/function/geosparql/getSRID");
+/// `holos:transform`, which GeoSPARQL has no equivalent of.
+///
+/// The specification has no transform function at all — it assumes every literal in a
+/// dataset already shares a reference system, which stops being true the moment two
+/// datasets are joined. Putting one in the `geof:` namespace would claim OGC sanction it
+/// does not have, so it goes in this project's own.
+const TRANSFORM: NamedNodeRef<'_> = NamedNodeRef::new_unchecked("https://holos.dev/ns#transform");
 
 /// The functions this module adds to, or replaces in, `spargeo`'s 43.
-pub const EXTRA_GEOSPARQL_FUNCTIONS: [(NamedNodeRef<'static>, fn(&[Term]) -> Option<Term>); 7] = [
+pub const EXTRA_GEOSPARQL_FUNCTIONS: [(NamedNodeRef<'static>, fn(&[Term]) -> Option<Term>); 9] = [
     (BUFFER, geof_buffer),
     (BOUNDARY, geof_boundary),
+    // Not a geometry operation at all: the one thing GeoSPARQL leaves out.
+    (TRANSFORM, holos_transform),
+    // A replacement, because `spargeo`'s answers CRS84 unconditionally — true of every
+    // literal it could parse, and false of every literal this module added support for.
+    (GET_SRID, geof_get_srid),
     // The four set operations are `spargeo`'s, wrapped to snap their output back onto the
     // inputs' coordinates. Registered after `spargeo`'s own so these win; see
     // `snap_to_inputs` for what they are correcting and why it matters.
@@ -182,7 +218,16 @@ fn snap_to_inputs(result: &Term, args: &[Term]) -> Term {
 }
 
 /// Runs one of `spargeo`'s set operations and snaps the result back onto its inputs.
+///
+/// The arguments are moved into CRS84 first and both steps then see the moved ones, which
+/// matters for the second step as much as the first: snapping compares the output against
+/// the coordinates that went in, and an easting in metres is never within
+/// [`SNAP_EPSILON`] of a degree of longitude. Snapping against the originals would not be
+/// wrong so much as inert, and the topological predicates this exists to protect would
+/// quietly stop composing again.
 fn set_operation(local: &str, args: &[Term]) -> Option<Term> {
+    let rewritten = to_crs84(args);
+    let args = rewritten.as_deref().unwrap_or(args);
     let result = spargeo_function(local)?(args)?;
     Some(snap_to_inputs(&result, args))
 }
@@ -252,17 +297,45 @@ fn extract_geometry(term: &Term) -> Option<Geometry> {
     }
 }
 
-/// A WKT literal may carry a leading `<crs-uri>`. Only CRS84 is accepted.
+/// A WKT literal may carry a leading `<crs-uri>`; absent one, GeoSPARQL says CRS84.
+///
+/// An *unrecognised* system is still refused. Falling back to CRS84 would read eastings in
+/// metres as degrees of longitude, which does not fail — it silently relocates the geometry
+/// several thousand kilometres and answers every subsequent query confidently.
+fn declared_crs(value: &str) -> Option<(Crs, &str)> {
+    let value = value.trim_start();
+    let Some(rest) = value.strip_prefix('<') else {
+        return Some((Crs::Crs84, value));
+    };
+    let (system, rest) = rest.split_once('>')?;
+    Some((Crs::from_uri(system)?, rest.trim_start()))
+}
+
+/// A WKT literal, parsed and moved into CRS84.
 fn parse_wkt_literal(value: &str) -> Option<Geometry> {
-    let mut value = value.trim_start();
-    if let Some(rest) = value.strip_prefix('<') {
-        let (system, rest) = rest.split_once('>').unwrap_or((rest, ""));
-        if system != CRS84_URI {
-            return None;
-        }
-        value = rest.trim_start();
+    let (crs, wkt) = declared_crs(value)?;
+    let geometry = Geometry::try_from_wkt_str(wkt).ok()?;
+    reproject(&geometry, crs, Crs::Crs84)
+}
+
+/// Every coordinate of a geometry, moved from one reference system to another.
+///
+/// `None` if any single coordinate cannot be transformed. Partial success is not an option:
+/// half a reprojected polygon is a shape that exists nowhere, and returning it would be
+/// worse than returning nothing.
+fn reproject(geom: &Geometry, from: Crs, to: Crs) -> Option<Geometry> {
+    if from == to {
+        return Some(geom.clone());
     }
-    Geometry::try_from_wkt_str(value).ok()
+    let failed = std::cell::Cell::new(false);
+    let moved = map_coords(geom, &|c| match crate::crs::transform(from, to, c) {
+        Some(c) => c,
+        None => {
+            failed.set(true);
+            c
+        }
+    });
+    (!failed.get()).then_some(moved)
 }
 
 fn to_literal(geom: &Geometry, kind: Kind) -> Literal {
@@ -602,6 +675,135 @@ fn shortest_distance(left: &Geometry, right: &Geometry) -> Option<f64> {
     best.is_finite().then_some(best)
 }
 
+// ---------------------------------------------------------------------------------
+// reference systems
+// ---------------------------------------------------------------------------------
+
+/// <http://www.opengis.net/def/function/geosparql/getSRID>
+///
+/// The reference system a geometry literal *declares*, which is the only useful answer and
+/// not the one `spargeo` gives: its version returns CRS84 for anything it can parse, which
+/// was true when CRS84 was the only thing it could parse.
+///
+/// A literal with no CRS prefix answers CRS84, because that is what GeoSPARQL says an
+/// unprefixed literal means. GeoJSON always answers CRS84, because RFC 7946 allows nothing
+/// else.
+fn geof_get_srid(args: &[Term]) -> Option<Term> {
+    let [term] = args else {
+        return None;
+    };
+    let Term::Literal(literal) = term else {
+        return None;
+    };
+    let crs = if literal.datatype() == WKT_LITERAL {
+        // Parsed, not just prefix-matched: a well-formed CRS on malformed WKT is not a
+        // geometry, and this function should not be the one place that says otherwise.
+        let (crs, wkt) = declared_crs(literal.value().trim())?;
+        <Geometry>::try_from_wkt_str(wkt).ok()?;
+        crs
+    } else if literal.datatype() == GEO_JSON_LITERAL {
+        GeoJson::from_str(literal.value().trim()).ok()?;
+        Crs::Crs84
+    } else {
+        return None;
+    };
+    Some(Literal::new_typed_literal(crs.uri(), xsd::ANY_URI).into())
+}
+
+/// <https://holos.dev/ns#transform>
+///
+/// `holos:transform(geom, crsUri)` — the same geometry, expressed in another reference
+/// system.
+///
+/// This is the only function here whose output is not CRS84, and the reason it exists: a
+/// query that has joined British National Grid data against GPS data still has to hand the
+/// answer back to something, and that something usually wants grid references.
+///
+/// ```sparql
+/// PREFIX holos: <https://holos.dev/ns#>
+/// PREFIX uom:   <http://www.opengis.net/def/uom/OGC/1.0/>
+/// SELECT ?site (holos:transform(?buffered, "http://www.opengis.net/def/crs/EPSG/0/27700") AS ?grid)
+/// WHERE {
+///   ?site :footprint ?shape .
+///   BIND(geof:buffer(?shape, 500, uom:metre) AS ?buffered)
+/// }
+/// ```
+///
+/// The target may be given as an IRI or as an `xsd:anyURI` literal, because `geof:getSRID`
+/// returns the latter and feeding one function's output to another should not need a cast.
+/// An unrecognised system returns unbound rather than the geometry unchanged: a caller who
+/// asked for EPSG:2154 and silently received CRS84 would have no way to tell.
+fn holos_transform(args: &[Term]) -> Option<Term> {
+    let [term, target] = args else {
+        return None;
+    };
+    let target = Crs::from_uri(extract_units_iri(target)?)?;
+    // The literal arrives in CRS84 whatever it declared, because `extract_geometry` moved
+    // it there. So this is one hop, not two, and transforming to CRS84 is a no-op.
+    let geom = extract_geometry(term)?;
+    let moved = reproject(&geom, Crs::Crs84, target)?;
+    let literal = match pick_output_kind(args) {
+        // GeoJSON cannot express another reference system: RFC 7946 removed the `crs`
+        // member and fixed the format at CRS84. Answering with GeoJSON would produce a
+        // document whose numbers are eastings and whose schema says they are degrees.
+        Kind::GeoJson if target != Crs::Crs84 => return None,
+        Kind::GeoJson => to_literal(&moved, Kind::GeoJson),
+        Kind::Wkt => Literal::new_typed_literal(
+            format!("<{}> {}", target.uri(), moved.wkt_string()),
+            WKT_LITERAL,
+        ),
+    };
+    Some(literal.into())
+}
+
+/// A `spargeo` function, taught to read every reference system this module does.
+///
+/// `spargeo` parses its own literals and refuses anything that is not CRS84, so the 43
+/// functions it supplies would be the one part of the surface where British National Grid
+/// data did not work. Rewriting each argument to CRS84 first fixes all 43 at once, and
+/// leaves `spargeo` doing exactly what it did before.
+///
+/// A literal that is already CRS84, or is not a geometry at all — a unit IRI, a radius —
+/// is passed through untouched, so the wrapper costs a datatype comparison per argument on
+/// the common path.
+#[must_use]
+pub fn crs_aware(
+    function: fn(&[Term]) -> Option<Term>,
+) -> impl Fn(&[Term]) -> Option<Term> + Send + Sync + 'static {
+    move |args: &[Term]| match to_crs84(args) {
+        Some(rewritten) => function(&rewritten),
+        None => function(args),
+    }
+}
+
+/// The arguments with every non-CRS84 geometry literal rewritten, or `None` if none needed
+/// it — which is the case this is written to keep cheap.
+fn to_crs84(args: &[Term]) -> Option<Vec<Term>> {
+    let mut rewritten: Option<Vec<Term>> = None;
+    for (index, term) in args.iter().enumerate() {
+        let Term::Literal(literal) = term else {
+            continue;
+        };
+        if literal.datatype() != WKT_LITERAL {
+            continue;
+        }
+        let value = literal.value().trim();
+        // `Some((Crs84, _))` is the common case and needs no work. `None` is a literal
+        // neither side can read, and is left alone so `spargeo` refuses it as it always
+        // did rather than this wrapper refusing it a step earlier.
+        match declared_crs(value) {
+            Some((Crs::Crs84, _)) | None => continue,
+            Some(_) => {}
+        }
+        let target = rewritten.get_or_insert_with(|| args.to_vec());
+        target[index] = match parse_wkt_literal(value) {
+            Some(geom) => to_literal(&geom, Kind::Wkt).into(),
+            None => continue,
+        };
+    }
+    rewritten
+}
+
 /// The IRIs this module registers, for the documentation and tests to assert against.
 #[must_use]
 pub fn function_iris() -> Vec<NamedNode> {
@@ -748,13 +950,265 @@ mod tests {
         assert!(gc.0.is_empty());
     }
 
+    // -----------------------------------------------------------------------------
+    // reference systems
+    // -----------------------------------------------------------------------------
+
+    /// Cardiff Castle, in each of the four systems, to a metre.
+    const CARDIFF: [(&str, &str); 4] = [
+        (crate::crs::CRS84_URI, "POINT(-3.181 51.4816)"),
+        (crate::crs::EPSG_4326_URI, "POINT(51.4816 -3.181)"),
+        (crate::crs::EPSG_27700_URI, "POINT(318086.06 176511.05)"),
+        (crate::crs::EPSG_3857_URI, "POINT(-354107.3 6706929.42)"),
+    ];
+
+    fn crs_wkt(crs: &str, geometry: &str) -> Term {
+        wkt(&format!("<{crs}> {geometry}"))
+    }
+
+    /// A system with no transformation here is still refused, and that is the point.
+    ///
+    /// EPSG:2154 is the French national grid: a perfectly ordinary system, in metres, whose
+    /// coordinates would read as plausible degrees only if you did not look. Treating an
+    /// unknown CRS as CRS84 is the failure mode this guards, and it is silent.
     #[test]
-    fn a_non_crs84_literal_is_refused() {
-        let odd = Literal::new_typed_literal(
-            "<http://www.opengis.net/def/crs/EPSG/0/27700> POINT(0 0)".to_owned(),
-            WKT_LITERAL,
+    fn a_reference_system_this_engine_cannot_transform_is_refused() {
+        let french = crs_wkt(
+            "http://www.opengis.net/def/crs/EPSG/0/2154",
+            "POINT(650000 6860000)",
         );
-        assert!(geof_boundary(&[odd.into()]).is_none());
+        assert!(geof_boundary(&[french.clone()]).is_none());
+        assert!(extract_geometry(&french).is_none());
+        assert!(geof_get_srid(&[french]).is_none());
+    }
+
+    /// The four spellings of Cardiff Castle must all parse to the same place.
+    #[test]
+    fn every_supported_system_reads_to_the_same_point() {
+        let expected = Coord {
+            x: -3.181,
+            y: 51.4816,
+        };
+        for (crs, geometry) in CARDIFF {
+            let Geometry::Point(point) = geometry_of(&crs_wkt(crs, geometry)) else {
+                panic!("{crs} did not give a point");
+            };
+            // The fixtures are rounded to a centimetre, so a metre is the honest bound.
+            let east = (point.x() - expected.x) * 111_320.0 * expected.y.to_radians().cos();
+            let north = (point.y() - expected.y) * 110_574.0;
+            let off = (east * east + north * north).sqrt();
+            assert!(off < 1.0, "{crs} landed {off:.3} m from Cardiff Castle");
+        }
+    }
+
+    /// The axis-order trap, at the level a user meets it.
+    ///
+    /// Both literals below say Cardiff. Read in the wrong order the EPSG:4326 one is at
+    /// latitude 51 north of the equator or 3 degrees south of it, which is in the Atlantic
+    /// off Gabon — a difference no distance function would flag as suspicious.
+    #[test]
+    fn epsg4326_puts_latitude_first_and_crs84_does_not() {
+        let a = geometry_of(&crs_wkt(crate::crs::CRS84_URI, "POINT(-3.181 51.4816)"));
+        let b = geometry_of(&crs_wkt(crate::crs::EPSG_4326_URI, "POINT(51.4816 -3.181)"));
+        assert_eq!(a, b);
+        let swapped = geometry_of(&crs_wkt(crate::crs::EPSG_4326_URI, "POINT(-3.181 51.4816)"));
+        assert_ne!(a, swapped);
+    }
+
+    /// `geof:getSRID` answers what the literal declares, not what the engine converted it
+    /// to. Wrapping it the way the other 43 are wrapped would make it answer CRS84 always,
+    /// which is what `spargeo`'s does and is the reason it is replaced.
+    #[test]
+    fn get_srid_reports_the_declared_system() {
+        for (crs, geometry) in CARDIFF {
+            let answer = geof_get_srid(&[crs_wkt(crs, geometry)]).expect("has a system");
+            let Term::Literal(literal) = &answer else {
+                panic!("expected a literal");
+            };
+            assert_eq!(literal.value(), crs);
+            assert_eq!(literal.datatype(), xsd::ANY_URI);
+        }
+    }
+
+    /// An unprefixed literal is CRS84, which is what GeoSPARQL says it means.
+    #[test]
+    fn get_srid_calls_an_unprefixed_literal_crs84() {
+        let answer = geof_get_srid(&[wkt("POINT(-3.181 51.4816)")]).expect("has a system");
+        let Term::Literal(literal) = &answer else {
+            panic!("expected a literal");
+        };
+        assert_eq!(literal.value(), crate::crs::CRS84_URI);
+    }
+
+    /// A well-formed CRS on malformed WKT is not a geometry, and `getSRID` should not be
+    /// the one function that says otherwise.
+    #[test]
+    fn get_srid_refuses_a_literal_that_is_not_a_geometry() {
+        assert!(geof_get_srid(&[crs_wkt(crate::crs::CRS84_URI, "POINT(nope)")]).is_none());
+    }
+
+    fn crs_iri(uri: &str) -> Term {
+        Term::NamedNode(NamedNode::new_unchecked(uri.to_owned()))
+    }
+
+    /// `holos:transform` is the only function whose output is not CRS84, because it is the
+    /// only one whose job is to leave it.
+    #[test]
+    fn transform_writes_the_target_system_into_the_literal() {
+        let out = holos_transform(&[
+            wkt("POINT(-3.181 51.4816)"),
+            crs_iri(crate::crs::EPSG_27700_URI),
+        ])
+        .expect("transformed");
+        let Term::Literal(literal) = &out else {
+            panic!("expected a literal");
+        };
+        assert!(
+            literal
+                .value()
+                .starts_with(&format!("<{}>", crate::crs::EPSG_27700_URI)),
+            "{}",
+            literal.value()
+        );
+        // And the numbers are the grid reference, not the degrees relabelled.
+        let (_, geometry) = declared_crs(literal.value()).expect("declares a system");
+        let point = <Geometry>::try_from_wkt_str(geometry).expect("parses");
+        let Geometry::Point(point) = point else {
+            panic!("expected a point");
+        };
+        assert!(
+            (point.x() - 318_086.06).abs() < 0.1,
+            "easting {}",
+            point.x()
+        );
+        assert!(
+            (point.y() - 176_511.05).abs() < 0.1,
+            "northing {}",
+            point.y()
+        );
+    }
+
+    /// Out and back is the identity, to the millimetre the datum round trip closes to.
+    #[test]
+    fn transform_round_trips_through_every_system() {
+        for (crs, _) in CARDIFF {
+            let there = holos_transform(&[wkt("POINT(-3.181 51.4816)"), crs_iri(crs)])
+                .expect("transformed");
+            let Geometry::Point(back) = geometry_of(&there) else {
+                panic!("expected a point");
+            };
+            // Two millimetres on the ground, the same bound the National Grid round trip
+            // closes to in `crate::crs`. Serialising to WKT and back does not add to it.
+            let east = (back.x() + 3.181) * 111_320.0 * 51.4816_f64.to_radians().cos();
+            let north = (back.y() - 51.4816) * 110_574.0;
+            let drift = (east * east + north * north).sqrt();
+            assert!(
+                drift < 0.002,
+                "{crs}: came back {:.4} mm away",
+                drift * 1000.0
+            );
+        }
+    }
+
+    /// The target may be an `xsd:anyURI` literal, because that is what `geof:getSRID`
+    /// returns and one function's output should feed another without a cast.
+    #[test]
+    fn transform_accepts_the_target_as_a_uri_literal() {
+        let target =
+            Literal::new_typed_literal(crate::crs::EPSG_3857_URI.to_owned(), xsd::ANY_URI).into();
+        assert!(holos_transform(&[wkt("POINT(0 0)"), target]).is_some());
+    }
+
+    /// A target this engine cannot reach comes back unbound rather than unchanged. A caller
+    /// who asked for EPSG:2154 and silently received CRS84 would have no way to tell.
+    #[test]
+    fn transform_refuses_a_system_it_cannot_reach() {
+        let target = crs_iri("http://www.opengis.net/def/crs/EPSG/0/2154");
+        assert!(holos_transform(&[wkt("POINT(0 0)"), target]).is_none());
+    }
+
+    /// RFC 7946 fixed GeoJSON at CRS84 and removed the `crs` member, so there is no honest
+    /// way to answer this. A document whose numbers are eastings and whose format says they
+    /// are degrees is worse than no answer.
+    #[test]
+    fn transform_will_not_write_a_projected_system_as_geojson() {
+        let gj = Literal::new_typed_literal(
+            r#"{"type":"Point","coordinates":[-3.181,51.4816]}"#.to_owned(),
+            GEO_JSON_LITERAL,
+        )
+        .into();
+        assert!(holos_transform(&[gj, crs_iri(crate::crs::EPSG_27700_URI)]).is_none());
+    }
+
+    /// The whole point of the exercise: two operands in different systems, one answer.
+    ///
+    /// Cardiff Castle on the British National Grid against Cardiff Castle in degrees is
+    /// zero metres apart. Before this, it was unbound.
+    #[test]
+    fn distance_works_across_two_reference_systems() {
+        let grid = crs_wkt(crate::crs::EPSG_27700_URI, "POINT(318086.06 176511.05)");
+        let degrees = wkt("POINT(-3.181 51.4816)");
+        let metres = Term::NamedNode(NamedNode::new_unchecked(format!("{OGC_UOM_PREFIX}metre")));
+        let out = geof_distance(&[grid, degrees, metres]).expect("a distance");
+        let Term::Literal(literal) = &out else {
+            panic!("expected a literal");
+        };
+        let apart: f64 = literal.value().parse().expect("a number");
+        assert!(apart < 1.0, "{apart} m apart, which is not the same castle");
+    }
+
+    /// `spargeo`'s 43 gain the same reach through `crs_aware`, and this is the check that
+    /// they do. `geof:envelope` is one of the 43 and is not reimplemented here, so it can
+    /// only pass by going through the wrapper.
+    #[test]
+    fn crs_aware_extends_a_spargeo_function_to_the_other_systems() {
+        use geo::algorithm::BoundingRect;
+        let envelope = spargeo_function("envelope").expect("spargeo has envelope");
+        let grid = crs_wkt(
+            crate::crs::EPSG_27700_URI,
+            "POLYGON((318000 176000, 318200 176000, 318200 176600, 318000 176600, 318000 176000))",
+        );
+
+        // Unwrapped, this is exactly the old behaviour: refused.
+        assert!(envelope(std::slice::from_ref(&grid)).is_none());
+
+        let out = crs_aware(envelope)(&[grid]).expect("wrapped, it answers");
+        let rect = geometry_of(&out).bounding_rect().expect("has extent");
+        assert!(
+            (rect.min().x + 3.1824).abs() < 0.001 && (rect.min().y - 51.4770).abs() < 0.001,
+            "envelope came back at {:?}",
+            rect.min()
+        );
+    }
+
+    /// The wrapper must leave everything else alone, including the arguments that are not
+    /// geometries at all and the CRS84 literals that are already where they need to be.
+    #[test]
+    fn crs_aware_passes_through_what_needs_no_rewriting() {
+        let args = [
+            wkt("POINT(0 0)"),
+            number(1.0),
+            units("metre"),
+            Term::NamedNode(NamedNode::new_unchecked("http://example.com/x")),
+        ];
+        assert!(to_crs84(&args).is_none());
+        // And a literal neither side can read is left for `spargeo` to refuse, rather than
+        // refused a step earlier where the error would be attributed to the wrong code.
+        let unreadable = [crs_wkt(
+            "http://www.opengis.net/def/crs/EPSG/0/2154",
+            "POINT(0 0)",
+        )];
+        assert!(to_crs84(&unreadable).is_none());
+    }
+
+    /// Transformation is all-or-nothing. Half a reprojected polygon is a shape that exists
+    /// nowhere, and returning it would be worse than returning nothing.
+    #[test]
+    fn a_geometry_with_one_untransformable_vertex_is_refused_whole() {
+        // A latitude at the pole has no Web Mercator coordinate; the other vertex has one.
+        let line = geo::LineString(vec![Coord { x: 0.0, y: 10.0 }, Coord { x: 0.0, y: 90.0 }]);
+        let geom = Geometry::LineString(line);
+        assert!(reproject(&geom, Crs::Crs84, Crs::WebMercator).is_none());
     }
 
     #[test]

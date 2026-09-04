@@ -1346,7 +1346,8 @@ here. §13 Q5's benchmark choice remains open.
 `spargeo` supplies **43** GeoSPARQL functions — the topological relations of all three
 families (Simple Features, Egenhofer, RCC8), plus distance, area, length, centroid, convex
 hull, envelope, the set operations and the GeoJSON accessor. HOLOS adds **2 more**,
-`geof:buffer` and `geof:boundary`, in `holos-engine`'s `geo_ext`: **45 in total**.
+`geof:buffer` and `geof:boundary`, in `holos-engine`'s `geo_ext`: **45 in total**, plus
+`holos:transform`, which GeoSPARQL has no equivalent of.
 
 > An earlier draft of this section listed buffer and boundary as though `spargeo` provided
 > them. It does not, and nothing had checked — the claim survived until a function probe ran
@@ -1387,10 +1388,11 @@ left exactly as produced.
 Wrapping `spargeo` rather than reimplementing keeps one implementation of the operation
 itself; only the coordinates are touched on the way out.
 
-The two additions match `spargeo`'s literal conventions exactly — CRS84 only, both
-`wktLiteral` and `geoJSONLiteral` accepted, output in whichever the arguments used, the same
-OGC unit IRIs — because a function that round-tripped literals differently from its
-neighbours would be worse than one that did not exist. `geof:buffer` computes a metric
+The two additions match `spargeo`'s literal conventions exactly — both `wktLiteral` and
+`geoJSONLiteral` accepted, output in whichever the arguments used, the same OGC unit IRIs —
+because a function that round-tripped literals differently from its neighbours would be
+worse than one that did not exist. One convention is deliberately not matched, and it is
+CRS84-only; see *Reference systems* below. `geof:buffer` computes a metric
 radius in a local equirectangular projection centred on the geometry, so a 100 km buffer
 spans about twice as many degrees of longitude at 60°N as at the equator, which is correct;
 it is **not** a geodesic buffer and should not be trusted over continental distances.
@@ -1399,6 +1401,61 @@ All 45 are registered on the evaluator, so they compose with the rest of SPARQL 
 everything below: a WKT literal is a typed literal that takes the dictionary path like any
 other, and **access policy applies to geometry** — denying `geo:asWKT` makes a spatial join
 find nothing, because §14's property does not get a geospatial exemption.
+
+### Reference systems, and the one thing GeoSPARQL leaves out
+
+GeoSPARQL puts the coordinate reference system inside the literal — `"<crs-uri> POINT(...)"`
+— and then defines no function for changing it. The assumption is that a dataset is
+internally consistent, which stops being true the moment two are joined. Ordnance Survey
+open data is EPSG:27700, a phone emits WGS 84, a tile server speaks EPSG:3857, and a query
+that wants all three had nothing to say. `spargeo` refuses any literal that is not CRS84, so
+until now so did this engine: British National Grid data was not merely awkward, it was
+unqueryable.
+
+`holos-engine`'s `crs` module transforms between four reference-system URIs:
+
+| URI | System | Axis order | Units |
+|---|---|---|---|
+| `OGC/1.3/CRS84` | WGS 84 geographic | longitude, latitude | degrees |
+| `EPSG/0/4326` | WGS 84 geographic | **latitude, longitude** | degrees |
+| `EPSG/0/27700` | OSGB36 / British National Grid | easting, northing | metres |
+| `EPSG/0/3857` | WGS 84 / Pseudo-Mercator | easting, northing | metres |
+
+CRS84 and EPSG:4326 are the same datum in opposite axis order, and GeoSPARQL says a literal
+uses the order its CRS defines. Reading one as the other does not shift a point, it
+relocates it — Cardiff to the Atlantic off Gabon — so the two are separate variants rather
+than one datum with a flag.
+
+**Every literal is moved to CRS84 on the way in**, which is the decision that makes the rest
+work. Two operands reach a function already in the same space, so
+`geof:distance(?grid_point, ?gps_point, uom:metre)` is an ordinary distance rather than a
+category error, and the 43 functions this project did not write gain the same reach: a
+wrapper rewrites their arguments before `spargeo` sees them, rather than 43 patches. Output
+is always CRS84; `holos:transform(?geom, ?crs)` converts it back, and is in this project's
+own namespace because putting a transform function in `geof:` would claim an OGC sanction it
+does not have.
+
+An **unrecognised** system is refused, not assumed to be CRS84. That is the whole safety
+argument: falling back would read an easting of 318086 metres as 318086 degrees of
+longitude, which does not fail — it produces a geometry that takes part in every comparison
+and appears in no answer it should.
+
+**The accuracy is stated because it is not exact.** WGS 84 and OSGB36 are different datums,
+so EPSG:27700 needs a datum shift as well as a projection. The projection is the Ordnance
+Survey series and reproduces their published worked example to a millimetre. The datum shift
+is their 7-parameter Helmert transformation, which needs no data files and is *not* exact:
+measured against OSTN15 — the official grid-shift definition — over 1330 points spanning
+Great Britain, the mean discrepancy is **2.0 m** and the worst **5.8 m**. Right for asking
+which ward a postcode is in; wrong for setting out a boundary. `PROJECTION_ACCURACY_METRES`
+names the figure rather than leaving a caller to discover it. EPSG:3857 has no such caveat —
+same datum, closed form, exact both ways.
+
+Nothing in the module reads the store, so none of it is reachable by policy and none of it
+can widen what a session can see; `tests/geo_crs.rs` asserts that rather than assuming it,
+because "policy is enforced at the scan" is only worth anything if every new operator is
+held to it. Both inverse transformations iterate, and both are driven by numbers a query
+supplies, so each loop has a fixed iteration cap and each entry point rejects a non-finite
+coordinate.
 
 Reused rather than rewritten, for the same reason as the rest of L0 (§4): conformance-heavy
 geometry code that already exists and is already tested.

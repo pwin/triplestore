@@ -556,7 +556,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "holos-bench"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "geo",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "holos-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "fs4",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "holos-conformance"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "holos-core",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "holos-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "oxrdf",
  "oxsdatatypes",
@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "holos-engine"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "flate2",
  "geo",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "holos-holon"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "holos-core",
  "holos-engine",
@@ -666,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "holos-python"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "holos-core",
  "holos-engine",
@@ -683,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "holos-security"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "holos-core",
  "holos-store",
@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "holos-server"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "fs4",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "holos-shacl"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "holos-core",
  "holos-shacl-engine",
@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "holos-shacl-engine"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -745,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "holos-stats"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "holos-core",
  "holos-engine",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "holos-store"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "holos-core",
  "oxrdf",

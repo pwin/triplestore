@@ -227,7 +227,7 @@ A yes means *this build evaluates it*, not that every edge case of the specifica
 | `triple term pattern` | 1.2 | ✅ yes | matches a triple term in object position; zero rows here is correct |
 | `VERSION` | 1.2 | ✅ yes |  |
 
-### GeoSPARQL (sample of 45)
+### GeoSPARQL (sample of 45, plus holos:transform)
 
 | Function | Spec | Status | Notes |
 |---|---|---|---|
@@ -242,6 +242,9 @@ A yes means *this build evaluates it*, not that every edge case of the specifica
 | `geof:area` | GeoSPARQL | ✅ yes |  |
 | `geof:union` | GeoSPARQL | ✅ yes |  |
 | `geof:asGeoJSON` | GeoSPARQL | ✅ yes |  |
+| `geof:getSRID` | GeoSPARQL | ✅ yes | **replaced**: reports the declared system, not CRS84 |
+| `reference systems` | GeoSPARQL | ✅ yes | **added by HOLOS**: EPSG:4326, 27700 and 3857, not CRS84 alone |
+| `holos:transform` | HOLOS | ✅ yes | **added by HOLOS**: GeoSPARQL has no transform |
 
 ### Extension libraries
 
@@ -302,7 +305,7 @@ A yes means *this build evaluates it*, not that every edge case of the specifica
 An unregistered function is **not** a parse error: it parses, and fails at
 evaluation. Adding more is small, because they are ordinary
 `fn(&[Term]) -> Option<Term>` entries on the evaluator, which is exactly how
-`geof:buffer` and `geof:boundary` were added.
+`geof:buffer`, `geof:boundary` and `holos:transform` were added.
 
 For `fn:`, the SPARQL built-ins cover the same ground under different names:
 `UCASE` for `fn:upper-case`, `REPLACE` for `fn:replace`, `REGEX` for
@@ -313,9 +316,21 @@ For `fn:`, the SPARQL built-ins cover the same ground under different names:
 
 ## The complete GeoSPARQL set
 
-45 functions: 43 from `spargeo`, plus `geof:buffer` and `geof:boundary`
-implemented here. The table above samples them; the full list is:
+All 45 `geof:` functions are registered — 43 from `spargeo`, plus `geof:buffer`
+and `geof:boundary` implemented here — and `holos:transform` alongside them.
+Six of the 43 are **replaced** rather than reused: `distance`, `getSRID` and the
+four set operations, where `spargeo`'s answer was narrower than the
+specification's. The table above samples them; the full list is:
 
-area - asGeoJSON - **boundary** - **buffer** - centroid - convexHull - coordinateDimension - difference - dimension - distance - ehContains - ehCoveredBy - ehCovers - ehDisjoint - ehEquals - ehInside - ehMeet - ehOverlap - envelope - getSRID - intersection - isEmpty - isSimple - length - perimeter - rcc8dc - rcc8ec - rcc8eq - rcc8ntpp - rcc8ntppi - rcc8po - rcc8tpp - rcc8tppi - relate - sfContains - sfCrosses - sfDisjoint - sfEquals - sfIntersects - sfOverlaps - sfTouches - sfWithin - spatialDimension - symDifference - union
+area - asGeoJSON - **boundary** - **buffer** - centroid - convexHull - coordinateDimension - **difference** - dimension - **distance** - ehContains - ehCoveredBy - ehCovers - ehDisjoint - ehEquals - ehInside - ehMeet - ehOverlap - envelope - **getSRID** - **intersection** - isEmpty - isSimple - length - perimeter - rcc8dc - rcc8ec - rcc8eq - rcc8ntpp - rcc8ntppi - rcc8po - rcc8tpp - rcc8tppi - relate - sfContains - sfCrosses - sfDisjoint - sfEquals - sfIntersects - sfOverlaps - sfTouches - sfWithin - spatialDimension - **symDifference** - **transform** - **union**
 
-Names in **bold** are the two added by HOLOS.
+Names in **bold** are implemented or replaced by HOLOS. `transform` is in the
+`holos:` namespace rather than `geof:`, because GeoSPARQL defines no transform
+function and putting one in the OGC namespace would claim a sanction it does not
+have.
+
+Every one of them reads geometry literals in **CRS84, EPSG:4326, EPSG:27700 and
+EPSG:3857**, converting to CRS84 on the way in, so data published on the British
+National Grid can be queried against data in degrees. An unrecognised reference
+system is refused rather than assumed to be CRS84. See `crates/holos-engine/src/crs.rs`
+for the transformations and the accuracy they are good for.

@@ -3,6 +3,50 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.5.0 — 2026-09-04
+
+The release that let two datasets in different coordinate reference systems be
+queried against each other.
+
+0.4.0 was about making a filter reach the index. This one is about geometry, and about a
+gap the specification leaves rather than one this project had: GeoSPARQL stores the
+reference system inside the literal and then provides no way to change it. Everything else
+here follows from closing that.
+
+### GeoSPARQL reads more than one coordinate reference system
+
+GeoSPARQL puts the reference system inside the literal and then defines no way to change it,
+on the assumption that a dataset is internally consistent — which stops being true the
+moment two are joined. `spargeo` refuses anything that is not CRS84, so until now so did
+this engine, and Ordnance Survey open data was not awkward to query but impossible.
+
+Four systems are now read — CRS84, EPSG:4326, EPSG:27700 and EPSG:3857 — and converted to
+CRS84 on the way in. That one decision is what makes a grid reference and a GPS fix
+comparable: two operands reach a function already in the same space, so
+`geof:distance(?grid, ?gps, uom:metre)` is an ordinary distance. The 43 functions borrowed
+from `spargeo` gain it through a wrapper on their arguments rather than 43 patches, and the
+spatial index gains it because it decodes literals through the same path a query does.
+
+Two functions are new: `holos:transform`, which converts an answer back out — in this
+project's namespace, because a transform function in `geof:` would claim an OGC sanction it
+does not have — and a replacement `geof:getSRID`, since `spargeo`'s reports CRS84
+unconditionally, which was true when CRS84 was all it could parse.
+
+**An unrecognised system is refused rather than assumed to be CRS84**, which is the whole
+safety argument. Falling back would read an easting of 318086 metres as 318086 degrees of
+longitude: no error, no empty result, just a geometry that joins in every comparison and
+appears in no answer it belongs in.
+
+**The accuracy is stated because it is not exact.** The British National Grid projection is
+the Ordnance Survey series and reproduces their worked example to a millimetre; the datum
+shift is their 7-parameter Helmert, which needs no data files and is **2.0 m mean, 5.8 m
+worst** against OSTN15 measured over 1330 points across Great Britain. Every forward
+transformation is checked against PROJ to a millimetre.
+
+`geof:distance`, `geof:buffer` and `geof:envelope` were already complete and already worked
+in metres; what was missing was the ability to point them at data that had not been
+published in degrees.
+
 ## 0.4.0 — 2026-09-03
 
 The release that made a filter reach the index, and finished P1.

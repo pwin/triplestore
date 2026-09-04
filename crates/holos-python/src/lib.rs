@@ -865,7 +865,10 @@ fn has_rocksdb() -> bool {
     cfg!(feature = "rocksdb")
 }
 
-/// The GeoSPARQL function IRIs this build registers.
+/// The geometry function IRIs this build registers.
+///
+/// Mostly `geof:`, plus `holos:transform`, which is here because GeoSPARQL defines no
+/// transform function and one in the OGC namespace would claim a sanction it does not have.
 #[pyfunction]
 fn geosparql_functions() -> Vec<String> {
     let mut out: Vec<String> = spargeo_names();
@@ -876,9 +879,10 @@ fn geosparql_functions() -> Vec<String> {
     );
     out.sort();
     // Several of `geo_ext`'s entries *replace* one of `spargeo`'s rather than adding to
-    // them -- the four set operations and `geof:distance` -- so concatenating listed each of
-    // those twice. The evaluator itself keeps one registration per IRI, so a list that
-    // showed duplicates was describing something that does not exist.
+    // them -- the four set operations, `geof:distance` and `geof:getSRID` -- so
+    // concatenating listed each of those twice. The evaluator itself keeps one registration
+    // per IRI, so a list that showed duplicates was describing something that does not
+    // exist.
     out.dedup();
     out
 }
