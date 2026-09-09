@@ -18,9 +18,19 @@
 //! A writer excludes readers for the update's duration, which is what makes the update's
 //! failure-atomicity also behave as isolation in this deployment.
 
+mod alloc;
 mod gsp;
 mod http;
 mod ui;
+
+/// The counting allocator, so a query's appetite can be seen before it kills the process.
+///
+/// This is the only `unsafe` in the workspace: every library crate carries
+/// `#![forbid(unsafe_code)]`, and a `GlobalAlloc` cannot be written under it. Keeping the
+/// implementation here rather than relaxing the lint in a library confines it to one file
+/// of one binary, which is where a reviewer can find all of it at once.
+#[global_allocator]
+static ALLOCATOR: alloc::Counting<std::alloc::System> = alloc::Counting(std::alloc::System);
 
 use anyhow::{Context, Result};
 use holos_engine::{update as sparql_update, Engine, QueryOptions};
@@ -63,6 +73,12 @@ SERVER
                              Enforced while a query reads or streams rows; a query blocked
                              inside one in-memory step is not interruptible. See
                              OPERATIONS.md.
+    --max-query-memory <GiB> Cancel a query that allocates more than this. Default 8.
+                             0 disables the ceiling. Measures what the query adds, not the
+                             process total, so a large in-memory store does not count
+                             against it. Without a ceiling, a SELECT DISTINCT or
+                             COUNT(DISTINCT *) over a large store can exhaust the machine
+                             and abort the server, taking every other request with it.
     --read-only              Answer 403 to /update and to every writing Graph Store
                              Protocol verb. The store is still opened writable, so a loader
                              can use it; this refuses writes over HTTP only.
@@ -108,6 +124,8 @@ POLICY
 struct Config {
     listen: String,
     timeout: Option<Duration>,
+    /// Bytes one query may allocate before it is cancelled. `None` disables the ceiling.
+    max_query_memory: Option<usize>,
     read_only: bool,
     reorder: bool,
     gsp_base: Option<String>,
@@ -138,6 +156,14 @@ impl Default for Config {
         Self {
             listen: "127.0.0.1:7878".to_owned(),
             timeout: None,
+            // A query that needs more than this is almost always an accident — a
+            // `SELECT DISTINCT` or `COUNT(DISTINCT *)` over a whole store, an unbounded
+            // `ORDER BY` — and the accident it causes without a ceiling is not a failed
+            // request but a dead process, taking every other client's work with it. The
+            // figure is deliberately generous and deliberately not derived from the
+            // machine's RAM, which this server does not read: it is a backstop against
+            // absurdity, not a scheduler. `--max-query-memory 0` removes it.
+            max_query_memory: Some(8 * 1024 * 1024 * 1024),
             read_only: false,
             reorder: false,
             gsp_base: None,
@@ -245,6 +271,10 @@ impl State {
 }
 
 fn main() -> Result<()> {
+    // The allocator above is installed by the attribute; this tells the engine the counter
+    // is live, so a memory ceiling is enforced rather than silently inert.
+    holos_engine::memory::mark_tracking();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
@@ -292,6 +322,18 @@ fn main() -> Result<()> {
         eprintln!("  console  http://{listen}/");
     }
     eprintln!("  query    http://{listen}/query");
+    match state.config.max_query_memory {
+        Some(limit) => eprintln!(
+            "  memory   one query may allocate {} before it is cancelled              (--max-query-memory GiB, 0 to disable)",
+            holos_engine::memory::human(limit)
+        ),
+        // Worth saying out loud rather than leaving to the flag reference: without a
+        // ceiling a single query can abort the process and take every other client's
+        // in-flight work with it.
+        None => eprintln!(
+            "  memory   NO ceiling; one query can exhaust the machine and abort the server"
+        ),
+    }
     if !state.config.trust_forwarded {
         eprintln!(
             "  identity forwarded headers are NOT trusted; every request is anonymous \
@@ -1067,6 +1109,9 @@ fn query_options(
     if let Some(timeout) = state.config.timeout {
         options = options.with_timeout(timeout);
     }
+    if let Some(limit) = state.config.max_query_memory {
+        options = options.with_memory_limit(limit);
+    }
     if let Some(stats) = state.statistics() {
         options = options.reordering(stats);
     }
@@ -1370,6 +1415,19 @@ fn parse_args(args: &[String]) -> Result<Config> {
                 let seconds: f64 = value(&mut i)?.parse()?;
                 c.timeout = if seconds > 0.0 {
                     Some(Duration::from_secs_f64(seconds))
+                } else {
+                    None
+                };
+            }
+            "--max-query-memory" => {
+                let gigabytes: f64 = value(&mut i)?.parse()?;
+                c.max_query_memory = if gigabytes > 0.0 {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "a byte count from a gigabyte figure, bounded by the parse"
+                    )]
+                    Some((gigabytes * 1024.0 * 1024.0 * 1024.0) as usize)
                 } else {
                     None
                 };
