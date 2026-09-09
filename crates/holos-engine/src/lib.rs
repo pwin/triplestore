@@ -24,6 +24,7 @@ pub mod crs;
 pub mod entailment;
 pub mod functions;
 pub mod geo_ext;
+pub mod memory;
 pub mod options;
 pub mod range;
 pub mod service;
@@ -389,7 +390,7 @@ impl Engine {
         // fire. It is started before the fast path because the fast path is subject to it —
         // an operator that skips the evaluator also skips the evaluator's deadline checks
         // unless it makes its own.
-        let deadline = options.timeout.map(Deadline::start);
+        let deadline = Deadline::guard(options.timeout, options.memory_limit);
         let token = deadline.as_ref().map(Deadline::token);
 
         // The index nested-loop fast path, for the shapes that suffer most without one.
@@ -551,7 +552,7 @@ fn guard_with_deadline<'a>(results: QueryResults<'a>, deadline: Deadline) -> Que
                 variables,
                 solutions.map(move |solution| {
                     if deadline.expired() {
-                        return Err(spareval::QueryEvaluationError::Cancelled);
+                        return Err(deadline.cancellation());
                     }
                     solution
                 }),
@@ -560,7 +561,7 @@ fn guard_with_deadline<'a>(results: QueryResults<'a>, deadline: Deadline) -> Que
         QueryResults::Graph(triples) => {
             QueryResults::Graph(spareval::QueryTripleIter::new(triples.map(move |triple| {
                 if deadline.expired() {
-                    return Err(spareval::QueryEvaluationError::Cancelled);
+                    return Err(deadline.cancellation());
                 }
                 triple
             })))

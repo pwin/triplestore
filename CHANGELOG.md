@@ -3,6 +3,78 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.6.0 — 2026-09-09
+
+The release that stopped one query killing the server, and made a bulk load's
+dictionary as cheap to write as its indexes.
+
+Both came out of running HOLOS against real data rather than the synthetic set: a 32 GB
+Turtle file of generated people, and a 32 GB machine that a single `COUNT(DISTINCT *)`
+took down.
+
+### A query can no longer abort the process
+
+`SELECT (COUNT(DISTINCT *) AS ?n) WHERE { ?s ?p ?o }` reads like a counting query.
+`spareval` answers it by holding every distinct solution in a hash set, so on a large store
+it asks for tens of gigabytes, and the allocation that finally fails calls
+`handle_alloc_error` — which **aborts the process**, taking the listener, every other
+client's in-flight query and any write in progress with it. There is no catching it.
+
+The failing request was for 25 GiB, and the size named the structure to the byte: 2^30
+buckets of a 24-byte `InternalTuple` plus a control byte each. Only `DISTINCT` and
+`COUNT(DISTINCT *)` hold a set of those — plain `COUNT(*)` is a bare `u64` counter and
+would have streamed in constant memory.
+
+`holos-server` now installs a counting allocator, and the deadline watchdog samples it and
+cancels through the same token a timeout uses. **`--max-query-memory`, default 8 GiB.**
+Cancellation is checked once per quad, so a query filling a hash set is stopped between
+rows while the set is still small enough to free.
+
+Every library crate keeps `#![forbid(unsafe_code)]`; the twenty lines that need `unsafe`
+live in the binary.
+
+Two limits are documented rather than hidden. The counter is **process-wide**, so it cannot
+attribute a byte to a query — a breach must persist across three samples before it cancels,
+and the ceiling is a backstop against one runaway query rather than a per-query quota. And
+a cancelled aggregate does not yield one row: `spareval` forwards one error per remaining
+input row.
+
+### A bulk load's dictionary is ingested, not batched
+
+The nine index families have been handed to `IngestExternalFile` as sorted files since
+0.3.0. The two dictionary families never were, so every interned term paid for a memtable
+write, a flush, and the compactions that followed.
+
+On data with high term cardinality that is most of the load. The generated person dataset
+has **900,000 distinct terms per 3M triples**, against 200,000 per 753k in the synthetic
+benchmark, and the shares invert: dictionary 76%, parse 15%, index writes 9%. The
+dictionary tracks *distinct terms*, not triples — two files of equal size and quad count
+differing only in cardinality took 2.1 s and 12.2 s, a **6×** spread.
+
+`dictsort.rs` is `sort.rs` for variable-width rows: length-prefixed runs, a byte budget, a
+k-way merge, one SST per family. It **combines** rather than deduplicates, because past 512
+bytes a `str2id` key is a hash and two colliding terms share a row whose value is the list
+of both their ids. Dropping one would lose a term permanently. Merging by key also fixes a
+hazard the batch path had, where a candidate read could not see rows the same load had
+buffered.
+
+Measured on 3M quads with 900k distinct terms: **16.33 s to 12.37 s**. The ratio is inside
+this machine's noise floor and is not the evidence — the non-overlapping ranges are. Every
+run of the new build landed in 11.68–12.61 s, every run of the old in 12.62–16.33 s.
+
+### Four optimisations that were tried and measured as worthless
+
+Recorded in `loadprofile` because each looked obviously right beforehand: a bloom filter on
+`str2id` at high cardinality (**consistently slower** — a load *writes* that family, so
+filter blocks are rebuilt on every flush); deriving the `str2id` key only after the caches
+miss (0.99×); the flush in `end_bulk_load` (0.47 s, not the cost); and pausing dictionary
+auto-compaction during a load (1.09×, and it trades write amplification for read).
+
+`loadprofile` itself earned two fixes. It hardcoded N-Triples, so pointing it at a Turtle
+file measured a parse that produced nothing. And it timed `end_bulk_load` inside the
+interning phase — a conflation that sent an earlier round of optimisation after caches and
+allocations that were never the problem.
+
 ## 0.5.0 — 2026-09-04
 
 The release that let two datasets in different coordinate reference systems be

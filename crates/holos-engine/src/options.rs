@@ -62,6 +62,13 @@ pub struct QueryOptions {
     /// token itself and runs under a row budget besides. It has to — it skips the evaluator,
     /// and with it both layers above.
     pub timeout: Option<Duration>,
+    /// Bytes this query may allocate beyond what was live when it started, if capped.
+    ///
+    /// Separate from [`Self::timeout`] because they fail differently: a slow query is
+    /// eventually right, and a query asking for more memory than the machine has is never
+    /// going to be. Without a cap the second one aborts the process rather than failing the
+    /// request — see [`crate::memory`].
+    pub memory_limit: Option<usize>,
 
     /// Collect the query plan, with per-operator statistics.
     pub explain: bool,
@@ -129,6 +136,18 @@ impl QueryOptions {
         self
     }
 
+    /// Caps how much memory this query may allocate before it is cancelled.
+    ///
+    /// The cap is on the *increase* since the query started, not on the process total, so a
+    /// server holding a large dataset in memory does not refuse every query it is asked.
+    /// Enforcing it needs [`crate::memory::Tracking`] installed as the global allocator; a
+    /// cap set without one is inert, which [`crate::memory::tracking`] reports.
+    #[must_use]
+    pub fn with_memory_limit(mut self, bytes: usize) -> Self {
+        self.memory_limit = Some(bytes);
+        self
+    }
+
     /// Asks for the plan alongside the results.
     #[must_use]
     pub fn explaining(mut self) -> Self {
@@ -157,7 +176,26 @@ impl QueryOptions {
     }
 }
 
-/// A running timeout.
+/// Why a guard cancelled the query it was watching.
+///
+/// The two are worth telling apart in the answer a client gets: a timeout says *try a
+/// smaller question or ask for longer*, and a memory trip says *this shape of query cannot
+/// be answered over this much data at all*. Reporting both as "cancelled" leaves the
+/// person guessing which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trip {
+    /// The query ran past its deadline.
+    Timeout,
+    /// The query allocated past its ceiling.
+    Memory {
+        /// Bytes allocated beyond the baseline.
+        used: usize,
+        /// The ceiling passed.
+        limit: usize,
+    },
+}
+
+/// A running guard over one query: a deadline, a memory ceiling, or both.
 ///
 /// Holding one keeps the watchdog alive; dropping it stops the watchdog without cancelling.
 /// That distinction matters — a query that finishes early must not leave a thread sleeping
@@ -165,6 +203,11 @@ impl QueryOptions {
 pub struct Deadline {
     token: CancellationToken,
     done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// What tripped, written by the watchdog and read by the query thread.
+    ///
+    /// A mutex rather than an atomic because the memory case carries two numbers, and the
+    /// contention is one write against one read at the end of a query.
+    trip: std::sync::Arc<std::sync::Mutex<Option<Trip>>>,
 }
 
 impl std::fmt::Debug for Deadline {
@@ -178,34 +221,130 @@ impl std::fmt::Debug for Deadline {
 }
 
 impl Deadline {
-    /// Starts a watchdog that cancels `token` after `timeout`.
+    /// Starts a watchdog that cancels after `timeout`.
     #[must_use]
     pub fn start(timeout: Duration) -> Self {
+        // Safe to unwrap: `guard` returns `None` only when asked to watch nothing.
+        Self::guard(Some(timeout), None).expect("a timeout is something to watch")
+    }
+
+    /// Starts a watchdog over whichever limits were given, or `None` if neither was.
+    ///
+    /// One thread watches both, because they are the same job — sample, compare, cancel —
+    /// and two threads per query to check two numbers would cost more than the numbers.
+    #[must_use]
+    pub fn guard(timeout: Option<Duration>, memory_limit: Option<usize>) -> Option<Self> {
+        if timeout.is_none() && memory_limit.is_none() {
+            return None;
+        }
         let token = CancellationToken::new();
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let trip = std::sync::Arc::new(std::sync::Mutex::new(None));
         let watch_token = token.clone();
         let watch_done = std::sync::Arc::clone(&done);
+        let watch_trip = std::sync::Arc::clone(&trip);
+
+        // What was already live when the query started. The ceiling is on what this query
+        // adds, so a server holding its dataset in memory is not permanently over budget.
+        let baseline = crate::memory::live_bytes();
+
+        // How many consecutive samples must be over the ceiling before the query is
+        // cancelled.
+        //
+        // One is not enough, and the reason is the counter's one real weakness: it is
+        // process-wide, so it cannot tell this query's bytes from the query on the next
+        // thread. A neighbour allocating a large store makes *every* concurrent query look
+        // over budget for as long as that allocation lives, and cancelling an innocent
+        // query is a worse failure than missing a greedy one — the greedy one is caught on
+        // its next sample anyway.
+        //
+        // Requiring the breach to persist across three samples asks for it to be *this*
+        // query's doing: a neighbour's spike is a step that this query's baseline did not
+        // see, but it is also one that does not keep growing on this thread, and a
+        // runaway's does. Three ticks is 30 ms, which against a hash table doubling toward
+        // gigabytes is nothing.
+        const SUSTAINED_SAMPLES: u32 = 3;
+        let mut over = 0_u32;
 
         std::thread::spawn(move || {
             // Wake periodically rather than sleeping the whole timeout, so a query that
             // finishes in a millisecond does not leave a thread parked for the full
             // duration. The granularity is deliberately coarse: cancellation is a backstop,
             // not a scheduler.
-            let tick = Duration::from_millis(50).min(timeout);
-            let deadline = std::time::Instant::now() + timeout;
+            //
+            // The tick is also the resolution of the memory ceiling, and that is the
+            // number that decides whether this works at all: a hash table doubling toward
+            // gigabytes spends far longer than a tick on each rehash, so its growth is
+            // sampled many times over before the allocation that would have failed. What
+            // no sampling interval can catch is one enormous allocation from a standing
+            // start — for that, nothing short of a fallible allocator would do.
+            //
+            // 50 ms for a deadline, 10 ms when memory is being watched. Memory is the
+            // one that can go from comfortable to fatal between two samples, and the extra
+            // wakeups cost one thread a few microseconds each.
+            let coarsest = if memory_limit.is_some() {
+                Duration::from_millis(10)
+            } else {
+                Duration::from_millis(50)
+            };
+            let tick = coarsest.min(timeout.unwrap_or(coarsest));
+            let deadline = timeout.map(|t| std::time::Instant::now() + t);
             loop {
                 std::thread::sleep(tick);
                 if watch_done.load(std::sync::atomic::Ordering::Relaxed) {
                     return;
                 }
-                if std::time::Instant::now() >= deadline {
+                let reason = if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    Some(Trip::Timeout)
+                } else if let Some(limit) = memory_limit {
+                    let used = crate::memory::live_bytes().saturating_sub(baseline);
+                    if used > limit {
+                        over += 1;
+                    } else {
+                        // Back under: whatever it was, it was not this query growing.
+                        over = 0;
+                    }
+                    (over >= SUSTAINED_SAMPLES).then_some(Trip::Memory { used, limit })
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    // Recorded before the token is cancelled, so a query thread that sees
+                    // cancellation always finds the reason already there.
+                    if let Ok(mut slot) = watch_trip.lock() {
+                        *slot = Some(reason);
+                    }
                     watch_token.cancel();
                     return;
                 }
             }
         });
 
-        Self { token, done }
+        Some(Self { token, done, trip })
+    }
+
+    /// Why the guard fired, or `None` if it has not.
+    #[must_use]
+    pub fn trip(&self) -> Option<Trip> {
+        self.trip.lock().ok().and_then(|slot| *slot)
+    }
+
+    /// The error a tripped guard should surface, ready to hand to `spareval`.
+    ///
+    /// A timeout keeps `Cancelled`, which is what it has always been and what clients
+    /// already recognise. A memory trip carries its numbers instead, because "cancelled"
+    /// would send someone looking for a timeout that did not happen.
+    #[must_use]
+    pub fn cancellation(&self) -> spareval::QueryEvaluationError {
+        match self.trip() {
+            Some(Trip::Memory { used, limit }) => {
+                spareval::QueryEvaluationError::Dataset(Box::new(crate::memory::LimitExceeded {
+                    used,
+                    limit,
+                }))
+            }
+            _ => spareval::QueryEvaluationError::Cancelled,
+        }
     }
 
     /// The token to hand the evaluator.

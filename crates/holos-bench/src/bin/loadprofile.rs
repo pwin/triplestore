@@ -35,6 +35,63 @@
 //!   enough to live in the block cache and phase 8 is unchanged. Reverted rather than kept
 //!   on the theory. Worth retrying where the dictionary does not fit in memory.
 //!
+//! # What it found on data with high term cardinality
+//!
+//! The profile above is of a synthetic set with heavy term reuse — 200k distinct terms for
+//! 753k quads. Run against a generated person dataset with **900k distinct terms per 3M
+//! triples**, the shares inverted:
+//!
+//! ```text
+//! parse                          3.7 s   15%
+//! dictionary                    19.8 s   76%
+//! index writes                   2.5 s    9%
+//! ```
+//!
+//! The one reproducible, large signal is that **the dictionary tracks distinct terms, not
+//! triples**. Two files of 3M quads and equal size, differing only in cardinality:
+//!
+//! ```text
+//! 500 distinct terms       dictionary layer   2.1 s
+//! 900,000 distinct terms   dictionary layer  12.2 s      6x
+//! ```
+//!
+//! A cache hit costs about 230 ns; a genuinely new term costs about 19 µs. Of that, the
+//! `str2id` read is ~3.7 µs — and **~8 s of the remaining cost is buffering and writing the
+//! dictionary rows**, measured by stubbing those two `Pending::Put`s out: 21.3 s against
+//! 13.1 s, **1.62×**. The fix that phase 7 already had is the one this wants:
+//! `SstFileWriter` + `IngestExternalFile` for `str2id` and `id2str` instead of a
+//! `WriteBatch`. It needs the spill-and-merge treatment `sort.rs` gives the indexes, over
+//! variable-width keys rather than fixed, or a load whose dictionary exceeds memory cannot
+//! use it.
+//!
+//! # Four things that were tried and are not worth retrying
+//!
+//! Recorded because each looked obviously right beforehand, and measuring is the only thing
+//! that separated them from the one above.
+//!
+//! - **A bloom filter on `str2id`, at high cardinality.** The note above invited this at a
+//!   scale where the family does not fit in cache. Tried there: **consistently slower**,
+//!   three rounds out of three. A bulk load *writes* this family continuously, so filter
+//!   blocks are rebuilt on every flush and compaction, and that lands on the write path.
+//! - **Deriving the `str2id` key only after the caches miss**, rather than always. Strictly
+//!   less work, and 0.99× — one small allocation avoided 8M times is worth ~0.3 s against a
+//!   15 s phase, which is under the noise.
+//! - **The flush in `end_bulk_load`.** Suspected of hiding the cost; it is **0.47 s**. The
+//!   dictionary is written incrementally during the load, in `BULK_BATCH_OPS` batches.
+//! - **Pausing auto-compaction on the dictionary families during a bulk load**, which
+//!   `start_bulk` does for the nine index families and not for these two. 1.09×, inside the
+//!   noise — and there is a reason it is not free: `resolve` *reads* `str2id` throughout the
+//!   load, so suppressing compaction trades write amplification for read amplification.
+//!
+//! # Reading these numbers
+//!
+//! This machine varies by ±40% on the dictionary phase — 12.6 to 22.1 s across runs of an
+//! identical build — so nothing below about 1.5× is resolvable here without many rounds.
+//! Two separate A/B attempts were contaminated before that was understood, and both times
+//! the tell was the **parse** phase differing between builds, which no change to the
+//! dictionary or the index can affect. Alternate which build runs first and check parse
+//! before believing anything else in the table.
+//!
 //! ```text
 //! cargo run --release -p holos-bench --bin loadprofile [file.nt] [bulk] [spill]
 //! ```
@@ -55,6 +112,22 @@ use holos_store::RocksStorage;
 
 fn open(path: &str) -> std::io::Result<BufReader<std::fs::File>> {
     Ok(BufReader::new(std::fs::File::open(path)?))
+}
+
+/// The serialisation a path names, by extension.
+///
+/// Hardcoded to N-Triples until a 32 GB Turtle file needed profiling, at which point the
+/// tool was measuring a parse that produced nothing. Inferring costs one match and lets the
+/// profile be run against whatever a user actually has.
+fn format_of(path: &str) -> RdfFormat {
+    match path.rsplit('.').next().unwrap_or("") {
+        "ttl" => RdfFormat::Turtle,
+        "trig" => RdfFormat::TriG,
+        "nq" => RdfFormat::NQuads,
+        "rdf" | "xml" => RdfFormat::RdfXml,
+        "n3" => RdfFormat::N3,
+        _ => RdfFormat::NTriples,
+    }
 }
 
 fn report(label: &str, quads: u64, elapsed: Duration, previous: Option<Duration>) {
@@ -78,7 +151,7 @@ fn report(label: &str, quads: u64, elapsed: Duration, previous: Option<Duration>
 fn parse_only(path: &str) -> Result<(u64, Duration), Box<dyn std::error::Error>> {
     let started = Instant::now();
     let mut n = 0;
-    for quad in RdfParser::from_format(RdfFormat::NTriples)
+    for quad in RdfParser::from_format(format_of(path))
         .rename_blank_nodes()
         .for_reader(open(path)?)
     {
@@ -94,25 +167,48 @@ fn parse_only(path: &str) -> Result<(u64, Duration), Box<dyn std::error::Error>>
 /// `WriteBatch`, so the phase measures the write path rather than the dictionary; inside it
 /// the writes are buffered exactly as they are during a real load, which is the number the
 /// index phase has to be subtracted from.
+///
+/// # Two numbers, not one
+///
+/// Returns interning and flushing separately, and the split is the point. A bulk load
+/// buffers every dictionary row and writes them all in `end_bulk_load`, so timing the whole
+/// function attributes that write to "the dictionary" — which reads as though interning a
+/// term were expensive, when interning is a hash insert and the cost is a `WriteBatch` of a
+/// million rows at the end. Reported as one number, this phase sent an earlier round of
+/// optimisation after caches and allocations that were never the problem.
 fn parse_and_encode(
     path: &str,
     mut store: Store,
     bulk: bool,
-) -> Result<Duration, Box<dyn std::error::Error>> {
+) -> Result<(Duration, Duration), Box<dyn std::error::Error>> {
     let started = Instant::now();
     if bulk {
         store.begin_bulk_load()?;
     }
-    for quad in RdfParser::from_format(RdfFormat::NTriples)
+    for quad in RdfParser::from_format(format_of(path))
         .rename_blank_nodes()
         .for_reader(open(path)?)
     {
         store.encode_quad(quad?.as_ref())?;
     }
+    let interned = started.elapsed();
+    let flushed = Instant::now();
     if bulk {
         store.end_bulk_load()?;
     }
-    Ok(started.elapsed())
+    Ok((interned, flushed.elapsed()))
+}
+
+/// One line for the flush, so the write is not read as part of the interning above it.
+fn report_flush(quads: u64, flush: Duration) {
+    if flush.as_secs_f64() < 0.001 {
+        return;
+    }
+    println!(
+        "     of which dictionary flush           {:>8.2} s   {:>7.0} ns/quad",
+        flush.as_secs_f64(),
+        flush.as_nanos() as f64 / quads as f64
+    );
 }
 
 /// A store for the persistent phases, with the spill threshold a third argument can set.
@@ -139,7 +235,7 @@ fn full_load(
         store.begin_bulk_load()?;
     }
     let mut engine = Engine::with_store(store);
-    engine.bulk_load(open(path)?, RdfFormat::NTriples, None)?;
+    engine.bulk_load(open(path)?, format_of(path), None)?;
     if bulk {
         engine.store_mut().end_bulk_load()?;
     } else {
@@ -198,13 +294,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "rocksdb")]
     if only_bulk {
-        let bulk_encode = parse_and_encode(&path, rocks_at(scratch("bulkencode")?)?, true)?;
+        let (interned, flush) = parse_and_encode(&path, rocks_at(scratch("bulkencode")?)?, true)?;
+        // The cumulative figure stays interning *plus* flush, so the index phase below
+        // still subtracts the whole of this one; the breakdown is reported beneath it.
+        let bulk_encode = interned + flush;
         report(
             "6. + dictionary, bulk mode",
             quads,
             bulk_encode,
             Some(parse),
         );
+        report_flush(quads, flush);
         let rocks_bulk = full_load(&path, rocks_at(scratch("bulk")?)?, true)?;
         report(
             "7. + index, bulk mode",
@@ -215,7 +315,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let memory_encode = parse_and_encode(&path, Store::new(), false)?;
+    let (memory_encode, _) = parse_and_encode(&path, Store::new(), false)?;
     report(
         "2. + dictionary, in memory",
         quads,
@@ -233,7 +333,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "rocksdb")]
     {
-        let rocks_encode = parse_and_encode(
+        let (rocks_encode, _) = parse_and_encode(
             &path,
             Store::with_storage(RocksStorage::open(scratch("encode")?)?),
             false,
@@ -257,17 +357,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(rocks_encode),
         );
 
-        let bulk_encode = parse_and_encode(
+        let (interned, flush) = parse_and_encode(
             &path,
             Store::with_storage(RocksStorage::open(scratch("bulkencode")?)?),
             true,
         )?;
+        let bulk_encode = interned + flush;
         report(
             "6. + dictionary, on RocksDB, bulk mode",
             quads,
             bulk_encode,
             Some(parse),
         );
+        report_flush(quads, flush);
 
         let rocks_bulk = full_load(
             &path,

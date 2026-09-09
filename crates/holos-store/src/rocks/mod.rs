@@ -17,6 +17,7 @@
 //! first.
 
 mod codec;
+mod dictsort;
 mod sort;
 
 use crate::error::{Result, StorageError};
@@ -92,6 +93,8 @@ pub struct RocksStorage {
     path: std::path::PathBuf,
     /// How many quads a load may hold before it spills them to a sorted run.
     ingest_limit: usize,
+    /// How many bytes of dictionary rows a load may hold before it spills a sorted run.
+    dict_spill_bytes: usize,
     /// How many times the current or most recent bulk load spilled.
     spills: usize,
 }
@@ -193,6 +196,33 @@ enum Pending {
 /// written to disk and read back. Smaller is friendlier to a machine doing other things.
 const SPILL_QUADS: usize = 4 << 20;
 
+/// The two dictionary families, each accumulating sorted runs.
+///
+/// Kept apart rather than in one accumulator because they are ingested into different
+/// column families, and an `SstFileWriter` writes one file for one family.
+struct DictBuffers {
+    str2id: dictsort::DictRuns,
+    id2str: dictsort::DictRuns,
+}
+
+impl DictBuffers {
+    fn new(dir: &std::path::Path, budget: usize) -> Self {
+        Self {
+            str2id: dictsort::DictRuns::new(dir, STR2ID, budget),
+            id2str: dictsort::DictRuns::new(dir, ID2STR, budget),
+        }
+    }
+
+    /// The accumulator for a family, or `None` if the family is not a dictionary one.
+    fn family(&mut self, name: &str) -> Option<&mut dictsort::DictRuns> {
+        match name {
+            STR2ID => Some(&mut self.str2id),
+            ID2STR => Some(&mut self.id2str),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct BulkState {
     pending: Vec<Pending>,
@@ -213,6 +243,13 @@ struct BulkState {
     graphs: FxHashSet<TermId>,
     /// Whether the sorted-ingestion path is on.
     sst: bool,
+    /// Dictionary rows held for sorted ingestion rather than written as a batch.
+    ///
+    /// The same trade the index orders make, and for the same reason: `loadprofile` puts
+    /// the dictionary at three quarters of a bulk load on data with high term cardinality,
+    /// and most of that is these rows going through a `WriteBatch`. `None` when the load is
+    /// not using the sorted path, in which case they go back to `pending`.
+    dict: Option<DictBuffers>,
     /// Sorted runs already written, per index order, once the load outgrew its buffer.
     ///
     /// Empty for any load that fits in one buffer, which is the common case: the merge then
@@ -322,6 +359,7 @@ impl RocksStorage {
             scope: None,
             path,
             ingest_limit: SPILL_QUADS,
+            dict_spill_bytes: dictsort::SPILL_BYTES,
             spills: 0,
         })
     }
@@ -352,6 +390,16 @@ impl RocksStorage {
         self.ingest_limit = quads;
     }
 
+    /// How many bytes of dictionary rows a load holds before spilling a sorted run.
+    ///
+    /// The counterpart to [`Self::set_ingest_limit`] for the other half of a load, and it
+    /// exists for the same two reasons: an operator with less memory than the default
+    /// assumes, and a test that needs to reach the spill-and-merge path without interning
+    /// a quarter of a gigabyte of terms to get there.
+    pub fn set_dict_spill_bytes(&mut self, bytes: usize) {
+        self.dict_spill_bytes = bytes;
+    }
+
     /// Starts a bulk load: writes are buffered into large batches and the write-ahead
     /// log is skipped.
     ///
@@ -359,16 +407,19 @@ impl RocksStorage {
     /// discarded — that is the trade being made for the speed. `DESIGN.md` §6.1 wants
     /// `SstFileWriter` ingestion here eventually, which is faster still *and* keeps crash
     /// safety, at the cost of needing its input sorted.
-    fn start_bulk(&mut self) {
+    fn start_bulk(&mut self) -> Result<()> {
         self.spills = 0;
+        let dir = self.ingest_dir()?;
         self.bulk = Some(BulkState {
             sst: true,
+            dict: Some(DictBuffers::new(&dir, self.dict_spill_bytes)),
             ..BulkState::default()
         });
         // Auto-compaction during a load is wasted work: it rewrites levels that the rest
         // of the load is about to invalidate. Turned off here and re-enabled, followed by
         // one deliberate compaction, when the load ends.
         self.set_compactions(false);
+        Ok(())
     }
 
     /// Enables or disables automatic compaction on every index family.
@@ -393,10 +444,20 @@ impl RocksStorage {
                 graphs,
                 sst,
                 spilled,
+                dict,
                 ..
             } = state;
             // The dictionary first: the index files name term ids, and a store holding an id
             // it cannot decode is corrupt in a way no later step would notice.
+            if let Some(dict) = dict {
+                let dir = self.ingest_dir()?;
+                for (family, runs) in [(STR2ID, dict.str2id), (ID2STR, dict.id2str)] {
+                    if runs.is_empty() {
+                        continue;
+                    }
+                    self.write_and_ingest_dict(&dir, family, runs.merge()?)?;
+                }
+            }
             self.write_pending(pending, true)?;
             if sst && !(quads.is_empty() && spilled.is_none()) {
                 self.ingest_quads(quads, &graphs, spilled)?;
@@ -498,6 +559,45 @@ impl RocksStorage {
         drop(spilled);
         let _ = std::fs::remove_dir_all(&dir);
         outcome
+    }
+
+    /// Writes one sorted dictionary family as an SST and ingests it.
+    ///
+    /// The index counterpart below writes keys with empty values; these carry a value, and
+    /// the merge has already combined any that share a key, so the stream is strictly
+    /// increasing — which is what `SstFileWriter` requires and will not check for you.
+    fn write_and_ingest_dict(
+        &self,
+        dir: &std::path::Path,
+        family: &'static str,
+        mut merged: dictsort::Merged,
+    ) -> Result<()> {
+        let path = dir.join(format!("{family}.dict.sst"));
+        // The family's own options, so the file is written with the comparator and
+        // compression the column family will read it back with.
+        let opts = value_opts();
+        let mut writer = rocksdb::SstFileWriter::create(&opts);
+        writer.open(&path).map_err(rocks_err)?;
+
+        let mut wrote = false;
+        while let Some((key, value)) = merged.next()? {
+            writer.put(&key, &value).map_err(rocks_err)?;
+            wrote = true;
+        }
+        if !wrote {
+            // An empty file is not ingestable, and a load that interned nothing new — every
+            // term already in the dictionary — is ordinary.
+            drop(writer);
+            let _ = std::fs::remove_file(&path);
+            return Ok(());
+        }
+        writer.finish().map_err(rocks_err)?;
+
+        let mut opts = rocksdb::IngestExternalFileOptions::default();
+        opts.set_move_files(true);
+        self.db
+            .ingest_external_file_cf_opts(cf(&self.db, family)?, &opts, vec![path])
+            .map_err(rocks_err)
     }
 
     /// Sorts `rows` into one order, writes them as a single SST, and ingests it.
@@ -611,7 +711,35 @@ impl RocksStorage {
             return Ok(());
         }
         if let Some(state) = self.bulk.as_mut() {
-            state.pending.extend(ops);
+            // Dictionary rows are diverted to their own sorted runs; everything else — the
+            // id counters, the graph catalogue — stays on the batch path, where it is a
+            // handful of rows rather than two per interned term.
+            //
+            // A `Delete` is never diverted. The dictionary is not garbage-collected
+            // (`Store::remove` says so), so one should not arise during a load; if one ever
+            // does, the batch path still applies it in order, and an ingested file that
+            // silently outlived a delete would be far worse than a slow one.
+            if state.dict.is_some() {
+                for op in ops {
+                    match op {
+                        Pending::Put(family, key, value) => {
+                            let diverted = state
+                                .dict
+                                .as_mut()
+                                .and_then(|d| d.family(family))
+                                .map(|runs| runs.push(key.clone(), value.clone()))
+                                .transpose()?
+                                .is_some();
+                            if !diverted {
+                                state.pending.push(Pending::Put(family, key, value));
+                            }
+                        }
+                        other => state.pending.push(other),
+                    }
+                }
+            } else {
+                state.pending.extend(ops);
+            }
             if state.pending.len() >= BULK_BATCH_OPS {
                 let pending = std::mem::take(&mut state.pending);
                 return self.write_pending(pending, true);
@@ -1426,8 +1554,7 @@ impl Storage for RocksStorage {
                 "a commit scope is open; a bulk load inside one would buffer into it",
             ));
         }
-        self.start_bulk();
-        Ok(())
+        self.start_bulk()
     }
 
     fn end_bulk_load(&mut self) -> Result<()> {
@@ -1797,7 +1924,15 @@ fn value_opts() -> Options {
     // read by point lookup, and `str2id` takes a miss for every term a load has not seen
     // before. But `loadprofile` finds it worth nothing either way at 750k quads — the family
     // is small enough to sit in the block cache, so a miss never reaches a file to skip.
-    // Worth revisiting at a scale where it does not, with that benchmark as the evidence.
+    //
+    // Revisited at 3M quads with 2M distinct terms, which is the scale the note above asked
+    // for, on data whose dictionary is nearly all singletons. It is **slower**, and not
+    // marginally: alternating the two builds so page-cache state hits both equally, the
+    // dictionary layer went 11.97/11.79/13.93 s without to 14.07/14.86/14.82 s with. A bulk
+    // load writes this family continuously, so the filter blocks are built on every flush
+    // and compaction, and that cost lands on the write path while the read it would save is
+    // one the block cache was already serving. The textbook setting is for a family that is
+    // read far more than it is written; during a load this one is the opposite.
     opts
 }
 

@@ -594,6 +594,7 @@ Stated plainly, because finding these out in production is worse.
 |---|---|---|
 | **No TLS in the server** | Plain HTTP only | Terminate at the front door. Both configs do |
 | **Timeouts are not absolute** | `--timeout` stops a query that is reading or streaming rows; one blocked inside a single in-memory step is not interruptible | Bound the result size in the query |
+| **The memory ceiling is per-process, not per-query** | `--max-query-memory` (default 8 GiB) counts what the process allocates, so it cannot attribute a byte to one query of several running at once. A breach must persist across three samples before it cancels | Treat it as a backstop against one runaway query. `0` disables it, at the cost of a `SELECT DISTINCT` over a large store being able to abort the server |
 | **A checkpoint is not off-machine** | Hard links share the live store's files, so one disk failure loses both | Copy or replicate the checkpoint elsewhere; or checkpoint to a different filesystem, which copies |
 | **Single process per store** | No read replicas over one directory | Run replicas over separate copies |
 | **CORS is `*`** | Any origin may query | Intentional — a SPARQL endpoint is routinely queried from a page elsewhere, and refusing that makes it useless for its most common job. Restrict at the proxy if you need to |
