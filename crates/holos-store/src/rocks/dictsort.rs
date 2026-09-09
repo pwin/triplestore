@@ -101,6 +101,15 @@ impl DictRuns {
         self.buffer.is_empty() && self.paths.is_empty()
     }
 
+    /// Whether anything has been spilled, or the buffer has reached its budget.
+    ///
+    /// The caller uses this to decide when to write the family out and ingest it, which is
+    /// what lets the load forget the terms it has interned. A run already on disk counts:
+    /// once one exists, the budget has been reached at least once.
+    pub(super) fn at_budget(&self) -> bool {
+        !self.paths.is_empty() || self.bytes >= self.budget
+    }
+
     /// Sorts what is buffered and writes it out as one run.
     fn spill(&mut self) -> Result<()> {
         if self.buffer.is_empty() {

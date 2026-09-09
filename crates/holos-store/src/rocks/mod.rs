@@ -203,6 +203,8 @@ const SPILL_QUADS: usize = 4 << 20;
 struct DictBuffers {
     str2id: dictsort::DictRuns,
     id2str: dictsort::DictRuns,
+    /// How many times these have been flushed, so each ingested file gets its own name.
+    flushes: usize,
 }
 
 impl DictBuffers {
@@ -210,7 +212,17 @@ impl DictBuffers {
         Self {
             str2id: dictsort::DictRuns::new(dir, STR2ID, budget),
             id2str: dictsort::DictRuns::new(dir, ID2STR, budget),
+            flushes: 0,
         }
+    }
+
+    /// Whether either family has reached its budget.
+    ///
+    /// Either, not both: they are written in step, one row each per interned term, so one
+    /// reaching its budget means the other is close behind. Flushing them together is what
+    /// makes it safe to clear the term cache, which needs *every* row of a term on disk.
+    fn full(&self) -> bool {
+        self.str2id.at_budget() || self.id2str.at_budget()
     }
 
     /// The accumulator for a family, or `None` if the family is not a dictionary one.
@@ -450,12 +462,13 @@ impl RocksStorage {
             // The dictionary first: the index files name term ids, and a store holding an id
             // it cannot decode is corrupt in a way no later step would notice.
             if let Some(dict) = dict {
+                let sequence = dict.flushes;
                 let dir = self.ingest_dir()?;
                 for (family, runs) in [(STR2ID, dict.str2id), (ID2STR, dict.id2str)] {
                     if runs.is_empty() {
                         continue;
                     }
-                    self.write_and_ingest_dict(&dir, family, runs.merge()?)?;
+                    self.write_and_ingest_dict(&dir, family, sequence, runs.merge()?)?;
                 }
             }
             self.write_pending(pending, true)?;
@@ -561,6 +574,55 @@ impl RocksStorage {
         outcome
     }
 
+    /// Writes both dictionary families out as ingested files and forgets the terms.
+    ///
+    /// # Why this happens during the load and not only at the end
+    ///
+    /// `bulk.terms` is what stops a term being interned twice, and it is the only thing
+    /// that does while its rows are still buffered: `resolve` reads the database, and a
+    /// buffered row is not there yet. So for as long as the rows are held back, the cache
+    /// has to hold *every* term the load has seen, and it grows without bound —
+    /// **222 bytes per distinct term, measured**, which for a file with 281 million of them
+    /// is 62 GB and an aborted process.
+    ///
+    /// Ingesting mid-load fixes that by making the rows readable. Once a term is in an
+    /// ingested file, `resolve` finds it, so the cache is an optimisation again rather than
+    /// a correctness requirement, and it can be dropped. Memory then tracks the budget
+    /// rather than the file.
+    ///
+    /// The cost is several ingested files per load instead of one, which RocksDB compacts
+    /// in the background, and a `resolve` that has real files to look in — the condition
+    /// under which a bloom filter on `str2id` might finally pay, and which the measurement
+    /// that rejected one did not have.
+    fn flush_dictionary(&mut self) -> Result<()> {
+        let Some(state) = self.bulk.as_mut() else {
+            return Ok(());
+        };
+        let Some(dict) = state.dict.take() else {
+            return Ok(());
+        };
+        let sequence = dict.flushes;
+        let budget = self.dict_spill_bytes;
+        let dir = self.ingest_dir()?;
+
+        for (family, runs) in [(STR2ID, dict.str2id), (ID2STR, dict.id2str)] {
+            if runs.is_empty() {
+                continue;
+            }
+            self.write_and_ingest_dict(&dir, family, sequence, runs.merge()?)?;
+        }
+
+        // Only now: a term is safe to forget once *both* of its rows are readable.
+        if let Some(state) = self.bulk.as_mut() {
+            state.terms.clear();
+            state.terms.shrink_to_fit();
+            let mut fresh = DictBuffers::new(&dir, budget);
+            fresh.flushes = sequence + 1;
+            state.dict = Some(fresh);
+        }
+        Ok(())
+    }
+
     /// Writes one sorted dictionary family as an SST and ingests it.
     ///
     /// The index counterpart below writes keys with empty values; these carry a value, and
@@ -570,9 +632,13 @@ impl RocksStorage {
         &self,
         dir: &std::path::Path,
         family: &'static str,
+        sequence: usize,
         mut merged: dictsort::Merged,
     ) -> Result<()> {
-        let path = dir.join(format!("{family}.dict.sst"));
+        // Numbered: a load flushes more than once now, and the ingest moves the file away,
+        // but a failure between writing and ingesting would otherwise leave one behind for
+        // the next flush to trip over.
+        let path = dir.join(format!("{family}.{sequence}.dict.sst"));
         // The family's own options, so the file is written with the comparator and
         // compression the column family will read it back with.
         let opts = value_opts();
@@ -740,9 +806,13 @@ impl RocksStorage {
             } else {
                 state.pending.extend(ops);
             }
+            let full = state.dict.as_ref().is_some_and(DictBuffers::full);
             if state.pending.len() >= BULK_BATCH_OPS {
                 let pending = std::mem::take(&mut state.pending);
-                return self.write_pending(pending, true);
+                self.write_pending(pending, true)?;
+            }
+            if full {
+                self.flush_dictionary()?;
             }
             return Ok(());
         }

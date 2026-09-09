@@ -75,8 +75,10 @@ fn load(spill_bytes: usize) -> (tempfile::TempDir, Store) {
 /// the index names nothing.
 #[test]
 fn every_term_round_trips_through_a_spilled_dictionary() {
-    // Small enough that four thousand subjects spill many times over.
-    let (_dir, store) = load(4 * 1024);
+    // Small enough that four thousand subjects flush a few dozen times over. Each
+    // flush ingests and then clears the term cache, so this exercises the path where a
+    // repeated term has to be found in an ingested file rather than in memory.
+    let (_dir, store) = load(256 * 1024);
 
     for quad in quads() {
         for term in [
@@ -100,7 +102,7 @@ fn every_term_round_trips_through_a_spilled_dictionary() {
 /// The store holds what was put in it, and holds it once.
 #[test]
 fn a_spilled_load_stores_every_quad_exactly_once() {
-    let (_dir, store) = load(4 * 1024);
+    let (_dir, store) = load(256 * 1024);
     let expected = quads();
     assert_eq!(store.len(), expected.len());
     for quad in expected {
@@ -111,6 +113,32 @@ fn a_spilled_load_stores_every_quad_exactly_once() {
     }
 }
 
+/// A term interned before a flush is found after it, not interned again.
+///
+/// This is the property the whole periodic-flush design rests on. Each flush ingests both
+/// dictionary families and then **clears the term cache**, which is only safe because the
+/// rows are readable afterwards: `resolve` has to find them. If it did not, every repeated
+/// term after the first flush would be handed a second id, and the store would hold two
+/// nodes where the data has one — a join that should match would silently not.
+///
+/// `ex:Thing` is the object of every third quad, so it spans every flush there is. Counting
+/// the dictionary is what makes the failure visible: double-interning shows up as a term
+/// count that grew, and as quads that multiplied.
+#[test]
+fn a_term_interned_before_a_flush_is_not_interned_again_after_it() {
+    let (_dir, store) = load(256 * 1024);
+
+    // Three per subject: the subject IRI, the long literal, and the object IRI. Plus the
+    // three predicates and the one shared `ex:Thing`.
+    let expected = SUBJECTS * 3 + 4;
+    assert_eq!(
+        store.dictionary_len(),
+        expected,
+        "the dictionary holds {} terms where {expected} were interned, so a term was          given a second id after the cache was cleared",
+        store.dictionary_len()
+    );
+}
+
 /// Spilling must change nothing but memory.
 ///
 /// The comparison is the point: a load that never spills takes the in-memory sort path, and
@@ -118,7 +146,7 @@ fn a_spilled_load_stores_every_quad_exactly_once() {
 /// wrong, and no single-configuration test would say so.
 #[test]
 fn spilling_and_not_spilling_produce_the_same_dictionary() {
-    let (_a, spilled) = load(4 * 1024);
+    let (_a, spilled) = load(256 * 1024);
     let (_b, whole) = load(usize::MAX);
 
     assert_eq!(spilled.len(), whole.len());
@@ -155,7 +183,7 @@ fn spilling_and_not_spilling_produce_the_same_dictionary() {
 fn a_second_load_reuses_the_first_loads_ids() {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let mut storage = RocksStorage::open(dir.path()).expect("open");
-    storage.set_dict_spill_bytes(4 * 1024);
+    storage.set_dict_spill_bytes(256 * 1024);
     let mut store = Store::with_storage(storage);
 
     store.begin_bulk_load().expect("begin");

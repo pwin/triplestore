@@ -221,6 +221,12 @@ fn rocks_at(dir: std::path::PathBuf) -> Result<Store, Box<dyn std::error::Error>
     if let Some(limit) = std::env::args().nth(3).and_then(|a| a.parse().ok()) {
         storage.set_ingest_limit(limit);
     }
+    if let Some(bytes) = std::env::args()
+        .nth(4)
+        .and_then(|a| a.parse::<usize>().ok())
+    {
+        storage.set_dict_spill_bytes(bytes);
+    }
     Ok(Store::with_storage(storage))
 }
 
