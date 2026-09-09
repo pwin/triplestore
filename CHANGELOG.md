@@ -3,6 +3,68 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.7.0 — 2026-09-09
+
+The release that made a load's memory stop growing, and the first one you can download a
+binary from.
+
+### A bulk load's memory no longer tracks the file
+
+0.6.0 held every dictionary row until the end of a load and ingested them as one sorted
+file. That made the term cache load-bearing: `resolve` reads the database, a buffered row is
+not there yet, so the only thing stopping a term being interned twice was the in-memory
+cache — which therefore had to hold **every term the load had seen**.
+
+It grows at **222 bytes per distinct term**, measured across a 6.7× range. A generated
+person dataset carries 1,268,458 distinct terms per 3M triples, so the 32 GB file it came
+from has around 281 million and the cache alone would want **62 GB**. On a 32 GB machine
+that load cannot finish — and it aborts the process rather than failing the request, exactly
+as the query path did before 0.6.0 put a ceiling on it.
+
+Flushing both dictionary families when the buffer reaches its budget makes the rows
+readable, which makes the cache an optimisation again rather than a correctness requirement,
+so it can be cleared. Memory then tracks the budget instead of the file:
+
+| distinct terms | 0.6.0 | 0.7.0 |
+|---:|---:|---:|
+| 900,000 | 714 MiB | 500 MiB |
+| 6,000,000 | 1,796 MiB | 392 MiB |
+
+The slope goes from **+222 bytes per additional distinct term to −22**. Six million distinct
+terms now peak *lower* than nine hundred thousand.
+
+The cost is several ingested files per load instead of one. At an artificially small 32 MiB
+budget that is 52,419 quads/s against 38,844 — a consistent 26% — but at the 256 MiB default
+the two rounds disagree about which build is faster, so it is inside the noise.
+`set_dict_spill_bytes` is the knob.
+
+Both families are flushed together and the cache cleared only afterwards, because a term is
+safe to forget only once *both* of its rows are readable. The test for the failure this
+could cause — a repeated term handed a second id after the cache is cleared, splitting one
+node into two so a join that should match silently does not — asserts on `dictionary_len`,
+so double-interning is visible rather than inferred.
+
+### Binaries, at last
+
+The Releases page stopped at 0.1.1 while PyPI went to 0.6.0: every version since was tagged
+and published as wheels, and none produced anything a person could download and run.
+`pip install holosdb` serves Python callers and does nothing for someone who wants the
+server or the CLI, for whom the alternative was a Rust toolchain and a RocksDB compile.
+
+A tag now builds `holos` and `holos-server` for five targets — Linux x86-64 and aarch64,
+macOS arm64 and x86-64, Windows x64 — checks that both binaries start before packaging
+them, and publishes a release with a `SHA256SUMS` file. The release notes are the changelog
+section for that version, so the two cannot drift.
+
+It is a separate workflow from the wheels on purpose: that one is gated on a PyPI trusted
+publisher, this one needs permission to write to the repository, and a single workflow
+holding both is a wider blast radius than either job needs.
+
+### Repository
+
+Consolidated to one branch. `feature/initial_release` held only four ceremonial merge
+commits and nothing unique; release tags keep those commits reachable.
+
 ## 0.6.0 — 2026-09-09
 
 The release that stopped one query killing the server, and made a bulk load's

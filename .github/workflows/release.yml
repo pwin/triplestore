@@ -1,0 +1,204 @@
+# Binaries for `holos` and `holos-server`, and the GitHub Release that carries them.
+#
+# Separate from `python.yml` on purpose. That workflow's job is the `holosdb` wheels and the
+# PyPI upload, and it is gated on a trusted publisher; this one needs `contents: write` to
+# create a release, and a workflow that both uploads to PyPI and writes to the repository is
+# a wider blast radius than either job needs on its own. They run in parallel on the same
+# tag and neither waits on the other.
+#
+# # Why this exists
+#
+# The Releases page stopped at 0.1.1 while PyPI went to 0.6.0: every version since was
+# tagged and published as wheels, and none of them produced a release anyone could download
+# a binary from. `pip install holosdb` serves Python callers; it does nothing for someone who
+# wants the server or the CLI, and building those from source means a Rust toolchain and a
+# RocksDB compile.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # So a release can be rebuilt without moving a tag — the artefacts are reproducible from
+  # the tag, and a failed upload should not need a re-tag to retry.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release, e.g. v0.7.0"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------------
+  # One archive per platform, each holding both binaries.
+  # ---------------------------------------------------------------------------------
+  binaries:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    # RocksDB compiles from C++ and is linked statically into both binaries. Windows is the
+    # slow one at around thirteen minutes; this is headroom, not a target.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          # Both macOS arches come off the arm64 runner: the Intel label was retired, and a
+          # job asking for one that no longer resolves sits queued until something cancels
+          # the run. Cross-compiling needs no runner label at all.
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install the target
+        run: rustup target add ${{ matrix.target }}
+
+      # `librocksdb-sys` generates its bindings with bindgen, which loads libclang at build
+      # time rather than linking it. Both hosted runners ship one; neither puts it where
+      # bindgen looks, so the build aborts with "Library not loaded: @rpath/libclang.dylib"
+      # or a page of undefined `clang_*` symbols. The same two steps `python.yml` needs.
+      - name: macOS build environment
+        if: runner.os == 'macOS'
+        run: |
+          lib="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
+          test -f "$lib/libclang.dylib" || { echo "no libclang.dylib under $lib"; exit 1; }
+          echo "LIBCLANG_PATH=$lib" >> "$GITHUB_ENV"
+          # RocksDB uses C++17 aligned new/delete, which Clang refuses to emit below macOS
+          # 10.13. rustc's default deployment target for x86_64 is older than that, so the
+          # cross-compile fails on `clock_cache.cc`. arm64 starts at 11.0 and needs nothing.
+          if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=10.13" >> "$GITHUB_ENV"
+          fi
+
+      - name: Point bindgen at libclang (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $lib = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path "$lib\libclang.dll")) { throw "no libclang.dll under $lib" }
+          "LIBCLANG_PATH=$lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p holos-cli -p holos-server
+
+      # Both binaries are checked before they are packaged. A release archive that cannot
+      # start is worse than a missing one, and `--help` exercises enough of the binary to
+      # catch a link failure that the compile did not.
+      - name: Check the binaries run
+        # Every target except the cross-compiled one: `aarch64-unknown-linux-gnu` is native
+        # on the arm runner and runs fine, but an x86_64 macOS binary needs Rosetta, which
+        # the arm64 image does not promise.
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          dir="target/${{ matrix.target }}/release"
+          # An `if`, not `[ ... ] && x`: the step runs under `bash -e`, where an `&&` list
+          # whose left side is false returns non-zero and takes the whole step with it.
+          suffix=""
+          if [ "${{ runner.os }}" = "Windows" ]; then suffix=".exe"; fi
+          "$dir/holos$suffix" --help > /dev/null
+          "$dir/holos-server$suffix" --help > /dev/null
+          echo "both binaries start"
+
+      - name: Package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [ -n "${{ inputs.tag }}" ]; then version="${{ inputs.tag }}"; version="${version#v}"; fi
+          name="holos-${version}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          dir="target/${{ matrix.target }}/release"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "$dir/holos.exe" "$dir/holos-server.exe" "dist/$name/"
+          else
+            cp "$dir/holos" "$dir/holos-server" "dist/$name/"
+          fi
+          cp README.md LICENSE* "dist/$name/" 2>/dev/null || true
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+          ls -l
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binaries-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+  # ---------------------------------------------------------------------------------
+  # One release, with every archive and a checksum file.
+  # ---------------------------------------------------------------------------------
+  publish:
+    name: publish the release
+    needs: binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: binaries-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz *.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      # The changelog section for this version becomes the release notes, so the two cannot
+      # drift: there is one description of what a release contains, and it is the one that
+      # was reviewed in the commit that cut it.
+      - name: Release notes from the changelog
+        id: notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [ -n "${{ inputs.tag }}" ]; then version="${{ inputs.tag }}"; version="${version#v}"; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          awk -v v="## $version" '
+            $0 ~ "^"v" " { found=1; print; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "no CHANGELOG section for $version" >&2
+            exit 1
+          fi
+          {
+            echo ""
+            echo "---"
+            echo ""
+            echo "Python bindings for this release are on PyPI: \`pip install holosdb==$version\`"
+            echo ""
+            echo "Each archive holds \`holos\` (the CLI) and \`holos-server\`, built with RocksDB."
+            echo "Verify with \`sha256sum -c SHA256SUMS\`."
+          } >> notes.md
+          head -5 notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ inputs.tag || github.ref_name }}" \
+            --title "HOLOS ${{ steps.notes.outputs.version }}" \
+            --notes-file notes.md \
+            dist/*.tar.gz dist/*.zip dist/SHA256SUMS
