@@ -1339,6 +1339,79 @@ here. §13 Q5's benchmark choice remains open.
 
 ---
 
+## 16a. A query cannot take the process down
+
+> **Built.** Three layers, and the order they fire in is the design.
+
+Rust's allocator is infallible: when an allocation fails, `handle_alloc_error` **aborts the
+process**, and it cannot be caught. On a server that is the worst available outcome — one
+client's careless query takes the listener, every other in-flight request, and any write in
+progress. So the whole problem is to never reach that allocation.
+
+A real deployment reached it twice. Both times the query was
+
+```sparql
+SELECT (count(distinct *) as ?count) WHERE { ?sub ?pred ?obj . }
+```
+
+which `spareval` answers by holding every distinct solution in a hash set. The first failure
+asked for 25 GiB, and the size named the structure to the byte: 2³⁰ buckets of a 24-byte
+`InternalTuple` plus a control byte each.
+
+### Why almost everything is fine, and four operators are not
+
+SPARQL pipelines. A scan feeds a join feeds a filter feeds the serialiser, and memory stays
+flat however much data goes through. Four operators break that by having to see every row
+before they can emit the first:
+
+| operator | why it buffers |
+|---|---|
+| `ORDER BY` | the last row read may sort first |
+| `DISTINCT` / `REDUCED` | a duplicate may arrive at any time |
+| keyed `GROUP BY` | a group may gain a member at any time |
+| a hash join's build side | probing cannot start until the table is built |
+
+`COUNT(*)` is the instructive contrast: a `u64` counter, streaming, constant memory.
+`COUNT(DISTINCT *)` holds everything. **The difference is never the aggregate, it is the
+`DISTINCT`.**
+
+### The three layers
+
+**Spilling first** (`holos-engine`'s `spill`). `DISTINCT` is answered by sorting, spilling
+runs to disk and merging them, so memory tracks the buffer rather than the answer. A hash set
+answers *"have I seen this?"* in constant time and cannot answer it at all once it outgrows
+memory; sorting turns it into *"is this the same as the row before it?"*, which needs no
+memory beyond one row. The cost is that rows come back sorted rather than in arrival order,
+which SPARQL permits.
+
+**Admission control second** (`admit`). What cannot be spilled can at least be declined
+before it starts, using the characteristic-set estimates of §16 — measured at a q-error of
+1.1, which is ample for telling a thousand rows from a billion. Spilling is tried *first*
+deliberately: a query that can be answered must not be refused for being large.
+
+**The ceiling last** (`memory`). A counting allocator in the binary, and the ceiling read in
+`decide` — §14's chokepoint, the one route to the indexes. Two relaxed loads per quad beside
+a policy decision that was happening anyway.
+
+Reading it at the scan rather than sampling it from a watchdog is not a detail. The second
+crash had an 8 GiB ceiling in force and asked for 16 GiB: a `Vec` doubling from 8 GiB asks
+for its new block while still holding the old, so crossing an 8 GiB ceiling wants **24 GiB**
+at that instant, and `used > limit` is false while a buffer sits exactly *at* the limit. No
+sampling interval fits inside that step. An operator buffering toward an abort is buffering
+*from the scan*, so asking there catches it on the first quad past the line.
+
+### What is still true
+
+None of this catches a query that allocates without reading, and nothing short of a fallible
+allocator could. The ceiling must therefore sit well below the memory available — a third of
+it at most — so that it bites while the query is still small enough to survive.
+
+And only `DISTINCT` spills. `ORDER BY` and keyed `GROUP BY` still buffer in `spareval`, so a
+large one is refused rather than answered. The same collector generalises to an external
+merge sort; that is the next piece.
+
+---
+
 ## 17. Geospatial
 
 > **Built.** GeoSPARQL runs through the ordinary query path.

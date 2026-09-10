@@ -22,14 +22,14 @@ The full argument, the layer design, the roadmap and the risks are in **[DESIGN.
 | **L0** Terms & I/O | Reused wholesale from Oxigraph — `oxrdf`, `oxttl`, `oxrdfio`, `spargebra`, `sparesults`. RDF 1.2 and SPARQL 1.2 features on. |
 | **L1** Term dictionary | ✅ Tagged 64-bit ids, order-preserving inline integers / floats / dateTimes / short strings, well-known vocabulary table, recursive triple terms |
 | **L2** Storage | ◐ Two backends behind one trait: in memory, and RocksDB with the nine column families. Held to strict parity. Owes SST ingestion, MVCC timestamps, checkpoints |
-| **L3** Query engine | ◐ SPARQL 1.2 **query and update** evaluate end to end. Query timeouts, dataset selection, parameter binding and plan explanation all wired. Characteristic-set statistics built and measured — **mean q-error 1.1 against the reused optimiser's 2×10⁸**. Owes the planner that consumes them, and WCO joins |
+| **L3** Query engine | ◐ SPARQL 1.2 **query and update** evaluate end to end. A query cannot take the process down: `DISTINCT` sorts and spills so a large one finishes, a doomed one is refused from its estimate, and a memory ceiling is read at the scan. Query timeouts, dataset selection, parameter binding and plan explanation all wired. Characteristic-set statistics built and measured — **mean q-error 1.1 against the reused optimiser's 2×10⁸**. Owes the planner that consumes them, and WCO joins |
 | **Security** | ✅ Principals, compiled fine-grained policy, classification lattice, audit sink — enforced at the scan, at **8 ns/quad**. See [ACCESS-CONTROL.md](ACCESS-CONTROL.md) |
 | **L4** SHACL | ◐ Two validators behind one trait: [SHACL_Engine](https://github.com/pwin/SHACL_Engine) adapted for coverage, and a native evaluator for **incremental revalidation at 161× a full pass** |
 | **GeoSPARQL** | ✅ 45 functions — 43 via `spargeo`, plus `geof:buffer` and `geof:boundary` implemented here — reading **CRS84, EPSG:4326, EPSG:27700 and EPSG:3857**, so British National Grid data queries against GPS data. Composes with policy and the term encoding — see [DESIGN.md §17](DESIGN.md#17-geospatial) |
 | **L5** Holon layer | ◐ Walking skeleton: scene, boundary enforced on the write path, event log with per-triple RDF 1.2 provenance, **165 validated commits/s at 41× a full pass**, boundary rules fired per tick, each tick one atomic commit. Owes isolation, maintained projections, time travel |
 | **L6** Protocol server | ◐ SPARQL 1.2 Protocol over HTTP (**34/34** W3C protocol tests) + **Graph Store Protocol** (**13/13**) + YASGUI console, **`POST /update`**, and **Python bindings** on PyPI as [`holosdb`](https://pypi.org/project/holosdb/) — five abi3 wheels plus an sdist, `pip install holosdb`. Owes WASM |
 
-814 unit and property tests pass (`cargo test --workspace`), plus the W3C suites below.
+838 unit and property tests pass (`cargo test --workspace`), plus the W3C suites below.
 
 **Documentation** — [MINTING-TRIPLES.md](MINTING-TRIPLES.md) is the getting-started guide to
 every route for getting data in, including RDF 1.2 triple terms and holons;

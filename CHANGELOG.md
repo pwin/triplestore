@@ -3,6 +3,92 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.8.0 — 2026-09-10
+
+The release that made a query unable to take the server down — and made the query that did
+it twice finish instead.
+
+0.7.0 shipped a memory ceiling. It did not work. A deployment aborted again with the ceiling
+in force, and the numbers said why: an 8 GiB limit and a request for **16 GiB**. This is
+that, properly, in three layers.
+
+### The query
+
+```sparql
+SELECT (count(distinct *) as ?count) WHERE { ?sub ?pred ?obj . }
+```
+
+`spareval` answers it by holding every distinct solution in a hash set. The first crash asked
+for 25 GiB, and the size named the structure to the byte: 2³⁰ buckets of a 24-byte
+`InternalTuple` plus a control byte each. On a 667-million-triple store nothing was going to
+make that fit.
+
+Worth knowing: over the default graph the `DISTINCT` **buys nothing**. A store holds triples
+as a set, so `COUNT(*)` gives the same answer from a `u64` counter in constant memory. It
+differs only across a union of named graphs.
+
+### `DISTINCT` sorts and spills
+
+The one that lets the query *finish*. Fill a buffer, sort it, write a run, merge the runs —
+the technique `sort.rs` already uses for index orders and `dictsort.rs` for the dictionary.
+Memory tracks the buffer, not the answer.
+
+A hash set answers "have I seen this?" in constant time and cannot answer it at all once it
+outgrows memory. Sorting turns it into "is this the same as the row before it?", which needs
+no memory beyond one row, so duplicates fall out of a merge over runs that were never all
+resident. `COUNT(DISTINCT *)` gets the best case: the rows are never needed, only counted, so
+the answer is **O(1) in memory however large the input**.
+
+Rows compare as bytes, encoded from their N-Triples forms — injective over terms, which is
+what makes byte equality term equality. `"1"^^xsd:integer` and `"01"^^xsd:integer` are
+different RDF terms and `DISTINCT` keeps both; an encoding that compared *values* would
+under-count and never say so.
+
+**`DISTINCT` now returns rows sorted rather than in arrival order.** SPARQL promises no order
+for it, so this is conformant; `--spill-distinct 0` restores the old behaviour and the old
+failure mode. Default 128 MiB.
+
+### Doomed queries are refused from their estimate
+
+`--max-blocking-rows`, default 10,000,000, needs `--reorder`. An `ORDER BY`, `DISTINCT` or
+keyed `GROUP BY` whose input is estimated over budget is declined in a millisecond rather
+than discovered slowly, using the characteristic-set estimates already built for join
+ordering — q-error 1.1, ample for telling a thousand rows from a billion.
+
+Tried *after* spilling, deliberately: a query that can be answered must not be refused for
+being large.
+
+Not every aggregate blocks, and the tests found that out by refusing `COUNT(*)` — which
+streams. A group buffers when it has a grouping key or a `DISTINCT` aggregate. And a `LIMIT`
+rescues a `DISTINCT` but not an `ORDER BY`, since the k smallest cannot be known without
+sorting all of them; the refusal says which case it is rather than giving advice that does
+not work.
+
+### The ceiling is read at the scan, not on a timer
+
+0.7.0 sampled every 10 ms and wanted three consecutive breaches. A `Vec` doubling from 8 GiB
+asks for 16 while still holding the old 8 — **24 GiB in hand** — so it goes from *at* the
+ceiling to fatally past it in one allocation, and no sampling interval fits inside that step.
+Worse, `used > limit` is false while a buffer sits exactly at the limit.
+
+It is now read in `decide`, which `DESIGN.md` §14 already makes the one route to the indexes.
+An operator buffering toward an abort is buffering *from the scan*, so it is refused on the
+first quad past the line. Armed after the store opens, so it measures growth past the resting
+set rather than counting the dataset against the budget.
+
+`--max-query-memory` now says the thing that was missing: **set it to at most a third of the
+memory you can spare**. A ceiling near the machine's limit does not prevent the abort, it
+chooses where it happens.
+
+### What is still true
+
+None of this catches a query that allocates without reading, and nothing short of a fallible
+allocator could — `handle_alloc_error` aborts rather than unwinding.
+
+And only `DISTINCT` spills. `ORDER BY` and keyed `GROUP BY` still buffer, so a large one is
+refused rather than answered. The same collector generalises to an external merge sort, which
+is the next piece.
+
 ## 0.7.0 — 2026-09-09
 
 The release that made a load's memory stop growing, and the first one you can download a
