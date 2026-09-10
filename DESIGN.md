@@ -1377,17 +1377,23 @@ before they can emit the first:
 
 ### The three layers
 
-**Spilling first** (`holos-engine`'s `spill`). `DISTINCT` is answered by sorting, spilling
-runs to disk and merging them, so memory tracks the buffer rather than the answer. A hash set
-answers *"have I seen this?"* in constant time and cannot answer it at all once it outgrows
-memory; sorting turns it into *"is this the same as the row before it?"*, which needs no
-memory beyond one row. The cost is that rows come back sorted rather than in arrival order,
-which SPARQL permits.
+**Admission control first** (`admit`). A blocking operator whose input the
+characteristic-set estimates of §16 put over budget is not evaluated the ordinary way. Those
+estimates were measured at a q-error of 1.1, ample for telling a thousand rows from a
+billion.
 
-**Admission control second** (`admit`). What cannot be spilled can at least be declined
-before it starts, using the characteristic-set estimates of §16 — measured at a q-error of
-1.1, which is ample for telling a thousand rows from a billion. Spilling is tried *first*
-deliberately: a query that can be answered must not be refused for being large.
+**Spilling second** (`spill`), and only for what admission control caught. `DISTINCT` is held
+in a hash set until it outgrows its budget, then encoded, sorted, written as a run, and the
+runs merged — memory tracks the buffer rather than the answer.
+
+The order was the other way round at first, on the reasoning that a query which *can* be
+answered should not be refused for being large. Measuring inverted it: spilling three million
+rows took **23.6 s against 2.2 s** and **1,259 MiB against 396 MiB**, with the disk never
+touched. `spareval` deduplicates on internal term ids that are never decoded; this path works
+above its public surface, where every solution is already a heap-allocated `Term`. That is
+structural, not a bug to fix here — so the fast path stays the default and spilling is what a
+query gets *instead of a refusal*, where ten times slower is no price at all against no
+answer.
 
 **The ceiling last** (`memory`). A counting allocator in the binary, and the ceiling read in
 `decide` — §14's chokepoint, the one route to the indexes. Two relaxed loads per quad beside

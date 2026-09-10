@@ -27,26 +27,32 @@ Worth knowing: over the default graph the `DISTINCT` **buys nothing**. A store h
 as a set, so `COUNT(*)` gives the same answer from a `u64` counter in constant memory. It
 differs only across a union of named graphs.
 
-### `DISTINCT` sorts and spills
+### `DISTINCT` spills instead of being refused
 
-The one that lets the query *finish*. Fill a buffer, sort it, write a run, merge the runs —
-the technique `sort.rs` already uses for index orders and `dictsort.rs` for the dictionary.
-Memory tracks the buffer, not the answer.
-
-A hash set answers "have I seen this?" in constant time and cannot answer it at all once it
-outgrows memory. Sorting turns it into "is this the same as the row before it?", which needs
-no memory beyond one row, so duplicates fall out of a merge over runs that were never all
-resident. `COUNT(DISTINCT *)` gets the best case: the rows are never needed, only counted, so
+The one that lets the query *finish*. Rows are held in a hash set until it outgrows its
+budget; then they are encoded, sorted, written as a run, and the runs are merged — the
+technique `sort.rs` already uses for index orders and `dictsort.rs` for the dictionary.
+`COUNT(DISTINCT *)` gets the best case, since the rows are only counted and never needed, so
 the answer is **O(1) in memory however large the input**.
+
+**It is not the default, and measuring is why.** On three million rows it returned the right
+answer in **23.6 s against `spareval`'s 2.2 s**, using **1,259 MiB against 396 MiB** — with
+the disk never touched. The cost is structural rather than a bug: `spareval` deduplicates on
+internal term ids that are never decoded, while this path works above its public surface,
+where every solution has already been materialised into heap-allocated terms.
+
+So the fast path stays, and spilling is what a query gets *instead of being refused* — it
+engages exactly where `--max-blocking-rows` would have declined, and therefore needs
+`--reorder` too. Ten times slower is a large price for an answer and no price at all against
+the alternative.
 
 Rows compare as bytes, encoded from their N-Triples forms — injective over terms, which is
 what makes byte equality term equality. `"1"^^xsd:integer` and `"01"^^xsd:integer` are
 different RDF terms and `DISTINCT` keeps both; an encoding that compared *values* would
 under-count and never say so.
 
-**`DISTINCT` now returns rows sorted rather than in arrival order.** SPARQL promises no order
-for it, so this is conformant; `--spill-distinct 0` restores the old behaviour and the old
-failure mode. Default 128 MiB.
+A spilled `DISTINCT` comes back sorted and an unspilled one in hash order. Neither is arrival
+order, and SPARQL promises none.
 
 ### Doomed queries are refused from their estimate
 

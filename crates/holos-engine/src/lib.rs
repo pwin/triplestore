@@ -371,27 +371,34 @@ impl Engine {
         let parsed = parser.parse_query(query)?;
         crate::validate::check(&parsed)?;
 
-        // Spilling is tried *before* admission control, and the order is the whole point: a
-        // query this can answer must not be refused for being large. Admission control is
-        // for the operators nothing can bound; a `DISTINCT` that sorts and spills is bounded
-        // by its buffer, so its size stops being a reason to decline it.
+        // One decision, made from one estimate: is a blocking operator too big to answer
+        // the ordinary way, and if so can it be spilled or must it be refused?
         //
-        // Before the topology rewrite and the bind join too, because this re-enters the
-        // evaluator with the `DISTINCT` removed and both would run on that inner query.
-        if let Some(budget) = options.spill_distinct {
-            if let Some(results) = Self::try_spilling_distinct(view, &parsed, options, budget)? {
-                return Ok((results, None));
-            }
-        }
-
-        // Declined before anything is evaluated, when there are statistics to decline it on.
-        // The memory ceiling would stop this query too, but several gigabytes and some
-        // minutes later; an estimate costs a walk of the algebra. See `crate::admit`.
+        // Spilling is *not* the default, and measuring is why. On three million rows it
+        // returned the right answer in 23.6 s against `spareval`'s 2.2 s, using 1,259 MiB
+        // against 396 MiB -- with the disk never touched. The cost is structural rather
+        // than fixable here: `spareval` deduplicates on internal term ids that are never
+        // decoded, and this path works above its public surface, where every solution has
+        // already been materialised into heap-allocated `Term`s.
+        //
+        // So the fast path stays the default, and spilling is what a query gets *instead of
+        // being refused*. Ten times slower is an enormous price for an answer and no price
+        // at all against the alternative, which is no answer.
         if let (Some(budget), Some(stats)) =
             (options.blocking_budget, options.reorder_with.as_ref())
         {
             if let Some(blocking) = crate::admit::over_budget(&parsed, stats, view.store(), budget)
             {
+                // Before the topology rewrite and the bind join, because this re-enters the
+                // evaluator with the `DISTINCT` removed and both would then run on that
+                // inner query anyway.
+                if let Some(spill) = options.spill_distinct {
+                    if let Some(results) =
+                        Self::try_spilling_distinct(view, &parsed, options, spill)?
+                    {
+                        return Ok((results, None));
+                    }
+                }
                 return Err(EngineError::BadRequest(format!(
                     "refusing {blocking}, over the {budget}-row budget. {} Raise it with --max-blocking-rows, or make the pattern more selective.",
                     if blocking.operator == "ORDER BY" {

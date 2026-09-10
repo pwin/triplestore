@@ -879,6 +879,11 @@ struct Options {
     named_graphs: Vec<String>,
     union_default_graph: bool,
     timeout: Option<f64>,
+    /// Bytes a `DISTINCT` may hold before spilling a sorted run to disk.
+    ///
+    /// `None` is the built-in default rather than zero: `Options` derives `Default`, and a
+    /// bare `usize` would have defaulted to nothing-in-memory, which reads as "off".
+    spill_distinct: Option<usize>,
     explain: bool,
     reorder: bool,
     results: QueryResultsFormatOpt,
@@ -924,6 +929,14 @@ impl Options {
             options = options.with_named_graph(iri_arg(iri)?.into());
         }
         options.union_default_graph = self.union_default_graph;
+        // The same bounded-memory DISTINCT the server gets. A CLI invocation that dies
+        // takes only itself, which is why it has no memory ceiling -- but a `DISTINCT`
+        // that cannot finish is a wrong answer either way, and spilling makes it finish.
+        match self.spill_distinct {
+            Some(0) => {}
+            Some(bytes) => options = options.spilling_distinct(bytes),
+            None => options = options.spilling_distinct(holos_engine::spill::SPILL_BYTES),
+        }
         if let Some(seconds) = self.timeout {
             if seconds > 0.0 {
                 options = options.with_timeout(std::time::Duration::from_secs_f64(seconds));
@@ -957,6 +970,16 @@ impl Options {
                 "--named-graph" => o.named_graphs.push(value(&mut i)?),
                 "--union-default-graph" => o.union_default_graph = true,
                 "--timeout" => o.timeout = Some(value(&mut i)?.parse()?),
+                "--spill-distinct" => {
+                    let mib: f64 = value(&mut i)?.parse()?;
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "a byte count from a mebibyte figure, bounded by the parse"
+                    )]
+                    let bytes = (mib.max(0.0) * 1024.0 * 1024.0) as usize;
+                    o.spill_distinct = Some(bytes);
+                }
                 "--explain" => o.explain = true,
                 "--reorder" => o.reorder = true,
                 "--query-file" => o.query_file = Some(value(&mut i)?),

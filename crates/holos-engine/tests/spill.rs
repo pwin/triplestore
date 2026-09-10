@@ -211,6 +211,23 @@ fn store_engine() -> Engine {
     Engine::with_store(store)
 }
 
+/// Options that force the spill path: statistics, a one-row blocking budget so admission
+/// control fires, and a spill budget so the answer comes from sorting rather than a refusal.
+///
+/// Needed since spilling stopped being the default. It is 10x slower than `spareval`'s hash
+/// set on a result that fits, so it is reserved for results that do not — which means a test
+/// that only sets `spilling_distinct` exercises `spareval` and proves nothing.
+fn forced(engine: &Engine, spill_bytes: usize) -> QueryOptions {
+    let stats = std::sync::Arc::new(
+        holos_stats::Statistics::build(engine.store(), holos_store::GraphFilter::Default)
+            .expect("statistics"),
+    );
+    QueryOptions::new()
+        .reordering(stats)
+        .with_blocking_budget(1)
+        .spilling_distinct(spill_bytes)
+}
+
 fn answer(engine: &Engine, query: &str, options: &QueryOptions) -> Vec<String> {
     let session = Session::unrestricted(engine.store()).expect("session");
     let view = engine.view(&session);
@@ -239,11 +256,7 @@ fn a_spilled_select_distinct_matches_the_hash_set() {
 
     let hashed = answer(&engine, &query, &QueryOptions::new());
     // A budget of a few kilobytes, so eight thousand subjects spill many times.
-    let spilled = answer(
-        &engine,
-        &query,
-        &QueryOptions::new().spilling_distinct(4 * 1024),
-    );
+    let spilled = answer(&engine, &query, &forced(&engine, 4 * 1024));
 
     assert_eq!(
         hashed.len(),
@@ -258,11 +271,7 @@ fn a_spilled_select_distinct_matches_the_hash_set() {
 fn a_limit_above_a_spilled_distinct_still_applies() {
     let engine = store_engine();
     let query = format!("PREFIX ex: <{EX}> SELECT DISTINCT ?s WHERE {{ ?s ?p ?o }} LIMIT 5");
-    let spilled = answer(
-        &engine,
-        &query,
-        &QueryOptions::new().spilling_distinct(4 * 1024),
-    );
+    let spilled = answer(&engine, &query, &forced(&engine, 4 * 1024));
     assert_eq!(spilled.len(), 5);
 }
 
@@ -277,11 +286,7 @@ fn the_query_that_took_down_a_server_is_answered_by_spilling() {
     let query = "SELECT (count(distinct *) as ?count) WHERE { ?sub ?pred ?obj . }";
 
     let hashed = answer(&engine, query, &QueryOptions::new());
-    let spilled = answer(
-        &engine,
-        query,
-        &QueryOptions::new().spilling_distinct(4 * 1024),
-    );
+    let spilled = answer(&engine, query, &forced(&engine, 4 * 1024));
 
     assert_eq!(spilled, hashed, "spilling changed the count");
     assert!(
@@ -297,11 +302,7 @@ fn the_spill_option_leaves_other_queries_alone() {
     let engine = store_engine();
     let query = format!("PREFIX ex: <{EX}> SELECT ?s WHERE {{ ?s ex:a ?o }}");
     let plain = answer(&engine, &query, &QueryOptions::new());
-    let with = answer(
-        &engine,
-        &query,
-        &QueryOptions::new().spilling_distinct(4 * 1024),
-    );
+    let with = answer(&engine, &query, &forced(&engine, 4 * 1024));
     assert_eq!(with, plain);
     assert_eq!(plain.len(), N);
 }

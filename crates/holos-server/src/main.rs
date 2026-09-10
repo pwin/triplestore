@@ -73,15 +73,18 @@ SERVER
                              Enforced while a query reads or streams rows; a query blocked
                              inside one in-memory step is not interruptible. See
                              OPERATIONS.md.
-    --spill-distinct <MiB>   Answer SELECT DISTINCT and COUNT(DISTINCT *) by sorting and
-                             spilling to disk rather than from a hash set in memory.
-                             Default 128; 0 leaves them to the evaluator.
+    --spill-distinct <MiB>   Bytes a SELECT DISTINCT or COUNT(DISTINCT *) may hold before
+                             spilling a sorted run to disk. Default 128; 0 disables it.
 
-                             This is what lets a DISTINCT larger than memory finish at all.
-                             The rows come back sorted rather than in arrival order, which
-                             SPARQL permits since DISTINCT promises no order. Tried before
-                             --max-blocking-rows, so a DISTINCT that can spill is answered
-                             rather than refused.
+                             Engaged only where --max-blocking-rows would otherwise refuse
+                             the query, so it needs --reorder too. It is not the fast path
+                             and is not meant to be: on three million rows it took 23.6s
+                             against the evaluator's 2.2s, and 1,259 MiB against 396 MiB,
+                             with the disk never touched. That is the price of an answer
+                             where the alternative is no answer.
+
+                             A spilled DISTINCT comes back sorted rather than in arrival
+                             order, which SPARQL permits since DISTINCT promises no order.
 
     --max-blocking-rows <N>  Refuse a query whose ORDER BY, DISTINCT or keyed GROUP BY is
                              *estimated* to buffer more than N rows. Default 10,000,000;
