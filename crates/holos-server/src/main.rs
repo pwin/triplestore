@@ -73,6 +73,16 @@ SERVER
                              Enforced while a query reads or streams rows; a query blocked
                              inside one in-memory step is not interruptible. See
                              OPERATIONS.md.
+    --spill-distinct <MiB>   Answer SELECT DISTINCT and COUNT(DISTINCT *) by sorting and
+                             spilling to disk rather than from a hash set in memory.
+                             Default 128; 0 leaves them to the evaluator.
+
+                             This is what lets a DISTINCT larger than memory finish at all.
+                             The rows come back sorted rather than in arrival order, which
+                             SPARQL permits since DISTINCT promises no order. Tried before
+                             --max-blocking-rows, so a DISTINCT that can spill is answered
+                             rather than refused.
+
     --max-blocking-rows <N>  Refuse a query whose ORDER BY, DISTINCT or keyed GROUP BY is
                              *estimated* to buffer more than N rows. Default 10,000,000;
                              0 disables it. Needs --reorder, since without statistics there
@@ -145,6 +155,8 @@ struct Config {
     max_query_memory: Option<usize>,
     /// Rows a blocking operator may be estimated to buffer. Needs `--reorder` to apply.
     max_blocking_rows: Option<u64>,
+    /// Bytes a DISTINCT may hold before spilling a sorted run. `None` leaves it to spareval.
+    spill_distinct: Option<usize>,
     read_only: bool,
     reorder: bool,
     gsp_base: Option<String>,
@@ -184,6 +196,10 @@ impl Default for Config {
             // absurdity, not a scheduler. `--max-query-memory 0` removes it.
             max_query_memory: Some(8 * 1024 * 1024 * 1024),
             max_blocking_rows: Some(holos_engine::admit::DEFAULT_BLOCKING_ROWS),
+            // On by default: a DISTINCT that cannot finish is the failure this server was
+            // taken down by, and a sort costs `n log n` against a hash set's `n` only when
+            // the answer was small enough not to matter.
+            spill_distinct: Some(holos_engine::spill::SPILL_BYTES),
             read_only: false,
             reorder: false,
             gsp_base: None,
@@ -1142,6 +1158,9 @@ fn query_options(
     if let Some(rows) = state.config.max_blocking_rows {
         options = options.with_blocking_budget(rows);
     }
+    if let Some(bytes) = state.config.spill_distinct {
+        options = options.spilling_distinct(bytes);
+    }
     if let Some(stats) = state.statistics() {
         options = options.reordering(stats);
     }
@@ -1445,6 +1464,19 @@ fn parse_args(args: &[String]) -> Result<Config> {
                 let seconds: f64 = value(&mut i)?.parse()?;
                 c.timeout = if seconds > 0.0 {
                     Some(Duration::from_secs_f64(seconds))
+                } else {
+                    None
+                };
+            }
+            "--spill-distinct" => {
+                let mib: f64 = value(&mut i)?.parse()?;
+                c.spill_distinct = if mib > 0.0 {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "a byte count from a mebibyte figure, bounded by the parse"
+                    )]
+                    Some((mib * 1024.0 * 1024.0) as usize)
                 } else {
                     None
                 };

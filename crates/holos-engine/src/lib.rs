@@ -31,6 +31,7 @@ pub mod range;
 pub mod service;
 pub mod source;
 pub mod spatial;
+pub mod spill;
 pub mod topology;
 pub mod update;
 pub mod validate;
@@ -369,6 +370,20 @@ impl Engine {
         }
         let parsed = parser.parse_query(query)?;
         crate::validate::check(&parsed)?;
+
+        // Spilling is tried *before* admission control, and the order is the whole point: a
+        // query this can answer must not be refused for being large. Admission control is
+        // for the operators nothing can bound; a `DISTINCT` that sorts and spills is bounded
+        // by its buffer, so its size stops being a reason to decline it.
+        //
+        // Before the topology rewrite and the bind join too, because this re-enters the
+        // evaluator with the `DISTINCT` removed and both would run on that inner query.
+        if let Some(budget) = options.spill_distinct {
+            if let Some(results) = Self::try_spilling_distinct(view, &parsed, options, budget)? {
+                return Ok((results, None));
+            }
+        }
+
         // Declined before anything is evaluated, when there are statistics to decline it on.
         // The memory ceiling would stop this query too, but several gigabytes and some
         // minutes later; an estimate costs a walk of the algebra. See `crate::admit`.
@@ -380,7 +395,7 @@ impl Engine {
                 return Err(EngineError::BadRequest(format!(
                     "refusing {blocking}, over the {budget}-row budget. {} Raise it with --max-blocking-rows, or make the pattern more selective.",
                     if blocking.operator == "ORDER BY" {
-                        "A LIMIT will not help: the rows must all be sorted before the                          smallest is known."
+                        "A LIMIT will not help: the rows must all be sorted before the smallest is known."
                     } else {
                         "A LIMIT may help, since the operator can stop once it has enough."
                     }
@@ -481,6 +496,136 @@ impl Engine {
         Ok(Some(QueryResults::Solutions(
             spareval::QuerySolutionIter::from_tuples(variables, solutions.into_iter().map(Ok)),
         )))
+    }
+
+    /// Answers the two `DISTINCT` shapes that can be spilled, or declines.
+    ///
+    /// `spareval` evaluates `DISTINCT` from a hash set holding every distinct solution, and
+    /// a query whose answer does not fit in memory therefore cannot be answered at all —
+    /// which is what took a server down. These two shapes are handed to
+    /// [`crate::spill::Distinct`] instead, which sorts, spills and merges, so the memory is
+    /// the buffer rather than the answer.
+    ///
+    /// Only two, and deliberately: each is recognised exactly, and anything else falls
+    /// through to `spareval` unchanged. Half-matching an algebra and evaluating something
+    /// subtly different would be far worse than not matching it.
+    ///
+    /// - `Distinct { inner }` — `SELECT DISTINCT`, with or without a `LIMIT` above it.
+    /// - `Group` with no grouping key and one `COUNT(DISTINCT *)` — the shape of the query
+    ///   in the crash report, where the count is the number of distinct rows and the rows
+    ///   themselves are never needed.
+    fn try_spilling_distinct<'a>(
+        view: &'a DatasetView<'a>,
+        parsed: &spargebra::Query,
+        options: &QueryOptions,
+        budget: usize,
+    ) -> Result<Option<QueryResults<'a>>, EngineError> {
+        use spargebra::algebra::{AggregateExpression, GraphPattern};
+
+        let spargebra::Query::Select {
+            pattern,
+            dataset,
+            base_iri,
+        } = parsed
+        else {
+            return Ok(None);
+        };
+
+        // A `LIMIT` sits above the `DISTINCT`; look through it, and put it back afterwards
+        // by letting the ordinary path apply it to the deduplicated stream.
+        let (inner, slice) = match pattern {
+            GraphPattern::Slice {
+                inner,
+                start,
+                length,
+            } => (inner.as_ref(), Some((*start, *length))),
+            other => (other, None),
+        };
+
+        let rewritten = |body: &GraphPattern| spargebra::Query::Select {
+            dataset: dataset.clone(),
+            base_iri: base_iri.clone(),
+            pattern: body.clone(),
+        };
+
+        match inner {
+            // SELECT DISTINCT ...
+            GraphPattern::Distinct { inner } => {
+                let query = rewritten(inner);
+                let (results, _) = Self::evaluate_with(view, &query, options, None)?;
+                let QueryResults::Solutions(solutions) = results else {
+                    return Ok(None);
+                };
+                let mut distinct = crate::spill::deduplicate(solutions, budget)?;
+                if let Some((start, length)) = slice {
+                    let variables: std::sync::Arc<[spargebra::term::Variable]> =
+                        std::sync::Arc::from(distinct.variables().to_vec());
+                    let rows = distinct.skip(start).take(length.unwrap_or(usize::MAX));
+                    distinct = spareval::QuerySolutionIter::new(variables, rows);
+                }
+                Ok(Some(QueryResults::Solutions(distinct)))
+            }
+
+            // SELECT (COUNT(DISTINCT *) AS ?n) ...
+            GraphPattern::Project { inner, variables } => {
+                let GraphPattern::Extend {
+                    inner: extended,
+                    variable: bound,
+                    ..
+                } = inner.as_ref()
+                else {
+                    return Ok(None);
+                };
+                let GraphPattern::Group {
+                    inner: body,
+                    variables: by,
+                    aggregates,
+                } = extended.as_ref()
+                else {
+                    return Ok(None);
+                };
+                if !by.is_empty() || aggregates.len() != 1 {
+                    return Ok(None);
+                }
+                if !matches!(
+                    aggregates[0].1,
+                    AggregateExpression::CountSolutions { distinct: true }
+                ) {
+                    return Ok(None);
+                }
+
+                let query = rewritten(body);
+                let (results, _) = Self::evaluate_with(view, &query, options, None)?;
+                let QueryResults::Solutions(solutions) = results else {
+                    return Ok(None);
+                };
+                // Counted rather than collected: the rows are deduplicated on their way
+                // past and never held, so this is the one `DISTINCT` whose answer is O(1)
+                // however large its input.
+                let mut count: u64 = 0;
+                for row in crate::spill::deduplicate(solutions, budget)? {
+                    row?;
+                    count += 1;
+                }
+                let total = oxrdf::Literal::new_typed_literal(
+                    count.to_string(),
+                    oxrdf::vocab::xsd::INTEGER,
+                );
+                let projected: std::sync::Arc<[spargebra::term::Variable]> =
+                    std::sync::Arc::from(variables.clone());
+                let value = if variables.first() == Some(bound) {
+                    vec![Some(oxrdf::Term::from(total))]
+                } else {
+                    // The projection does not name what the aggregate bound, so this is not
+                    // the shape it looked like. Declining beats guessing.
+                    return Ok(None);
+                };
+                Ok(Some(QueryResults::Solutions(
+                    spareval::QuerySolutionIter::from_tuples(projected, std::iter::once(Ok(value))),
+                )))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Evaluation through `spareval`, which is both the general path and the fallback when

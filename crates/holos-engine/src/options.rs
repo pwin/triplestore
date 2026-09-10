@@ -75,6 +75,13 @@ pub struct QueryOptions {
     /// does not run. See [`crate::admit`] for which operators block and why a `LIMIT` is
     /// not the answer to all of them.
     pub blocking_budget: Option<u64>,
+    /// Bytes of rows a `DISTINCT` may hold before spilling a sorted run to disk.
+    ///
+    /// `None` leaves `DISTINCT` to `spareval`, which answers it from a hash set and cannot
+    /// finish once that set outgrows memory. Setting it hands the two shapes
+    /// [`crate::spill`] recognises to a sort-spill-merge instead, which is bounded by this
+    /// number rather than by the size of the answer.
+    pub spill_distinct: Option<usize>,
 
     /// Collect the query plan, with per-operator statistics.
     pub explain: bool,
@@ -139,6 +146,17 @@ impl QueryOptions {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Answers `DISTINCT` by sorting and spilling rather than by a hash set in memory.
+    ///
+    /// The trade is that the rows come back **sorted rather than in arrival order**, which
+    /// SPARQL permits — `DISTINCT` promises no order — and that a small result pays an
+    /// `n log n` sort where a hash set paid `n`. What it buys is a `DISTINCT` that finishes.
+    #[must_use]
+    pub fn spilling_distinct(mut self, budget: usize) -> Self {
+        self.spill_distinct = Some(budget);
         self
     }
 
