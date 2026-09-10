@@ -73,6 +73,16 @@ SERVER
                              Enforced while a query reads or streams rows; a query blocked
                              inside one in-memory step is not interruptible. See
                              OPERATIONS.md.
+    --max-blocking-rows <N>  Refuse a query whose ORDER BY, DISTINCT or keyed GROUP BY is
+                             *estimated* to buffer more than N rows. Default 10,000,000;
+                             0 disables it. Needs --reorder, since without statistics there
+                             is no estimate and nothing is refused.
+
+                             This declines in a millisecond what --max-query-memory would
+                             otherwise stop several gigabytes and some minutes later. A
+                             LIMIT rescues a DISTINCT and does not rescue an ORDER BY, and
+                             the refusal says which case it is.
+
     --max-query-memory <GiB> Refuse reads once the process has grown this far past its
                              resting set -- what was resident after the store opened and
                              any --data finished loading. Default 8, 0 disables it.
@@ -133,6 +143,8 @@ struct Config {
     timeout: Option<Duration>,
     /// Bytes one query may allocate before it is cancelled. `None` disables the ceiling.
     max_query_memory: Option<usize>,
+    /// Rows a blocking operator may be estimated to buffer. Needs `--reorder` to apply.
+    max_blocking_rows: Option<u64>,
     read_only: bool,
     reorder: bool,
     gsp_base: Option<String>,
@@ -171,6 +183,7 @@ impl Default for Config {
             // machine's RAM, which this server does not read: it is a backstop against
             // absurdity, not a scheduler. `--max-query-memory 0` removes it.
             max_query_memory: Some(8 * 1024 * 1024 * 1024),
+            max_blocking_rows: Some(holos_engine::admit::DEFAULT_BLOCKING_ROWS),
             read_only: false,
             reorder: false,
             gsp_base: None,
@@ -1126,6 +1139,9 @@ fn query_options(
     if let Some(limit) = state.config.max_query_memory {
         options = options.with_memory_limit(limit);
     }
+    if let Some(rows) = state.config.max_blocking_rows {
+        options = options.with_blocking_budget(rows);
+    }
     if let Some(stats) = state.statistics() {
         options = options.reordering(stats);
     }
@@ -1432,6 +1448,10 @@ fn parse_args(args: &[String]) -> Result<Config> {
                 } else {
                     None
                 };
+            }
+            "--max-blocking-rows" => {
+                let rows: u64 = value(&mut i)?.parse()?;
+                c.max_blocking_rows = if rows > 0 { Some(rows) } else { None };
             }
             "--max-query-memory" => {
                 let gigabytes: f64 = value(&mut i)?.parse()?;

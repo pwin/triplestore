@@ -69,6 +69,12 @@ pub struct QueryOptions {
     /// going to be. Without a cap the second one aborts the process rather than failing the
     /// request — see [`crate::memory`].
     pub memory_limit: Option<usize>,
+    /// Rows a blocking operator may be *estimated* to buffer before the query is refused.
+    ///
+    /// Needs statistics to mean anything: without them there is no estimate and the check
+    /// does not run. See [`crate::admit`] for which operators block and why a `LIMIT` is
+    /// not the answer to all of them.
+    pub blocking_budget: Option<u64>,
 
     /// Collect the query plan, with per-operator statistics.
     pub explain: bool,
@@ -133,6 +139,17 @@ impl QueryOptions {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Refuses a query whose blocking operator is estimated to buffer more than `rows`.
+    ///
+    /// Complements [`Self::with_memory_limit`] rather than replacing it: the ceiling is a
+    /// backstop that fires once a query is already large, and this declines the ones that
+    /// were never going to finish, in a millisecond, with the number that says why.
+    #[must_use]
+    pub fn with_blocking_budget(mut self, rows: u64) -> Self {
+        self.blocking_budget = Some(rows);
         self
     }
 

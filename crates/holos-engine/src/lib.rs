@@ -19,6 +19,7 @@
 // a length lint would make this code harder to check against the specs, not easier.
 #![allow(clippy::many_single_char_names)]
 
+pub mod admit;
 pub mod bindjoin;
 pub mod crs;
 pub mod entailment;
@@ -368,6 +369,24 @@ impl Engine {
         }
         let parsed = parser.parse_query(query)?;
         crate::validate::check(&parsed)?;
+        // Declined before anything is evaluated, when there are statistics to decline it on.
+        // The memory ceiling would stop this query too, but several gigabytes and some
+        // minutes later; an estimate costs a walk of the algebra. See `crate::admit`.
+        if let (Some(budget), Some(stats)) =
+            (options.blocking_budget, options.reorder_with.as_ref())
+        {
+            if let Some(blocking) = crate::admit::over_budget(&parsed, stats, view.store(), budget)
+            {
+                return Err(EngineError::BadRequest(format!(
+                    "refusing {blocking}, over the {budget}-row budget. {} Raise it with --max-blocking-rows, or make the pattern more selective.",
+                    if blocking.operator == "ORDER BY" {
+                        "A LIMIT will not help: the rows must all be sorted before the                          smallest is known."
+                    } else {
+                        "A LIMIT may help, since the operator can stop once it has enough."
+                    }
+                )));
+            }
+        }
         // GeoSPARQL topology properties become geometry lookups and a filter. Unconditional
         // because it is correctness rather than optimisation: without it, `?a geo:sfContains
         // ?b` is an ordinary lookup that matches nothing and says so silently.
