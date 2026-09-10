@@ -185,7 +185,41 @@ fn the_ceiling_stops_a_runaway_and_leaves_everything_else_alone() {
     }
 
     // -----------------------------------------------------------------------------
-    // 4. The process is still here, and the engine still answers.
+    // 4. A buffering query is stopped mid-buffer, by the scan rather than a watchdog.
+    //
+    // This is the case a watchdog could not catch and a real deployment hit: an 8 GiB
+    // ceiling, a `Vec` grown to 8 GiB, and a fatal request for 16 GiB. A doubling container
+    // goes from *at* the ceiling to *fatally past* it in one allocation, and asks for the
+    // new block while still holding the old, so no sampling interval fits inside the step.
+    //
+    // `ORDER BY` cannot emit a row until it has seen the last one, so nothing checks a
+    // cancellation token while it buffers. But it buffers *from the scan*, which is where
+    // the ceiling is now read -- so it is refused on the first quad past the line.
+    //
+    // The ceiling is process-wide, which is why this lives here rather than in a test of
+    // its own: set globally, it would refuse the queries of every test running beside it.
+    // -----------------------------------------------------------------------------
+    {
+        let ordered = format!("PREFIX ex: <{EX}> SELECT ?s ?o WHERE {{ ?s ?p ?o }} ORDER BY ?o");
+        memory::set_ceiling(4 * 1024 * 1024);
+        let refused = drain(&engine, &ordered, &QueryOptions::new());
+        memory::set_ceiling(0);
+
+        let error = refused.expect_err("the scan should have refused");
+        assert!(error.contains("ceiling"), "not the ceiling: {error}");
+        assert!(
+            error.contains("--max-query-memory"),
+            "the message must say how to raise it: {error}"
+        );
+
+        // And with the ceiling lifted, the same query is left alone -- otherwise the
+        // assertion above would pass against a build that refused everything.
+        let rows = drain(&engine, &ordered, &QueryOptions::new()).expect("no ceiling");
+        assert_eq!(rows, ROWS);
+    }
+
+    // -----------------------------------------------------------------------------
+    // 5. The process is still here, and the engine still answers.
     //
     // The whole feature is the difference between a failed request and a dead server.
     // -----------------------------------------------------------------------------
@@ -195,5 +229,25 @@ fn the_ceiling_stops_a_runaway_and_leaves_everything_else_alone() {
     assert!(
         drain(&engine, "ASK { }", &QueryOptions::new()).is_ok(),
         "the engine is unusable after a cancellation"
+    );
+}
+
+/// A query that buffers before it yields anything must also be stoppable.
+///
+/// `ORDER BY` cannot emit its first row until it has seen the last, so `spareval` collects
+/// every solution into a `Vec` and sorts it. While that `Vec` grows, nothing checks the
+/// cancellation token: the per-solution check in `guard_with_deadline` only runs on rows
+/// that come *out*, and none do.
+#[test]
+fn an_order_by_that_buffers_everything_is_still_stopped() {
+    memory::mark_tracking();
+    let engine = engine();
+    let capped = QueryOptions::new().with_memory_limit(CEILING);
+    let query = format!("PREFIX ex: <{EX}> SELECT ?s ?o WHERE {{ ?s ?p ?o }} ORDER BY ?o");
+    let error = drain(&engine, &query, &capped)
+        .expect_err("a buffering query must hit the ceiling like any other");
+    assert!(
+        error.contains("limit"),
+        "stopped for the wrong reason: {error}"
     );
 }

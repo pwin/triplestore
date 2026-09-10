@@ -73,12 +73,19 @@ SERVER
                              Enforced while a query reads or streams rows; a query blocked
                              inside one in-memory step is not interruptible. See
                              OPERATIONS.md.
-    --max-query-memory <GiB> Cancel a query that allocates more than this. Default 8.
-                             0 disables the ceiling. Measures what the query adds, not the
-                             process total, so a large in-memory store does not count
-                             against it. Without a ceiling, a SELECT DISTINCT or
-                             COUNT(DISTINCT *) over a large store can exhaust the machine
-                             and abort the server, taking every other request with it.
+    --max-query-memory <GiB> Refuse reads once the process has grown this far past its
+                             resting set -- what was resident after the store opened and
+                             any --data finished loading. Default 8, 0 disables it.
+
+                             Set it to a THIRD of the memory you can spare, at most. A
+                             growing buffer asks for its next block before releasing the
+                             old one, so a container crossing an 8 GiB ceiling wants 24 GiB
+                             in hand at that instant. A ceiling set near the machine's limit
+                             does not prevent the abort, it only chooses where it happens.
+
+                             Without a ceiling, a SELECT DISTINCT or COUNT(DISTINCT *) over
+                             a large store exhausts the machine and aborts the server,
+                             taking every other request with it.
     --read-only              Answer 403 to /update and to every writing Graph Store
                              Protocol verb. The store is still opened writable, so a loader
                              can use it; this refuses writes over HTTP only.
@@ -316,6 +323,13 @@ fn main() -> Result<()> {
         );
     }
 
+    // Armed here, and not a line earlier: everything above this is the resting set — the
+    // store, whatever `--data` loaded, the statistics and the spatial index — and a ceiling
+    // measured from zero would count all of it against the first query.
+    if let Some(limit) = state.config.max_query_memory {
+        holos_engine::memory::set_ceiling(limit);
+    }
+
     let server = Arc::new(Server::http(&listen).map_err(|e| anyhow::anyhow!("{e}"))?);
     eprintln!("holos-server listening on http://{listen}");
     if ui_enabled {
@@ -324,7 +338,7 @@ fn main() -> Result<()> {
     eprintln!("  query    http://{listen}/query");
     match state.config.max_query_memory {
         Some(limit) => eprintln!(
-            "  memory   one query may allocate {} before it is cancelled              (--max-query-memory GiB, 0 to disable)",
+            "  memory   queries are refused once the process grows {} past its resting set              (--max-query-memory GiB, 0 to disable)",
             holos_engine::memory::human(limit)
         ),
         // Worth saying out loud rather than leaving to the flag reference: without a

@@ -28,6 +28,22 @@ pub enum ViewError {
     /// The policy refused, under [`Semantics::Fail`].
     #[error("access denied by policy")]
     AccessDenied,
+    /// The process outgrew its memory ceiling, so the read was refused.
+    ///
+    /// Raised from the scan rather than by a watchdog, and it fails the *query* rather than
+    /// the process: the alternative, reached in a real deployment, is `handle_alloc_error`
+    /// and an abort that takes every other request with it.
+    #[error(
+        "query cancelled: the process grew {} past its resting set, over the {} ceiling (raise it or remove it with --max-query-memory)",
+        crate::memory::human(*used),
+        crate::memory::human(*limit)
+    )]
+    OverMemoryCeiling {
+        /// Bytes live above what was resident when the ceiling was set.
+        used: usize,
+        /// The ceiling passed.
+        limit: usize,
+    },
     /// The storage layer could not answer.
     #[error(transparent)]
     Storage(#[from] StorageError),
@@ -251,6 +267,14 @@ fn decide<'a>(
         Ok(quad) => quad,
         Err(e) => return Some(Err(ViewError::from(e))),
     };
+    // The process has outgrown its ceiling, so this read is refused and the query fails.
+    // Checked here because §14 already makes this the one route to the indexes: an operator
+    // buffering its way toward an abort is filling that buffer from this scan, and this is
+    // the question it cannot avoid asking. See `crate::memory::over_ceiling`.
+    if crate::memory::over_ceiling() {
+        let (limit, used) = crate::memory::ceiling();
+        return Some(Err(ViewError::OverMemoryCeiling { used, limit }));
+    }
     match view.policy.decide_quad(quad, Modes::READ) {
         Decision::Allow => Some(Ok(InternalQuad {
             subject: quad.subject,

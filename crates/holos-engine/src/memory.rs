@@ -63,6 +63,12 @@ static LIVE: AtomicUsize = AtomicUsize::new(0);
 /// Whether a binary has installed a counting allocator and said so.
 static TRACKING: AtomicBool = AtomicBool::new(false);
 
+/// Bytes live when the process finished starting up, so the ceiling measures growth.
+static RESTING: AtomicUsize = AtomicUsize::new(0);
+
+/// How far past [`RESTING`] the process may grow before reads are refused. Zero disables.
+static CEILING: AtomicUsize = AtomicUsize::new(0);
+
 /// Records bytes just handed out by the allocator.
 ///
 /// `Relaxed` is sufficient because nothing is being *ordered* by this counter: the watchdog
@@ -115,6 +121,58 @@ pub fn tracking() -> bool {
 #[must_use]
 pub fn live_bytes() -> usize {
     LIVE.load(Ordering::Relaxed)
+}
+
+/// Sets the ceiling, measured from what is live now.
+///
+/// Called once, after the store is open and any startup data is loaded, so the resting set
+/// — the dataset, the block cache, the indexes — is the baseline rather than part of the
+/// budget. `limit` of zero disables the ceiling.
+pub fn set_ceiling(limit: usize) {
+    RESTING.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
+    CEILING.store(limit, Ordering::Relaxed);
+}
+
+/// The ceiling in force, and what is live above the resting set.
+#[must_use]
+pub fn ceiling() -> (usize, usize) {
+    let resting = RESTING.load(Ordering::Relaxed);
+    (
+        CEILING.load(Ordering::Relaxed),
+        LIVE.load(Ordering::Relaxed).saturating_sub(resting),
+    )
+}
+
+/// Whether the process has grown past its ceiling.
+///
+/// # Why this is read at the scan rather than sampled by a watchdog
+///
+/// The first version of the ceiling cancelled a query from a thread that woke every 10 ms
+/// and compared the counter. It did not work, and a real crash showed why: an 8 GiB ceiling,
+/// a `Vec` that had grown to 8 GiB, and a fatal request for 16 GiB. A doubling container
+/// goes from *at* the ceiling to *fatally past* it in a single allocation — and it asks for
+/// the new block before releasing the old, so crossing an 8 GiB ceiling needs 24 GiB in
+/// hand. There is no sampling interval short enough to fit inside that step.
+///
+/// So the question is asked where every read already asks a question: `decide`, in the
+/// dataset view, which `DESIGN.md` §14 makes the one route to the indexes. Two relaxed loads
+/// per quad, against a policy decision that is already happening. An operator that buffers
+/// — `ORDER BY`, a hash-join build side, `DISTINCT` — is filling that buffer *from* the
+/// scan, so it is asking this question thousands of times a second while it grows.
+///
+/// It cannot catch a query that allocates without reading. Nothing short of a fallible
+/// allocator could, and Rust's `handle_alloc_error` aborts rather than unwinding. What it
+/// can do is make the ceiling bite while the query is still small enough to survive, which
+/// is why the ceiling has to sit well below the memory available — see `--max-query-memory`.
+#[must_use]
+pub fn over_ceiling() -> bool {
+    let limit = CEILING.load(Ordering::Relaxed);
+    if limit == 0 {
+        return false;
+    }
+    LIVE.load(Ordering::Relaxed)
+        .saturating_sub(RESTING.load(Ordering::Relaxed))
+        > limit
 }
 
 /// A query stopped for asking for more memory than it was allowed.
