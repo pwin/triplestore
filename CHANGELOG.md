@@ -91,6 +91,53 @@ failure. But it means a load wants room for the source, the scratch and the stor
 `compact` checks its headroom before starting while a load does not. Sizing guidance is in
 OPERATIONS.md; the preflight is the next piece.
 
+### Verified end to end at 653.8 million triples
+
+The whole path an operator takes, on this build: `holos stats --store E:/store2 --data
+<30 GB Turtle> --bulk`, then `deploy/run.sh`, then queries over HTTP.
+
+| | before | 0.9.0 |
+|---|---|---|
+| load, final-merge peak | 18,007 MiB | **3,413 MiB** |
+| server, memory with the store open | ~4,000 MiB | **199 MiB** |
+| server, peak during `COUNT(*)` | — | 1,230 MiB |
+| `COUNT(*)` over HTTP | 653,839,702 | **653,839,702** in 3 m 56 s |
+| load rate | 50,210/s | 48,869/s |
+
+Same count, same predicate histogram, same rate; the merge spike is 5.3× smaller and the
+store costs twenty times less to have open, because the partitioned filters are no longer
+pinned by the table readers.
+
+### The server names its store on its first line of output
+
+That verification run began by reproducing a failure. A store loaded into one directory with
+the CLI, `deploy/run.sh` started on its default `HOLOS_STORE=./var/store`, and every query
+answered from an empty database with no error anywhere — the server had opened the empty
+directory and created a fresh store in it. Geospatial functions with literal arguments kept
+working because they never touch the store, which made it look like a partial failure rather
+than the total one it was. Ten lines of startup output and none said where the data was.
+
+Now the first line is `store E:/store2 — 653839702 quads`, or on the directory that was
+being served, `store ./var/store — empty. Nothing has been loaded here; if that is a surprise,
+check that this is the directory the load wrote to.` One `META_QUADS` read, so it is free.
+OPERATIONS.md's loading section now leads with the pitfall and the `holos.env.local` override
+that `run.sh` sources last.
+
+### Recorded and not fixed: the spatial index is a full dictionary walk at startup
+
+`refresh_spatial` runs unconditionally when the server starts, and its first build decodes
+**every dictionary literal** — one `id2str` point lookup each — to ask whether it is a
+geometry. On this store that is about 150 million lookups and **3½ minutes** before
+"listening" appears, for zero geometries. Every restart pays it.
+
+It cannot be skipped by checking whether any GeoSPARQL predicate has triples: `geometry_of`
+decides by *datatype*, so a `wktLiteral` interned under any predicate at all is a geometry
+the index must know about, and the watermark invariant — everything below it is indexed —
+does not survive a build that looked at nothing. What it can be is cheap: `from..count` is a
+contiguous id range in `id2str`, so one range iterator does the work of 150 million point
+gets. That needs a range-decode method on the `Storage` trait for both backends, and is the
+next piece.
+
 ### Measured, not changed: what a large store is actually slow at
 
 A sweep of representative shapes against the 653.8-million-triple store, timed net of a 2.7 s
