@@ -188,19 +188,20 @@ impl SpatialIndex {
 
         // Decoded and parsed before the write lock is taken: that is the expensive part and
         // there is no reason to hold readers off during it.
+        //
+        // One range walk, not a point lookup per literal. On first build this is every
+        // literal in the dictionary, and the difference on a 653-million-triple store was
+        // three and a half minutes before the server would listen — spent establishing that
+        // there were no geometries.
         let mut fresh = Vec::new();
-        for i in from..count {
-            let id = TermId::new(Tag::Literal, i as u64);
-            let Some(term) = store.decode_term(id)? else {
-                continue;
-            };
-            let Some(geometry) = geo_ext::geometry_of(&term) else {
-                continue;
-            };
-            if let Some(entry) = index_entry(id, &geometry) {
-                fresh.push(entry);
+        store.for_each_in_range(Tag::Literal, from, count, &mut |id, term| {
+            if let Some(geometry) = geo_ext::geometry_of(&term) {
+                if let Some(entry) = index_entry(id, &geometry) {
+                    fresh.push(entry);
+                }
             }
-        }
+            Ok(())
+        })?;
 
         let resurrected = self.resurrect(store)?;
 

@@ -1239,6 +1239,71 @@ impl Storage for RocksStorage {
         usize::try_from(self.next.values().sum::<u64>()).unwrap_or(usize::MAX)
     }
 
+    /// One bounded iterator over `id2str` instead of a point lookup per id.
+    ///
+    /// The ids for a tag are dense and the keys are their big-endian bytes, so `from..to` is
+    /// a contiguous key range and the iterator's own bounds do the work. `id2str` has no
+    /// prefix extractor, so no `total_order_seek` is needed.
+    ///
+    /// Terms minted inside an open scope have no `id2str` row yet, exactly as in `decode`, so
+    /// the scope is walked afterwards for anything in range. Order between the two is not
+    /// promised — the trait says ascending, and the store side is; a caller that cares about
+    /// order across a scope boundary is asking for something no caller currently needs.
+    fn for_each_in_range(
+        &self,
+        tag: Tag,
+        from: usize,
+        to: usize,
+        f: &mut dyn FnMut(TermId, Term) -> Result<()>,
+    ) -> Result<()> {
+        if from >= to {
+            return Ok(());
+        }
+        // Inline and well-known ids have no rows to walk; the general path answers them.
+        if tag.is_inline() {
+            for i in from..to {
+                let id = TermId::new(tag, i as u64);
+                if let Some(term) = self.decode(id)? {
+                    f(id, term)?;
+                }
+            }
+            return Ok(());
+        }
+
+        let mut opts = ReadOptions::default();
+        opts.set_iterate_lower_bound(put_id(TermId::new(tag, from as u64)).to_vec());
+        opts.set_iterate_upper_bound(put_id(TermId::new(tag, to as u64)).to_vec());
+        for item in self
+            .db
+            .iterator_cf_opt(cf(&self.db, ID2STR)?, opts, IteratorMode::Start)
+        {
+            let (key, value) = item.map_err(rocks_err)?;
+            let id = codec::read_id(&key)?;
+            let term = match codec::read_term(&value)? {
+                StoredTerm::Complete(term) => term,
+                // A triple term decodes through its components; rare, and `decode` already
+                // knows how. Falling back keeps one definition of that rather than two.
+                StoredTerm::Triple(_) => match self.decode(id)? {
+                    Some(term) => term,
+                    None => continue,
+                },
+            };
+            f(id, term)?;
+        }
+
+        if let Some(scope) = self.scope.as_ref() {
+            let range = (from as u64)..(to as u64);
+            for id in scope.strings.keys() {
+                if id.tag() == tag && range.contains(&id.payload()) {
+                    if let Some(term) = self.decode(*id)? {
+                        f(*id, term)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn dictionary_count_for(&self, tag: Tag) -> usize {
         self.next
             .get(&tag)

@@ -326,3 +326,63 @@ fn a_store_can_say_how_much_disk_it_uses() -> Result<()> {
     assert_eq!(Store::new().on_disk_bytes(), None);
     Ok(())
 }
+
+/// The range walk must agree with a point lookup per id, exactly, for every tag.
+///
+/// `for_each_in_range` on `RocksDB` is a bounded iterator over `id2str`; the trait's default
+/// is `decode` in a loop. The spatial index's first build moved from the second to the first
+/// because on a 653-million-triple store the loop was three and a half minutes, and the only
+/// way that move is safe is if the two say the same thing about every id. So this asks both,
+/// over every dictionary-backed tag the fixture populates — IRIs, literals, blank nodes, and
+/// the triple terms whose decode goes through their components — and also across a window
+/// that starts and ends mid-range, since a bound one past the last id or one short of the
+/// first is exactly the kind of mistake that survives a walk from zero to the end.
+#[test]
+fn the_range_walk_matches_point_lookups() -> Result<()> {
+    use holos_core::{Tag, TermId};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut store = opened(&dir)?;
+    load(&mut store, &fixture(), true)?;
+
+    for tag in [Tag::Iri, Tag::Literal, Tag::BlankNode, Tag::TripleTerm] {
+        let count = store.dictionary_count_for(tag);
+        assert!(count > 0, "the fixture should have issued {tag:?} ids");
+
+        // The whole range, and a window strictly inside it.
+        for (from, to) in [(0, count), (count / 3, count - count / 4)] {
+            let mut walked = Vec::new();
+            store.for_each_in_range(tag, from, to, &mut |id, term| {
+                walked.push((id, term));
+                Ok(())
+            })?;
+
+            let mut looked_up = Vec::new();
+            for i in from..to {
+                let id = TermId::new(tag, i as u64);
+                if let Some(term) = store.decode_term(id)? {
+                    looked_up.push((id, term));
+                }
+            }
+
+            assert_eq!(
+                walked, looked_up,
+                "{tag:?} over {from}..{to}: the range walk and point lookups disagree"
+            );
+            assert_eq!(walked.len(), to - from, "{tag:?}: every id in range was issued");
+        }
+    }
+
+    // An empty and an inverted range yield nothing and do not fail.
+    let mut seen = 0;
+    store.for_each_in_range(Tag::Literal, 5, 5, &mut |_, _| {
+        seen += 1;
+        Ok(())
+    })?;
+    store.for_each_in_range(Tag::Literal, 9, 2, &mut |_, _| {
+        seen += 1;
+        Ok(())
+    })?;
+    assert_eq!(seen, 0);
+    Ok(())
+}

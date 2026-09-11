@@ -57,6 +57,35 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// [`Storage::dictionary_len`] must be.
     fn dictionary_count_for(&self, tag: holos_core::Tag) -> usize;
 
+    /// Decodes every id issued for `tag` in `from..to`, ascending, handing each to `f`.
+    ///
+    /// Ids the store never issued are skipped, and an error from `f` stops the walk. The
+    /// default is `to - from` calls to [`Storage::decode`], which is correct for any backend
+    /// and costs a point lookup per id. A backend whose dictionary is a sorted structure
+    /// should override it with one range read, because the difference is not small: the
+    /// spatial index's first build walks every literal, and on a 653-million-triple store
+    /// that was **three and a half minutes** of point lookups before the server would listen,
+    /// for a dataset holding no geometries at all.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Storage::decode`] or `f` returns.
+    fn for_each_in_range(
+        &self,
+        tag: holos_core::Tag,
+        from: usize,
+        to: usize,
+        f: &mut dyn FnMut(TermId, Term) -> Result<()>,
+    ) -> Result<()> {
+        for i in from..to {
+            let id = TermId::new(tag, i as u64);
+            if let Some(term) = self.decode(id)? {
+                f(id, term)?;
+            }
+        }
+        Ok(())
+    }
+
     // --- quads --------------------------------------------------------------------
 
     /// Indexes an already-encoded quad. `Ok(true)` if it was not already present.

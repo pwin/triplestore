@@ -89,6 +89,21 @@ impl Store {
         self.inner.dictionary_len()
     }
 
+    /// See [`Storage::for_each_in_range`].
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backend or `f` returns.
+    pub fn for_each_in_range(
+        &self,
+        tag: holos_core::Tag,
+        from: usize,
+        to: usize,
+        f: &mut dyn FnMut(TermId, Term) -> Result<()>,
+    ) -> Result<()> {
+        self.inner.for_each_in_range(tag, from, to, f)
+    }
+
     /// How many ids have been issued for one dictionary-backed tag.
     ///
     /// Each kind has its own dense index space, so this is an enumeration bound as well as a

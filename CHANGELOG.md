@@ -123,20 +123,31 @@ check that this is the directory the load wrote to.` One `META_QUADS` read, so i
 OPERATIONS.md's loading section now leads with the pitfall and the `holos.env.local` override
 that `run.sh` sources last.
 
-### Recorded and not fixed: the spatial index is a full dictionary walk at startup
+### The spatial index's first build is one read, not 150 million
 
-`refresh_spatial` runs unconditionally when the server starts, and its first build decodes
-**every dictionary literal** — one `id2str` point lookup each — to ask whether it is a
-geometry. On this store that is about 150 million lookups and **3½ minutes** before
-"listening" appears, for zero geometries. Every restart pays it.
+`refresh_spatial` runs unconditionally when the server starts, and its first build has to
+look at **every dictionary literal** to ask whether it is a geometry — that is the invariant
+the index rests on (everything below the watermark is indexed), and it cannot be skipped by
+checking whether any GeoSPARQL predicate has triples, because a geometry is decided by
+*datatype* and a `wktLiteral` interned under any predicate at all is one.
 
-It cannot be skipped by checking whether any GeoSPARQL predicate has triples: `geometry_of`
-decides by *datatype*, so a `wktLiteral` interned under any predicate at all is a geometry
-the index must know about, and the watermark invariant — everything below it is indexed —
-does not survive a build that looked at nothing. What it can be is cheap: `from..count` is a
-contiguous id range in `id2str`, so one range iterator does the work of 150 million point
-gets. That needs a range-decode method on the `Storage` trait for both backends, and is the
-next piece.
+It was doing that with a point lookup per literal. On the 653.8-million-triple store, with
+zero geometries in it, that was **3½ minutes** before "listening" appeared, on every restart.
+
+`Storage::for_each_in_range` walks `from..to` for a tag and hands each term to a callback.
+The trait's default is the old loop, correct for any backend; `RocksDB` overrides it with one
+bounded iterator over `id2str`, since the ids for a tag are dense and their big-endian bytes
+are a contiguous key range. Terms minted in an open scope, which have no `id2str` row yet,
+are walked afterwards from the scope, exactly as `decode` consults it first.
+
+The override must say precisely what the loop says, and a test asks both — every
+dictionary-backed tag, whole range and a window starting and ending mid-range, plus empty and
+inverted ranges. An off-by-one on the upper bound fails it by name.
+
+Startup on that store: **210 s → 46 s**. The remaining 46 s is decoding 150 million literals
+sequentially rather than fetching them; going lower means not decoding a literal whose stored
+bytes already say its datatype is not a geometry, which is a codec-level peek and a separate
+change.
 
 ### Measured, not changed: what a large store is actually slow at
 
