@@ -322,6 +322,27 @@ fn main() -> Result<()> {
     let config = parse_args(&args)?;
 
     let mut engine = open_engine(&config)?;
+    // Named and counted before anything else happens, because a server pointed at the wrong
+    // directory serves an empty database with perfect composure. That happened: a store was
+    // loaded into one path with the CLI, `deploy/run.sh` started the server on its default
+    // `./var/store`, and every query came back empty against 653 million triples sitting a
+    // volume away. Ten lines of startup output and none of them said where the data was.
+    //
+    // `len` is `META_QUADS` on RocksDB, one read, so this costs nothing on a large store.
+    match &config.store {
+        Some(path) => {
+            let quads = engine.store().len();
+            if quads == 0 && config.data.is_empty() {
+                eprintln!(
+                    "  store    {path} — empty. Nothing has been loaded here; if that is a \
+surprise, check that this is the directory the load wrote to."
+                );
+            } else {
+                eprintln!("  store    {path} — {quads} quads");
+            }
+        }
+        None => eprintln!("  store    in memory (no --store); nothing persists past exit"),
+    }
     for path in &config.data {
         let format = format_for(path)?;
         let reader = holos_engine::source::reader(std::path::Path::new(path))?;

@@ -186,6 +186,17 @@ nothing; there is no geospatial exemption.
 
 ## Loading data
 
+> **Load with the CLI, serve with the server — and check they name the same directory.**
+> `deploy/run.sh` serves `HOLOS_STORE` from `deploy/holos.env`, which defaults to
+> `./var/store`. A load into any other path — `--store E:/store2`, say — leaves that default
+> pointing at an empty directory, and the server will open it, create a fresh database in it,
+> and answer every query from nothing, with no error anywhere. Put the real path in
+> `deploy/holos.env.local`, which `run.sh` sources last and git ignores. The server's first
+> line of startup output now says which store it opened and how many quads it holds; **read
+> it**, and treat `— empty` on a store you have just loaded as the alarm it is.
+
+
+
 ```sh
 deploy/load.sh data/*.ttl        # stop the service first
 ```
