@@ -217,6 +217,20 @@ But use the RocksDB features Oxigraph currently leaves on the table:
   measured interleaved, thirty runs against none — where before, exceeding the budget dropped
   the load onto the batch path at a fifth of the speed. `RocksStorage::set_ingest_limit` moves
   the buffer for a machine with more or less memory to spare.
+  **And the bloom filter the writer builds has to be partitioned, or the flatness is a
+  fiction.** Loading 653.8 million triples held the promised flat 2.4 GB for three and a half
+  hours of streaming and then reached **18 GB** in the final merge, three times, once per
+  triple order. A *full* bloom filter is built in one piece — `FullFilterBlockBuilder` keeps a
+  64-bit hash per key until `finish` — which is nothing for a memtable flush of a few thousand
+  keys and 5.2 GB for one file covering the whole store, twice that while the vector doubles.
+  So the writer gets `partition_filters` and a two-level index, which cut the filter up as the
+  file is written and release each piece: 25M and 100M triples measured **723 → 2,558 MiB**
+  full against **271 → 395 MiB** partitioned, linear against bounded. Only the writer; the
+  shape is recorded in the file, so this changes nothing about how anything reads.
+  The lesson generalises past this one option. A bulk load is the one place where RocksDB is
+  asked to build a per-file structure over *every key in the store at once*, so any per-file
+  structure that is not incremental is a load-sized allocation waiting to be found — and
+  §16a's ceiling cannot see any of them.
 - **Merge operators** for dictionary refcounts and for the statistics counters in §7 — no
   read-modify-write on the write path.
 - **Checkpoints** for consistent backups *and* for holon branching: a checkpoint is a cheap
@@ -1411,6 +1425,15 @@ sampling interval fits inside that step. An operator buffering toward an abort i
 None of this catches a query that allocates without reading, and nothing short of a fallible
 allocator could. The ceiling must therefore sit well below the memory available — a third of
 it at most — so that it bites while the query is still small enough to survive.
+
+Nor does it catch anything RocksDB allocates. The ceiling reads a counting `GlobalAlloc`, and
+a counting `GlobalAlloc` counts Rust allocations; every byte on the C++ side is invisible to
+it. That is not a small territory — block cache, table readers, the bloom filter and index
+blocks each open file pins, and the filter a bulk load's `SstFileWriter` builds. **A limit
+that cannot observe the thing it is limiting is not a limit**, and the gap has already been
+paid for once: §6.1 records a load whose final merge reached 18 GB that nothing here could
+see, refuse, or report. Reason about RocksDB's memory from its own options, not from this
+ceiling.
 
 And only `DISTINCT` spills. `ORDER BY` and keyed `GROUP BY` still buffer in `spareval`, so a
 large one is refused rather than answered. The same collector generalises to an external

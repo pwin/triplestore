@@ -72,7 +72,22 @@ QUERY
     --named-graph <IRI>      Let GRAPH ?g range over this graph. Repeatable.
     --union-default-graph    Query the union of the named graphs as the default graph.
     --timeout <SECONDS>      Give up after this long.
-    --explain                Print the query plan as JSON instead of the results.
+    --max-blocking-rows <N>  Refuse a query whose ORDER BY, DISTINCT or keyed GROUP BY is
+                             estimated to buffer more than N rows. Default 10,000,000;
+                             0 disables it. Needs --reorder, since the estimate is what
+                             decides, and there is no estimate without statistics.
+    --spill-distinct <MiB>   Bytes a SELECT DISTINCT or COUNT(DISTINCT *) may hold before
+                             spilling a sorted run to disk. Default 128; 0 disables it.
+
+                             Reached only where --max-blocking-rows would otherwise refuse
+                             the query, so it needs --reorder for the same reason. It is
+                             not the fast path and is not meant to be: on three million
+                             rows it took 23.6s against the evaluator's 2.2s. That is the
+                             price of an answer where the alternative is no answer.
+    --explain                Run the query and print a JSON profile of it instead of the
+                             results. It evaluates: the explanation reports what each operator
+                             actually did, so it costs what the query costs. On a query that
+                             takes four minutes, so does this.
     --reorder                Order each basic graph pattern by estimated cardinality before
                              evaluating. Costs one pass over the store to build statistics,
                              and makes a badly ordered query as fast as a well ordered one:
@@ -884,6 +899,10 @@ struct Options {
     /// `None` is the built-in default rather than zero: `Options` derives `Default`, and a
     /// bare `usize` would have defaulted to nothing-in-memory, which reads as "off".
     spill_distinct: Option<usize>,
+    /// Rows a blocking operator may be *estimated* to buffer before the query is refused.
+    ///
+    /// `None` means the built-in default, for the same reason as `spill_distinct` above.
+    max_blocking_rows: Option<u64>,
     explain: bool,
     reorder: bool,
     results: QueryResultsFormatOpt,
@@ -937,6 +956,19 @@ impl Options {
             Some(bytes) => options = options.spilling_distinct(bytes),
             None => options = options.spilling_distinct(holos_engine::spill::SPILL_BYTES),
         }
+        // And the budget, without which the spill above is unreachable. Spilling used to be
+        // tried first and unconditionally; it is now what a query gets *instead of* being
+        // refused, so it is only ever reached from inside the over-budget branch. Setting one
+        // and not the other left this binary with the flag, the plumbing, and no protection
+        // -- the failure being that nothing failed, which is why it took a real store to see.
+        match self.max_blocking_rows {
+            Some(0) => {}
+            Some(rows) => options = options.with_blocking_budget(rows),
+            None => {
+                options =
+                    options.with_blocking_budget(holos_engine::admit::DEFAULT_BLOCKING_ROWS);
+            }
+        }
         if let Some(seconds) = self.timeout {
             if seconds > 0.0 {
                 options = options.with_timeout(std::time::Duration::from_secs_f64(seconds));
@@ -980,6 +1012,7 @@ impl Options {
                     let bytes = (mib.max(0.0) * 1024.0 * 1024.0) as usize;
                     o.spill_distinct = Some(bytes);
                 }
+                "--max-blocking-rows" => o.max_blocking_rows = Some(value(&mut i)?.parse()?),
                 "--explain" => o.explain = true,
                 "--reorder" => o.reorder = true,
                 "--query-file" => o.query_file = Some(value(&mut i)?),

@@ -31,6 +31,7 @@
 
 pub mod baseline;
 pub mod characteristic;
+pub mod hll;
 pub mod reorder;
 
 pub use characteristic::{CharacteristicSet, Statistics};

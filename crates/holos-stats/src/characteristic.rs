@@ -12,10 +12,11 @@
 //! goes wrong: in real RDF, predicates are *strongly* correlated, because entities of the
 //! same kind carry the same properties.
 
+use crate::hll::DistinctCount;
 use crate::Pattern;
 use holos_core::TermId;
 use holos_store::{GraphFilter, Result, Store};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 /// One distinct shape of subject, with how often it occurs.
 #[derive(Debug, Clone)]
@@ -79,19 +80,58 @@ impl Statistics {
     /// One pass in `spo` order, which is why the subject's predicates arrive together and
     /// a characteristic set can be closed without holding the whole graph in a map.
     ///
-    /// Distinct counts are **exact**, not sketched. §7 specifies `HyperLogLog`, and that is
-    /// the right answer at scale — but a sketch carries a couple of percent of error, and
-    /// these numbers are about to be used to measure how accurate estimation *can* be. An
-    /// approximation in the yardstick would muddy exactly the measurement it is there to
-    /// support. HLL is a drop-in swap once the accuracy question is settled.
+    /// # Distinct counts, and what they cost
+    ///
+    /// Both were once exact sets, one per predicate, kept only to be asked their `len`. On a
+    /// 653.8-million-triple store with 48.4 million subjects that peaked at **12,984 MiB** —
+    /// and it peaked on the wrong side of the problem, because `--reorder` is what supplies
+    /// the estimate that admission control refuses on, so protecting a server against a
+    /// memory-hungry query began by running one.
+    ///
+    /// **Subjects** are now counted rather than collected, and the `spo` order is what makes
+    /// that exact. A subject's quads arrive together and the subject is never seen again, so
+    /// by the time its characteristic set closes the predicates it carries are known: one
+    /// increment each. No set, no error. That alone took the build to **5,207 MiB**.
+    ///
+    /// **Objects** arrive scattered in this order and have no such trick, so they get the
+    /// `HyperLogLog` sketch §7 always specified — [`crate::hll`], 16 KiB per predicate
+    /// whatever the cardinality, measured at a worst case of 2.3% against the estimator's own
+    /// 10%. The docstring here used to argue against a sketch on the grounds that these
+    /// numbers were about to measure how accurate estimation *can* be, and an approximation
+    /// in the yardstick would muddy that. It was right at the time. The measurement has since
+    /// been made.
+    ///
+    /// That second change bought nothing measurable on the store above — the peak came back
+    /// at 5,206 MiB against 5,207 — because by then the remainder was the store being open
+    /// and scanned rather than the object sets. It is a bound rather than a saving: the sets
+    /// grew with the data and this does not.
+    ///
+    /// # One graph at a time
+    ///
+    /// Counting subjects rather than collecting them means this now *depends* on each subject
+    /// being visited once, which holds for [`GraphFilter::Default`] and [`GraphFilter::Named`]
+    /// — both scan one graph, in subject order. Under `AnyNamed` or `Any` a subject present in
+    /// two graphs is visited twice and would be counted twice.
+    ///
+    /// Those two filters were already wrong here for the same reason, and more visibly: the
+    /// subject closes once per graph, so it contributes a characteristic set per graph and
+    /// inflates `total_subjects` too. The set-based count was the one number that survived it.
+    /// Every caller passes `Default`. Making the union case correct means deciding what a
+    /// characteristic set even means across graphs — per subject, or per subject per graph —
+    /// which is a semantic question, not an implementation one.
     ///
     /// # Errors
     ///
     /// Propagates any error raised while scanning the store.
     pub fn build(store: &Store, graph: GraphFilter) -> Result<Self> {
         let mut stats = Self::default();
-        let mut distinct_subjects: FxHashMap<TermId, FxHashSet<TermId>> = FxHashMap::default();
-        let mut distinct_objects: FxHashMap<TermId, FxHashSet<TermId>> = FxHashMap::default();
+        // Counted, not collected: `close` sees each subject exactly once and knows which
+        // predicates it carried, so a set here would only be rediscovering that. The
+        // docstring has why this is exact and what it depends on.
+        let mut distinct_subjects: FxHashMap<TermId, u64> = FxHashMap::default();
+        // Objects arrive scattered in `spo` order, so there is nothing contiguous to count
+        // and they get a sketch instead — fixed size per predicate. See `crate::hll`.
+        let mut distinct_objects: FxHashMap<TermId, DistinctCount> = FxHashMap::default();
 
         // predicate-set -> (subject count, per-predicate occurrences)
         let mut shapes: FxHashMap<Vec<TermId>, (u64, FxHashMap<TermId, u64>)> =
@@ -103,6 +143,7 @@ impl Statistics {
         let close = |subject: Option<TermId>,
                      current: &mut FxHashMap<TermId, u64>,
                      shapes: &mut FxHashMap<Vec<TermId>, (u64, FxHashMap<TermId, u64>)>,
+                     subjects_with: &mut FxHashMap<TermId, u64>,
                      total_subjects: &mut u64| {
             if subject.is_none() || current.is_empty() {
                 current.clear();
@@ -116,6 +157,8 @@ impl Statistics {
             entry.0 += 1;
             for (predicate, n) in current.iter() {
                 *entry.1.entry(*predicate).or_insert(0) += *n;
+                // This subject carried this predicate, and will not be seen again.
+                *subjects_with.entry(*predicate).or_insert(0) += 1;
             }
             *total_subjects += 1;
             current.clear();
@@ -127,20 +170,17 @@ impl Statistics {
 
             let entry = stats.predicates.entry(quad.predicate).or_default();
             entry.triples += 1;
-            distinct_subjects
-                .entry(quad.predicate)
-                .or_default()
-                .insert(quad.subject);
             distinct_objects
                 .entry(quad.predicate)
                 .or_default()
-                .insert(quad.object);
+                .add(quad.object);
 
             if current_subject != Some(quad.subject) {
                 close(
                     current_subject,
                     &mut current,
                     &mut shapes,
+                    &mut distinct_subjects,
                     &mut stats.total_subjects,
                 );
                 current_subject = Some(quad.subject);
@@ -151,14 +191,15 @@ impl Statistics {
             current_subject,
             &mut current,
             &mut shapes,
+            &mut distinct_subjects,
             &mut stats.total_subjects,
         );
 
         for (predicate, subjects) in distinct_subjects {
-            stats.predicates.entry(predicate).or_default().subjects = subjects.len() as u64;
+            stats.predicates.entry(predicate).or_default().subjects = subjects;
         }
         for (predicate, objects) in distinct_objects {
-            stats.predicates.entry(predicate).or_default().objects = objects.len() as u64;
+            stats.predicates.entry(predicate).or_default().objects = objects.estimate();
         }
 
         for (predicates, (subjects, occurrences)) in shapes {
@@ -449,6 +490,65 @@ mod tests {
         let naive = stats.estimate_pattern(&Pattern::single(None, Some(email), None))
             * stats.estimate_pattern(&Pattern::single(None, Some(legal), None));
         assert!(naive > 900.0, "the naive estimate is {naive}, not zero");
+    }
+
+    /// A subject with several objects for one predicate — the case that tells a *subject*
+    /// count from a triple count.
+    ///
+    /// `store()` above gives every subject exactly one object per predicate, so `triples`,
+    /// `subjects` and `objects` come out equal for all four and a count that returned any of
+    /// the three would pass. That blindness was real: distinct subjects are now counted from
+    /// the `spo` scan order rather than collected into a set, and the whole suite passed with
+    /// the increment doubled. This separates the three.
+    #[test]
+    fn distinct_subjects_and_objects_are_counted_per_predicate() {
+        let email = ex("email");
+        let mut store = Store::new();
+        {
+            let mut add = |s: NamedNode, p: NamedNode, o: oxrdf::Term| {
+                store
+                    .insert(
+                        Quad {
+                            subject: s.into(),
+                            predicate: p,
+                            object: o,
+                            graph_name: GraphName::DefaultGraph,
+                        }
+                        .as_ref(),
+                    )
+                    .unwrap();
+            };
+            let shared = Literal::new_simple_literal("shared@x");
+            // Alice has three addresses, Bob one, and one of Alice's is also Bob's. So the
+            // three counts are four triples, two subjects and three objects — all different.
+            add(ex("alice"), email.clone(), shared.clone().into());
+            add(
+                ex("alice"),
+                email.clone(),
+                Literal::new_simple_literal("a2@x").into(),
+            );
+            add(
+                ex("alice"),
+                email.clone(),
+                Literal::new_simple_literal("a3@x").into(),
+            );
+            add(ex("bob"), email.clone(), shared.into());
+            add(
+                ex("alice"),
+                ex("name"),
+                Literal::new_simple_literal("Alice").into(),
+            );
+        }
+
+        let stats = Statistics::build(&store, GraphFilter::Default).unwrap();
+        let counts = stats.predicates[&id(&store, &email)];
+        assert_eq!(counts.triples, 4, "four email triples");
+        assert_eq!(counts.subjects, 2, "over two subjects");
+        assert_eq!(counts.objects, 3, "with three distinct addresses between them");
+
+        // And a predicate on one subject only, so a count that leaked across predicates shows.
+        let name = stats.predicates[&id(&store, &ex("name"))];
+        assert_eq!((name.triples, name.subjects, name.objects), (1, 1, 1));
     }
 
     #[test]

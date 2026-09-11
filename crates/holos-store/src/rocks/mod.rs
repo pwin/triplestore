@@ -2015,6 +2015,28 @@ fn index_opts(prefix_len: usize) -> Options {
     opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(prefix_len));
     let mut block = rocksdb::BlockBasedOptions::default();
     block.set_bloom_filter(10.0, false);
+    // Partitioned, unconditionally, and both halves of the reason matter.
+    //
+    // A *whole* filter is built in one piece: `FullFilterBlockBuilder` keeps a 64-bit hash
+    // per key until `finish`. A memtable flush does that for a few thousand keys and nobody
+    // notices. A bulk load writes one file per order for the **whole store**, so the vector
+    // is 8 bytes times every triple loaded — 5.2 GB at 653 million, twice that while it
+    // doubles. Measured: a 653,839,702-triple load streamed at a flat 2.4 GB for three and a
+    // half hours, then reached **18 GB** in the final merge, once per triple order, on a
+    // 32 GB machine. Nothing in HOLOS could see it coming: `holos_engine`'s ceiling reads a
+    // counting allocator, which counts Rust allocations, and this vector is RocksDB's.
+    //
+    // A whole filter is also *pinned* by the table reader for as long as the file is open,
+    // which is what makes a large store expensive merely to have open — that store costs
+    // about 4 GB before it answers anything.
+    //
+    // So the write side needs this and the read side wants it, and applying it to the
+    // families rather than only to the bulk writer is what stops a `compact` rewriting every
+    // ingested file with whole filters and handing back what the load just avoided.
+    //
+    // `partition_filters` requires the two-level index; RocksDB rejects it otherwise.
+    block.set_index_type(rocksdb::BlockBasedIndexType::TwoLevelIndexSearch);
+    block.set_partition_filters(true);
     opts.set_block_based_table_factory(&block);
     opts
 }

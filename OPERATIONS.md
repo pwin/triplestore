@@ -540,7 +540,35 @@ room to compact  yes (needs up to 48.2 MiB)
 | **`holos compact`** | The store's size again, immediately | It writes a **second** store beside the first and leaves the original untouched, which is what makes it safe to abandon |
 | **`holos backup`** / `POST /backup` onto the same filesystem | Nothing at first, the store's size eventually | It hard-links, so the copy is free — but the links **pin files compaction can no longer delete**, so the space is owed as soon as anything churns |
 | **`holos backup`** onto another filesystem | The store's size, immediately | Hard links do not cross a mount, so RocksDB copies |
-| **A bulk load** | Roughly the index size again, briefly | Sorted ingestion writes its files under the store directory and then moves them in |
+| **A bulk load** | **Half again the source file**, until the merge consumes it | Sorted ingestion writes its runs under the store directory and merges them only at the end, so the source, the scratch and the store all occupy disk at once. Measured: a 30.4 GB Turtle file held **48.3 GB** of runs and produced a 20.7 GB store. Unlike `compact`, a load does **not** check first |
+
+**A spilling `DISTINCT` writes to the system temporary directory, and it can write a lot.**
+`--spill-distinct` bounds a query's *memory*, not its disk: it spills in proportion to the
+answer, so a `DISTINCT` over a large store writes tens of gigabytes. On a 653.8-million-triple
+store one reached 5.5 GB in twenty-two minutes and was on course for about seventy, against
+29 GB free on that machine's system volume. Unlike a load, the engine cannot place this beside
+the store — a query is not attached to one store's directory, and an in-memory store has none
+— so **point `TMPDIR` (or `TMP`/`TEMP` on Windows) at the volume with the room**, the same one
+the store is on, before enabling the spill on a large dataset.
+
+Two more things about that scratch. It is removed when the query ends, including on error, but
+a process that is *killed* leaves it behind — check the temporary directory after an
+out-of-memory kill or a hard restart. And the directory is named with the process id, so
+nothing collides, but nothing cleans up an older one either.
+
+A load's scratch goes in `holos-ingest` beside the database rather than in the system
+temporary directory, so the ingest can *move* its files into the store instead of copying them
+across a filesystem boundary — and so the scratch lands on the volume an operator sized for the
+store rather than on whatever `/tmp` happens to be. It is removed on success and on failure.
+The consequence is the sizing above, and it is worth doing the arithmetic once. At the peak of
+the 30.4 GB load the volume held the 30.4 GB source, 48.3 GB of runs and a partly written
+store: **about 2.6 times the source file, all at the same moment**, settling to 20.7 GB when
+the merge consumed the runs and the scratch was removed. Put the source somewhere else and it
+is 1.6×; leave it where it is and budget for the whole 2.6.
+
+Nothing checks this. `compact` refuses when its headroom estimate says it will not fit, and a
+load has no equivalent — it will fill a volume eighty per cent of the way through three hours
+of work. `holos stats` reports free space; run it first.
 
 The estimate is the source store's size on disk — the whole directory, not just the SST
 files, because the write-ahead log and the manifest have to be copied too. For `compact` it
@@ -595,6 +623,10 @@ Stated plainly, because finding these out in production is worse.
 | **No TLS in the server** | Plain HTTP only | Terminate at the front door. Both configs do |
 | **Timeouts are not absolute** | `--timeout` stops a query that is reading or streaming rows; one blocked inside a single in-memory step is not interruptible | Bound the result size in the query |
 | **The memory ceiling is per-process, not per-query** | `--max-query-memory` (default 8 GiB) counts what the *process* allocates past its resting set, so it cannot attribute a byte to one query of several running at once. It is read at the scan, so it refuses the next read rather than cancelling on a timer | Set it to at most a **third** of the memory you can spare. A growing buffer asks for its next block before releasing the old, so a container crossing an 8 GiB ceiling wants 24 GiB at that instant — a ceiling near the machine's limit chooses where the abort happens rather than preventing it |
+| **A range `FILTER` is only fast on an inline datatype** | Order-preserving inline encoding covers `xsd:integer`, `xsd:float`, `xsd:dateTime`, `xsd:boolean` and short strings. **`xsd:date` and `xsd:decimal` are not inline.** A numeric range must also read every dictionary-backed literal on that predicate, because an `xsd:decimal` could satisfy it, so on a predicate whose objects are literals the bounded scan reads all of them — measured at **123 s against a 20 s plain scan** of the same 48.4M rows, and the same 123 s with a cut matching nothing | Store timestamps as `xsd:dateTime` rather than `xsd:date` if you intend to filter ranges over them. There is no flag for this; it is decided by how the data is typed |
+| **`--reorder` is a startup cost, not a per-query one — except on the CLI** | Statistics are a full scan: about **300 s** on a 653.8-million-triple store. A server builds them once when it starts. The CLI builds them on **every invocation**, which makes `--max-blocking-rows` and the `DISTINCT` spill — both of which need them — impractical from the command line on a large store | Use the server for anything where admission control matters. On the CLI, treat a large `ORDER BY` as unguarded: it will buffer until the machine gives out |
+| **Opening a large store costs memory before it answers anything** | Each SST pins its index and bloom filter for as long as it is open. The 653.8-million-triple store cost about **4 GB** at rest. From 0.9.0 those blocks are partitioned and demand-loaded, measured at 743 MiB against 275 MiB on a 30-million-triple store with no read penalty — but only for files written by 0.9.0 or later | An existing store gets it back by being rewritten: `holos compact --to` produces files with the new layout. Until then, size for the resting cost as well as the query |
+| **The memory ceiling cannot see RocksDB at all** | It reads a counting allocator, which counts *Rust* allocations. The block cache, the table readers, and the bloom filter and index blocks each open SST file pins are all C++ and all invisible to it — as was the 18 GB a bulk load's filter builder reached before 0.9.0 partitioned it | Size the machine for the store as well as the ceiling, and do not read a green `--max-query-memory` as headroom. Resident memory on a large store has a floor the ceiling knows nothing about |
 | **A memory ceiling cannot catch a query that allocates without reading** | It is read in `decide`, which every index read goes through, so an operator filling a buffer *from the scan* is refused on the first quad past the line. One that allocates after the scan is exhausted is not | Nothing short of a fallible allocator could, and Rust's `handle_alloc_error` aborts rather than unwinding. This is why `--max-blocking-rows` exists: refuse early rather than interrupt late |
 | **Admission control needs `--reorder`** | `--max-blocking-rows` (default 10,000,000) refuses an `ORDER BY`, `DISTINCT` or keyed `GROUP BY` whose input is *estimated* over budget. Without statistics there is no estimate and nothing is refused | Turn on `--reorder` if you want it. Note that `--reorder` rebuilds statistics with a full scan after every write, so on a large store that is expensive |
 | **Spilling is what a `DISTINCT` gets instead of a refusal, not instead of the fast path** | `--spill-distinct` (default 128 MiB) only engages once `--max-blocking-rows` would have refused the query. Measured on three million rows, spilling took **23.6 s against 2.2 s** and **1,259 MiB against 396 MiB** with the disk never touched — the evaluator deduplicates on internal ids, and this path works above it where every solution is already a heap-allocated term | Leave it on. Ten times slower is a large price for an answer and no price at all against the alternative, which is no answer. It needs `--reorder`, because the estimate is what decides |

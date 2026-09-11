@@ -3,7 +3,218 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.9.0 — 2026-09-11
+
+The release that made a **load** unable to take the process down, after 0.8.0 did the same
+for queries. Found by loading 653,839,702 triples and watching.
+
+### A bulk load's memory did not depend on the load. Then it did.
+
+The streaming phase behaved exactly as designed: **2.4 GB peak across three and a half
+hours**, sawtoothing as the dictionary filled, ingested and cleared. Before 0.7.0 the term
+cache alone would have wanted about 62 GB, so this was the fix confirmed at forty-seven times
+the scale it was verified at synthetically.
+
+Then the final merge reached **18 GB** on a 32 GB machine — three times, once per triple
+order. It survived. It should not have had to.
+
+The memory was not HOLOS's. `index_opts` asked every index family for a bloom filter, and a
+*full* filter is built in one piece: RocksDB's `FullFilterBlockBuilder` keeps a 64-bit hash
+per key and turns the lot into bits at `finish`. A memtable flush does that for a few thousand
+keys and nobody notices. A bulk load writes **one file per order for the whole store**, so the
+vector is 8 bytes times every triple loaded — 5.2 GB at 653 million, and twice that at the
+instant it doubles, because it holds the old buffer while filling the new one.
+
+The fix is to cut the filter into partitions as the file is written, each one finished and
+released, so what is held is one partition rather than one file. It needs the two-level index,
+so both are set.
+
+**It applies to the families, not only to the bulk writer,** and that was a second decision
+taken after a second measurement. The first version partitioned the writer alone, on the
+grounds that the read cost was unknown and the write side was on fire. Two things then turned
+up. A whole filter is *pinned* by the table reader for as long as the file is open, which is
+what makes the 653.8-million-triple store cost about **4 GB before it answers anything**. And
+a `compact` rewrites every ingested file with the *family's* options — so partitioning only
+the writer meant routine maintenance handed back exactly what the load had been fixed to
+avoid.
+
+`holos-bench`'s `filterread` measured the read side at 30 million triples, flipping that one
+call and nothing else:
+
+| | whole | partitioned |
+|---|---|---|
+| peak resident | 743 MiB | **275 MiB** |
+| probe that misses | 2 us | 2 us |
+| probe that hits | 1602 us | 1583 us |
+| full scan | 5.7 s | 5.9 s |
+| load | 100.0 s | 91.6 s |
+
+No read penalty and 63% less held. The miss probe is the one that had to stay flat — it is the
+case a bloom filter exists for, so an unchanged 2 us says the filter is still skipping files
+rather than having quietly stopped working.
+
+Measured by loading the same synthetic triples at two sizes, chosen so that only the index
+grows — 4096 subjects and 64 predicates crossed with as many objects as the count needs, which
+holds the dictionary at a few thousand terms whatever the count:
+
+| triples | full filter | partitioned |
+|---|---|---|
+| 25,000,000 | 723 MiB | **271 MiB** |
+| 100,000,000 | 2,558 MiB | **395 MiB** |
+| growth for 4× the data | 3.54× — linear | **1.46×** |
+
+The streaming phase took 55.2 s against 55.9 s and 220.1 s against 221.8 s across the two
+builds — the bias check, since a change to the writer cannot affect the parse, and a
+difference there would have meant the comparison was measuring something else. Extrapolating
+the linear arm to 653.8 million predicts 16.3 GiB against the 18.0 GiB observed.
+
+The merge got slightly *faster* too, by about a tenth at 100 million. Not building an 800 MB
+vector turns out to be quicker than building one.
+
+### Why nothing caught it
+
+`crate::memory`'s ceiling reads a counting allocator, and a counting allocator counts Rust
+allocations. This vector belongs to RocksDB's C++ one, so the ceiling could not see it, could
+not have refused it, and would not have reported it. **A limit that cannot observe the thing
+it is limiting is not a limit** — recorded here because the same blind spot covers every byte
+RocksDB allocates, and the next one will not announce itself either.
+
+### A bulk load needs half again the source file in scratch
+
+Not a change, a measurement, because nothing had written it down and the number is large. The
+653.8 million triple load held **48.3 GB of sorted runs** beside a 30.4 GB source, peaking
+around 55 GB before the merge consumed them, to produce a **20.7 GB** store.
+
+Scratch goes in `holos-ingest` beside the database, deliberately, so the ingest can move files
+rather than copy them across a filesystem boundary. It is cleaned up on success and on
+failure. But it means a load wants room for the source, the scratch and the store at once, and
+`compact` checks its headroom before starting while a load does not. Sizing guidance is in
+OPERATIONS.md; the preflight is the next piece.
+
+### Measured, not changed: what a large store is actually slow at
+
+A sweep of representative shapes against the 653.8-million-triple store, timed net of a 2.7 s
+store open. Nothing here is a fix; it is what the next piece of work should be aimed at.
+
+| shape | net | note |
+|---|---|---|
+| subject star, 11 rows | ~0.1 s | |
+| object bound, selective | ~0.5 s | |
+| two-hop join, `LIMIT 10` | ~0.1 s | |
+| count over a bound predicate, 48.4M rows | ~19.6 s | 2.47M quads/s |
+| `DISTINCT` over 3 distinct values | ~38 s | scans all 48.4M to find them |
+| range `FILTER`, 48.4M rows | **123 s** | slower than the plain scan above |
+| `ORDER BY` + `LIMIT 10`, 48.4M rows | **>15 min** | 8.4 GB buffered, then stopped by hand |
+
+**The range pushdown fires and still loses.** `bounded scans = 3` — it is not failing to
+engage. But a numeric span must also include the whole `Tag::Literal` range, because
+`xsd:decimal` is not an inline type and a dictionary-backed literal could satisfy the
+comparison. For a predicate whose objects are literals, that reads all of them. The same query
+with a cut matching **zero rows** took 123 s: the cost does not depend on selectivity at all.
+`xsd:date` is not inline either, so ranges over dates pay this too. Inline is `Integer`,
+`Float`, `DateTime`, `Small` — and `xsd:date` being absent while `xsd:dateTime` is present is
+the kind of gap that looks like a typo in a dataset rather than a performance cliff.
+
+**`--reorder` does not help, and on the CLI it cannot.** The statistics build is a full scan —
+about 300 s on this store — and the CLI redoes it on *every invocation*, so admission control
+and the `DISTINCT` spill are both effectively unreachable from the command line. A server
+builds them once at startup, which is where they work.
+
+**`rangequery` had never run against `RocksDB`.** It built an in-memory store and always had,
+so the end-to-end range figures in BENCHMARKS.md are memory-only while the primitive in
+`rangescan` was measured on both. It now takes an optional store directory, and reports
+`bounded scans` beside each row so a zero — the pushdown not firing — cannot be mistaken for a
+disappointing speedup.
+
+**`--explain` runs the query.** `spareval`'s explanation is a profile, not a plan, so it
+evaluates and then reports. On a 272 s query that is 272 s. The help text said "Print the query
+plan as JSON instead of the results", which reads as plan-only; it now says what happens.
+
+### Building statistics no longer costs more than the query they protect
+
+`--reorder` kept, for every predicate, an `FxHashSet` of every distinct subject carrying it
+and another of every distinct object — and asked them for nothing but their `len` at the end.
+On the 653.8-million-triple store that is fourteen predicates over 48.4 million subjects, and
+it peaked at **12,984 MiB**. Counting the subjects rather than collecting them took it to
+**5,207 MiB**, measured on the same store.
+
+Sketching the objects on top of that took it to **5,206 MiB** — that is, nowhere, and the
+number is quoted rather than hidden because it corrects an estimate made here before it was
+checked. What remains at that point is the cost of holding a 20.65 GB store open and scanning
+it, not the object sets. The sketch is a *bound*, not a saving: the sets grew with distinct
+objects per predicate and nothing capped them; 16 KiB per predicate is capped. This dataset
+did not happen to exercise the case.
+
+The shape of that is worse than the number. `--reorder` is what supplies the estimate,
+the estimate is what admission control refuses on, and the spill is only reached from inside
+the refusal — so **the only way to protect a server against a memory-hungry query was to run
+one first**.
+
+Distinct subjects need no set at all, and the scan order is why: it is in `spo`, so a
+subject's quads arrive together and the subject is never seen again. By the time its
+characteristic set closes, the predicates it carries are already known — one increment each,
+exact, and free.
+
+Objects have no such luck: in `spo` order they arrive scattered, so there is nothing
+contiguous to count. They get the `HyperLogLog` sketch §7 always specified — **16 KiB per
+predicate whatever the cardinality**, against sets that grew without limit.
+
+The docstring here used to argue against a sketch, and it was right at the time: these counts
+were about to be used to measure how accurate estimation *can* be, and an approximation in the
+yardstick would have muddied the measurement it existed to support. That measurement has since
+been made. The estimator's q-error is 1.1 — about 10% — and the sketch was measured too, at a
+worst case of **2.3%** across cardinalities from 1 to five million, on numbers used only as
+ratio denominators that are guarded against zero anyway.
+
+The precision is the smaller of the two that were measured, deliberately. 2^16 registers would
+have held the worst case to 1.0%, but a sketch is per *predicate*, so its memory is unbounded
+in something the dataset controls: a store with Wikidata's eleven thousand properties spends
+176 MB at 2^14 and 704 MB at 2^16. Swapping a structure that grew without limit in the data
+for one that grows without limit in the schema, to buy precision four times finer than
+anything downstream can use, would have been the same mistake in a new place.
+
+Small counts are the case a raw `HyperLogLog` is worst at and real data is full of; a predicate
+with two objects is ordinary, and an estimate of three there is a 50% error on a small
+denominator. Linear counting below the threshold makes those exact rather than approximately
+exact, and there is a test that says so for 1, 2, 3, 10, 100 and 1000.
+
+Ids are mixed before they are hashed, and that is not ceremony. `TermId`s are handed out
+sequentially by the dictionary, so their top bits — the ones a sketch reads as a register
+index — barely vary across a whole load. Unmixed, every term would crowd into a handful of
+registers. There is a test that a sparse spread of ids counts the same as a dense one.
+
+The whole `holos-stats` suite passed with this counter **doubled**, which is how thoroughly
+untested it was: every subject in the fixture had exactly one object per predicate, so
+`triples`, `subjects` and `objects` were equal and any of the three would do. The new test
+separates them — four triples, two subjects, three objects — and does fail when the counter is
+wrong.
+
+### A spilling `DISTINCT` writes to the system temp directory
+
+Not a change, a warning, and it nearly cost a system volume to find. `--spill-distinct` bounds
+a query's memory, not its disk, and it spills in proportion to the *answer*: the query above
+reached 5.5 GB of runs in twenty-two minutes and was on course for about seventy, against
+29 GB free on `C:` while the store sat on a volume with 162 GB.
+
+The bulk loader faced the same choice and made the other one — its scratch goes beside the
+database, on the volume the operator sized. A query cannot do that, having no store directory
+to sit beside and sometimes no store on disk at all, so the placement stays with `TMPDIR`.
+**Point it at the volume with the room.** OPERATIONS.md now says so, and also that a *killed*
+process leaves its scratch behind, since the cleanup is on drop.
+
+### `--max-blocking-rows` reaches the CLI, where the spill was unreachable without it
+
+0.8.0 inverted the spill: it stopped being the default path and became what a query gets
+*instead of* being refused, which means it is only ever reached from inside the over-budget
+branch. The CLI set `--spill-distinct` and no budget, so after that inversion it had the flag,
+the plumbing, and no protection — the failure being that nothing failed. Both flags are now
+documented in `holos query --help`, which listed neither.
+
 ## 0.8.0 — 2026-09-10
+
+> **Never published.** These changes were committed but not tagged, so no wheel or binary of
+> 0.8.0 exists and PyPI went 0.7.0 to 0.9.0. The notes stay because the commits do, and
+> because upgrading from 0.7.0 means reading both this section and the one above it.
 
 The release that made a query unable to take the server down — and made the query that did
 it twice finish instead.

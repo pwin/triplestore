@@ -92,6 +92,18 @@ impl Distinct {
         // a nested subquery, or a second query on a pooled thread — and sharing a directory
         // would mean sharing run *filenames*, so one would silently read the other's rows.
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        // `temp_dir`, which means `TMPDIR` on Unix and `TMP`/`TEMP` on Windows, and which is
+        // very often the *system* volume rather than the one the store lives on. That is a
+        // sharper edge than it looks: a `DISTINCT` over a large store spills in proportion to
+        // its answer, not to any buffer, so it will happily write tens of gigabytes. Measured
+        // on a 653.8-million-triple store, this reached 5.5 GB in twenty-two minutes and was
+        // heading for something near seventy, against 29 GB free on that machine's `C:`.
+        //
+        // The bulk loader had the same choice and made the other one: `ingest_dir` puts its
+        // scratch beside the database, so it lands on the volume an operator sized for the
+        // store. This cannot do that — a query is not attached to one store's directory, and
+        // an in-memory store has no directory at all — so the placement stays the platform's
+        // and the operator's, through the environment. OPERATIONS.md says to set it.
         let dir = std::env::temp_dir().join(format!(
             "holos-distinct-{}-{}",
             std::process::id(),
@@ -247,6 +259,7 @@ impl Drop for Distinct {
 pub enum Merged {
     /// Nothing spilled: the set is the answer, and never touched a disk or a serialiser.
     InMemory {
+        /// The set, drained. Still `Live` terms: nothing was ever encoded.
         rows: std::vec::IntoIter<Live>,
         /// Held only so the (empty) scratch directory is cleaned up on drop.
         _owner: Distinct,
@@ -255,10 +268,15 @@ pub enum Merged {
     Spilled {
         /// Held so the run files outlive the readers and are removed after them.
         _owner: Distinct,
+        /// What the set still held when the last run was written, sorted. One more source.
         buffer: Vec<Row>,
+        /// A reader per run on disk, each holding one block.
         sources: Vec<RunReader>,
+        /// The merge frontier: the next row from every source, smallest first.
         heap: BinaryHeap<Reverse<(Row, usize)>>,
+        /// The index standing for `buffer` in the heap, one past the last run.
         tail: usize,
+        /// How far `buffer` has been consumed.
         tail_at: usize,
         /// The row just emitted, so its duplicates in other runs can be skipped.
         last: Option<Row>,

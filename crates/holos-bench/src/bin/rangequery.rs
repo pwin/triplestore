@@ -30,8 +30,14 @@
 //! for this file existing alongside the other one.
 //!
 //! ```text
-//! cargo run --release -p holos-bench --bin rangequery
+//! cargo run --release -p holos-bench --bin rangequery [store-dir]
 //! ```
+//!
+//! With a directory it builds a persistent store there and measures that instead. **Run it
+//! both ways.** The in-memory figures are the ones this file reported for a long time, and
+//! they are not the ones a deployment sees: `rangescan` measured the primitive at 226x in
+//! memory against 108x on `RocksDB`, so the backend moves the answer by a factor of two on
+//! the primitive alone, and nothing measured the whole query on `RocksDB` at all.
 
 use holos_engine::{Engine, QueryOptions};
 use holos_security::Session;
@@ -50,8 +56,19 @@ fn ex(name: &str) -> NamedNode {
     NamedNode::new_unchecked(format!("{EX}{name}"))
 }
 
-fn engine() -> Engine {
-    let mut store = Store::new();
+fn engine(dir: Option<&std::path::Path>) -> Engine {
+    let mut store = match dir {
+        #[cfg(feature = "rocksdb")]
+        Some(dir) => {
+            if dir.exists() {
+                std::fs::remove_dir_all(dir).expect("clear store dir");
+            }
+            Store::with_storage(holos_store::RocksStorage::open(dir).expect("open store"))
+        }
+        #[cfg(not(feature = "rocksdb"))]
+        Some(_) => panic!("a store directory needs the rocksdb feature"),
+        None => Store::new(),
+    };
     for i in 0..QUADS {
         let subject = ex(&format!("s{i}"));
         store
@@ -99,12 +116,14 @@ fn best(engine: &Engine, query: &str, options: &QueryOptions) -> (Duration, usiz
 }
 
 fn main() {
-    let engine = engine();
+    let dir = std::env::args().nth(1).map(std::path::PathBuf::from);
+    let engine = engine(dir.as_deref());
     let stats =
         Arc::new(Statistics::build(engine.store(), GraphFilter::Default).expect("statistics"));
     let options = QueryOptions::new().reordering(stats);
 
-    println!("{QUADS} subjects, one `age` and one `name` each\n");
+    let backend = if dir.is_some() { "rocksdb" } else { "in memory" };
+    println!("{QUADS} subjects, one `age` and one `name` each — {backend}\n");
     println!(
         "{:>12}  {:>10}  {:>14}  {:>16}",
         "selectivity", "rows", "whole query", "bounded scans"
@@ -134,4 +153,11 @@ fn main() {
     println!("Compare against the same binary built from the parent commit. A query does more");
     println!("than scan — it decodes terms and builds solutions — so this is smaller than the");
     println!("primitive's figure in `rangescan`, and it is the one a user would notice.");
+    println!();
+    println!("`bounded scans` is the column to read first. A zero there means the pushdown did");
+    println!("not fire and the timing beside it is a full scan wearing a selectivity label.");
+
+    if let Some(dir) = dir {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
