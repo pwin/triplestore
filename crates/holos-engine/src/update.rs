@@ -13,7 +13,7 @@
 //! kinds onto a real store, checking write policy on every quad, and making the whole
 //! update all-or-nothing.
 //!
-//! # Atomicity, honestly described
+//! # Atomicity, precisely described
 //!
 //! An update is a sequence of operations, and SPARQL requires each to see the effects of
 //! the ones before it. So they are applied in order, inside one [`Store`](holos_store::Store) commit scope: on

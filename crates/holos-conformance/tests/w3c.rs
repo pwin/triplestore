@@ -267,7 +267,7 @@ fn shacl12_core() {
 
 /// The same SHACL suites, through the adapted engine rather than the native evaluator.
 ///
-/// Running both against the same expectations is the only honest way to compare them:
+/// Running both against the same expectations is the only sound way to compare them:
 /// the number that matters is not "how many does each pass" in isolation but how much
 /// coverage the adapted engine actually adds for the bridging cost it charges.
 fn run_shacl_suite_with(name: &str, relative: &str, engine: holos_conformance::shacl::Engine) {

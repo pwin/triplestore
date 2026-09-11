@@ -10,7 +10,7 @@
 //!
 //! This is the lesson stream processing learned first. An engine survives unbounded input by
 //! making the *operator* bounded — windows, punctuation, incremental aggregation — and by
-//! being honest when an operator cannot be bounded at all. A store answering ad-hoc queries
+//! saying so when an operator cannot be bounded at all. A store answering ad-hoc queries
 //! cannot impose a window, but it can recognise the same shape and decline.
 //!
 //! # Which operators, and why only these

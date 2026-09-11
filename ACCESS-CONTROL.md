@@ -21,7 +21,7 @@ enumerating them:
 | | |
 |---|---|
 | `COUNT` | Cannot reveal that hidden rows exist — the aggregate counts the visible sub-dataset |
-| `FILTER NOT EXISTS` | Cannot probe for hidden data — a withheld quad is genuinely absent, and "absent" is the honest answer |
+| `FILTER NOT EXISTS` | Cannot probe for hidden data — a withheld quad is genuinely absent, and "absent" is the correct answer |
 | `OPTIONAL` | Leaves the variable unbound, exactly as if the quad were not in the store |
 | Property paths | A path cannot traverse a withheld edge |
 | GeoSPARQL | No exemption: denying `geo:asWKT` makes a spatial join find nothing |

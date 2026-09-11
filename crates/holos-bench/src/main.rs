@@ -255,7 +255,7 @@ fn time_case(engine: &Engine, session: &Session, case: &Case) -> Result<QueryRes
         let started = Instant::now();
         let results = Engine::query(&view, &case.sparql, None)
             .with_context(|| format!("running `{}`", case.label))?;
-        // Consuming fully is what makes the timing honest: the iterators are lazy, so a
+        // Consuming fully is what makes the timing real: the iterators are lazy, so a
         // query that is never drained has not been run.
         let n = match results {
             QueryResults::Solutions(iter) => {

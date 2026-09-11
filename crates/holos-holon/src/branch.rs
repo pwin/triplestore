@@ -25,7 +25,7 @@
 //! The scene is copied quad by quad rather than linked. Nothing in RDF lets two named graphs
 //! share storage, and pretending otherwise would mean a write to one silently changing the
 //! other. A branch therefore costs the size of the scene — cheap for the holons this is for,
-//! and honest about it.
+//! and says so.
 //!
 //! # Versions continue rather than restart
 //!

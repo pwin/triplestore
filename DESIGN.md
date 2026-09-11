@@ -54,7 +54,7 @@ Each of the four exists in isolation. Their combination is the thesis. Everythin
 subordinate to it: if a design decision doesn't serve one of those four, take the boring option
 and reuse someone else's code.
 
-The honest counter-position is in §12.
+The counter-position is in §12.
 
 ---
 
@@ -276,7 +276,7 @@ Hash-consing (the "Hashing the Hypertrie" result) is not optional here — it is
 memory cost of a second full index survivable, because in real RDF the same subtries recur
 constantly.
 
-**Cost, stated honestly:** roughly a doubling of resident memory for hot graphs, plus a second
+**Cost, stated plainly:** roughly a doubling of resident memory for hot graphs, plus a second
 update path. Mitigations are laziness, per-graph granularity, eviction, and the fact that the
 derived tier is disposable. If memory measurements come in badly at P3, the fallback is to keep the
 hypertrie only for graphs under a size threshold and serve everything else from Tier A with binary
@@ -565,7 +565,7 @@ by delta rather than recomputed, and the scene is never exposed. The Holon artic
 architectural separation between reading state and triggering transitions" is, in database terms,
 exactly *read from an incrementally maintained view, write through a validated transaction*.
 
-**Honest restriction:** general SPARQL is not incrementally maintainable. Restrict registered
+**The restriction:** general SPARQL is not incrementally maintainable. Restrict registered
 projections to a maintainable fragment — BGP + filters + projection + distinct + simple aggregation
 over that. Anything outside the fragment is accepted but recomputed on read, and the registry says
 which regime a projection is in. Pretending otherwise would be the design's worst possible lie.
@@ -1129,7 +1129,7 @@ repeatedly. And **validation does no loading at all**: the 2.2s load is the stor
 once and shared with the query engine and the policy layer. A validator that is a library
 pays it again into its own structures, which is the cost §8 set out to delete.
 
-The honest qualifier: this is not a like-for-like benchmark against SHACL_Engine. It is a
+The qualifier: this is not a like-for-like benchmark against SHACL_Engine. It is a
 measurement of the mechanism the design predicted, on a workload chosen to exercise it. A
 comparison against SHACL_Engine on identical inputs is still owed.
 
@@ -1148,7 +1148,7 @@ Both produce the same 400,000 triples. Parsing was the dominant term, and the br
 it. What the bridge does *not* remove is a second term table: the engine's `TermId` is a
 dense `u32` index into its own interner while HOLOS's is a sparse tagged `u64`, so each
 **distinct** term is decoded once and re-interned once, with repeats costing a hash lookup.
-That is the honest limit of "reads the store's own dictionary" — parsing goes, the term
+That is the limit of "reads the store's own dictionary" — parsing goes, the term
 table does not, and rewriting the engine's interner to take HOLOS ids would touch everything
 that indexes by them.
 
@@ -1184,7 +1184,7 @@ back into "validate the warehouse overnight and hope".
 A refusal costs slightly *more* than an acceptance, because it also undoes what it applied.
 That is the right way round: the system pays for rejecting bad data, not for accepting it.
 
-The honest reading of 165 commits/s: it is not a high-throughput write path, and it is not
+The plain reading of 165 commits/s: it is not a high-throughput write path, and it is not
 meant to be. It is the cost of a fully validated, fully attributed commit against a
 non-trivial scene — the alternative being 4/s if each commit revalidated everything.
 
@@ -1255,7 +1255,7 @@ So the ceiling is not the storage:
   no longer a nuisance but a failure. Everything above ~100M quads depends on P2's planner
   existing.
 
-**Honest limits of this measurement:** 10M is the largest dataset actually loaded. Beyond
+**Limits of this measurement:** 10M is the largest dataset actually loaded. Beyond
 that the figures above are extrapolation from two points, on one laptop, with a synthetic
 eight-predicate dataset far more uniform than real RDF. Real data has skew, and skew is
 precisely what a constant-table estimator handles worst.
@@ -1273,7 +1273,7 @@ this measurement.
 The reused optimiser reorders joins with an estimator that is a **fixed lookup table**:
 `?s <p> ?o` is estimated at 1,000,000 rows whether that predicate occurs three times or three
 million. It has no access to the data at all. That is not a criticism — an optimiser shipped
-as a library without a store has nothing to consult, and a constant is the only honest thing
+as a library without a store has nothing to consult, and a constant is the only defensible thing
 to return from that position. But it is exactly the gap a store-aware estimator fills, so the
 two were run against the same queries and the same ground truth. Error is reported as
 **q-error** (`max(est/actual, actual/est)`), which scores 100× over and 100× under alike; a

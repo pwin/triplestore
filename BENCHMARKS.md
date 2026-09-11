@@ -63,7 +63,7 @@ million. Timings at different scales therefore ask the same question of the same
 
 **Edges are the exception, necessarily.** A `knows` edge must point at somebody who exists,
 so its target depends on the population. A person's *neighbourhood* is not stable across
-scales — only its **size** is, which is what the path timings depend on. That is the honest
+scales — only its **size** is, which is what the path timings depend on. That is the
 limit of the comparison.
 
 **The anchor is a hub.** Every query that starts from a named person starts from
@@ -431,7 +431,7 @@ implementation and a hand-written one for a single known shape: choosing the nex
 from statistics at each step, hashed bindings, decoding through the dictionary. That is a
 tuning problem rather than a missing operator, and a much less urgent one.
 
-Three things kept it honest:
+Three checks on the measurement:
 
 * **The fragment is small.** `SELECT` in the default graph over basic graph patterns, `JOIN`,
   `UNION`, `VALUES` and `FILTER`, with `DISTINCT`, `LIMIT`, `OFFSET` and a projection.
@@ -480,7 +480,7 @@ rather than returning them short. The budget counts `seen` as well as `out`, bec
 
 #### The suites that were supposed to catch this could not reach it
 
-The honest part. There are three ways into evaluation, and the fast path was wired into one
+The awkward part. There are three ways into evaluation, and the fast path was wired into one
 of them. The W3C conformance runner reaches evaluation through
 `Engine::query_prepared_with_services`, and the Python binding and audited CLI path through
 `Engine::query`; both went straight to the evaluator. **Roughly a thousand W3C queries

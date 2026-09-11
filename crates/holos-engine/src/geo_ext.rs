@@ -993,7 +993,7 @@ mod tests {
             let Geometry::Point(point) = geometry_of(&crs_wkt(crs, geometry)) else {
                 panic!("{crs} did not give a point");
             };
-            // The fixtures are rounded to a centimetre, so a metre is the honest bound.
+            // The fixtures are rounded to a centimetre, so a metre is the defensible bound.
             let east = (point.x() - expected.x) * 111_320.0 * expected.y.to_radians().cos();
             let north = (point.y() - expected.y) * 110_574.0;
             let off = (east * east + north * north).sqrt();
@@ -1127,7 +1127,7 @@ mod tests {
         assert!(holos_transform(&[wkt("POINT(0 0)"), target]).is_none());
     }
 
-    /// RFC 7946 fixed GeoJSON at CRS84 and removed the `crs` member, so there is no honest
+    /// RFC 7946 fixed GeoJSON at CRS84 and removed the `crs` member, so there is no correct
     /// way to answer this. A document whose numbers are eastings and whose format says they
     /// are degrees is worse than no answer.
     #[test]

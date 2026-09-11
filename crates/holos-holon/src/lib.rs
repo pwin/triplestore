@@ -13,7 +13,7 @@
 //! # What this build actually does
 //!
 //! Steps 1, 3 and 4 are real, and step 3 is *incremental* — it uses the revalidation of §8,
-//! which is the whole reason that was built. The rest is honest about itself:
+//! which is the whole reason that was built. The rest says what it is:
 //!
 //! - **Step 2 runs when it is given somewhere to run.** Boundary rules need SHACL-AF
 //!   fixpoint evaluation, which the adapted engine has. It used to need a fresh bridge per
@@ -37,7 +37,7 @@
 //!   the attempt happened, so the tick keeps writing while unapplying the delta — an ordinary
 //!   part of the commit rather than an unwind.
 //!
-//! The projection limit above is the honest limit of a walking skeleton. It demonstrates the
+//! The projection limit above is the limit of a walking skeleton. It demonstrates the
 //! shape; it is not yet a thing to put a ledger in.
 
 #![forbid(unsafe_code)]

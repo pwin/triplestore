@@ -26,7 +26,7 @@
 //!
 //! Edges are the exception, and necessarily so: a `knows` edge has to point at somebody who
 //! exists, so its target depends on how many people there are. The neighbourhood of a given
-//! person is not stable across scales, only its *size* is. That is the honest limit of the
+//! person is not stable across scales, only its *size* is. That is the limit of the
 //! comparison, and it is why the path queries are anchored to a person's degree class
 //! rather than to a particular set of neighbours.
 

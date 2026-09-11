@@ -36,7 +36,7 @@ use crate::model::{Graph, GraphBuilder, TermId, Vocab};
 /// The closure of a schema is not linear in its size: `n` classes in a
 /// `rdfs:subClassOf` chain entail `n²/2` transitive statements, so a modest
 /// document can name a very large graph. Running out of memory partway is a
-/// worse answer than refusing, and refusing is honest — the caller asked for
+/// worse answer than refusing, and refusing is accurate — the caller asked for
 /// something whose cost they may not have known.
 pub const DEFAULT_MAX_TRIPLES: usize = 50_000_000;
 

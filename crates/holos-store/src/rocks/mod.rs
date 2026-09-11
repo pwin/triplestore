@@ -1602,7 +1602,7 @@ impl Storage for RocksStorage {
         // `next` is deliberately left where it is. Restoring it would hand the ids the
         // abandoned scope minted to *different* terms, so a caller holding one would silently
         // read the wrong term; leaving it burns those ids instead, and a caller holding one
-        // gets an honest miss. The same choice the in-memory store makes, for the same
+        // gets a real miss. The same choice the in-memory store makes, for the same
         // reason: the dictionary is append-only and `holos compact` is what reclaims it.
     }
 

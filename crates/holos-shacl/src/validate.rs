@@ -237,7 +237,7 @@ impl<'a> Validator<'a> {
     /// So it narrows first where it soundly can: a filter shape carrying `sh:class` cannot
     /// admit a node that is not an instance of one of those classes, which usually reduces
     /// "every node" to a handful. Without such a constraint it falls back to scanning, which
-    /// is honest about what the target asks for rather than quietly selecting less.
+    /// reports what the target asks for rather than quietly selecting less.
     fn conforming_nodes(&self, inner: ShapeIdx) -> Result<Vec<TermId>, ShaclError> {
         let filter = self.shapes.shape(inner);
         let mut candidates: Vec<TermId> = Vec::new();

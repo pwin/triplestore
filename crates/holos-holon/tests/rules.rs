@@ -282,7 +282,7 @@ fn a_holon_without_graphs_has_no_rules() {
         .is_none());
 }
 
-/// Unused, so `Regime` and the projection field stay honest imports rather than drifting.
+/// Unused, so `Regime` and the projection field stay live imports rather than drifting.
 #[test]
 fn projections_are_untouched_by_the_rule_step() {
     let holon = holon();

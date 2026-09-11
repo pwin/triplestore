@@ -3,7 +3,7 @@
 //! The headline conformance numbers report `passed / attempted`, which is the right
 //! measure of *correctness* but says nothing about **coverage**: a suite where 300 of 625
 //! tests are skipped can still report 100%. Both numbers are needed to describe a store
-//! honestly, so this prints them side by side.
+//! accurately, so this prints them side by side.
 //!
 //! ```text
 //! cargo run --release -p holos-conformance --example coverage
@@ -61,7 +61,7 @@ fn suite(label: &str, manifest_path: &Path) {
         // answer for them — but they *are* run, by `cargo test -p holos-conformance --test
         // protocol` and `--test sparql_protocol`. Counting them as skipped here would
         // understate coverage by 47 tests. Their results come from the ratcheted baselines,
-        // which those runs keep honest: a test that starts or stops failing fails the run
+        // which those runs keep accurate: a test that starts or stops failing fails the run
         // until the baseline is updated.
         if let Some(baseline) = baseline_for(&kind) {
             match known_failures(baseline) {

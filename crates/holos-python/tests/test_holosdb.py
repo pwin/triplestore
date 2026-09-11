@@ -31,7 +31,7 @@ def store():
 
 
 def test_the_wheel_reports_what_it_contains():
-    # A Python extra cannot toggle compiled code, so this is the only honest way to ask.
+    # A Python extra cannot toggle compiled code, so this is the only reliable way to ask.
     assert isinstance(holosdb.has_rocksdb(), bool)
     assert holosdb.__version__
 

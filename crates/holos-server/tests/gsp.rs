@@ -324,7 +324,7 @@ fn writing_a_denied_predicate_is_refused() {
 #[test]
 fn a_graph_the_principal_cannot_read_is_absent_to_them() {
     // Reporting it as present-but-empty would confirm it exists, which is what the policy
-    // was withholding. 404 is the honest answer.
+    // was withholding. 404 is the correct answer.
     let mut engine = Engine::new();
     let mut writer = Session::open(engine.store(), Principal::anonymous(), Policy::permit_all())
         .expect("session");

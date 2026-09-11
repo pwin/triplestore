@@ -93,7 +93,7 @@ fn bounded(view: &holos_engine::view::DatasetView<'_>, p: Option<TermId>, span: 
         .count()
 }
 
-/// The faster of three runs, which is the honest estimate of what the work costs when the
+/// The faster of three runs, which is the fairest estimate of what the work costs when the
 /// machine is not doing something else.
 fn best(mut f: impl FnMut() -> usize) -> (Duration, usize) {
     let mut best = Duration::MAX;

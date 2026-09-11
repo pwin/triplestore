@@ -6,7 +6,7 @@
 //! ground truth, rather than compared by assertion.
 //!
 //! This is **not** a criticism of that optimiser. It ships without a store, so it has
-//! nothing to consult; a constant table is the only honest thing to do in that position.
+//! nothing to consult; a constant table is the only defensible thing to do in that position.
 //! The point of reproducing it is to find out what having a store to consult is actually
 //! worth, which is the question §13 Q2 turns on.
 

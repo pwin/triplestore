@@ -10,7 +10,7 @@
 //!                  rs:binding [ rs:variable "name" ; rs:value "Alice" ] ] .
 //! ```
 //!
-//! Not reading this was costing **152 of the 283 SPARQL 1.0 tests** — reported honestly as
+//! Not reading this was costing **152 of the 283 SPARQL 1.0 tests** — reported accurately as
 //! skips, but skips that said nothing about the engine because the harness, not the store,
 //! was the thing that could not cope. This module removes that excuse.
 //!

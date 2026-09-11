@@ -388,7 +388,7 @@ pub struct Shapes {
 
 /// Every predicate a shape reads, or `None` when that cannot be bounded.
 ///
-/// `None` is the honest answer for a SPARQL or custom constraint whose query uses a variable
+/// `None` is the correct answer for a SPARQL or custom constraint whose query uses a variable
 /// predicate, and the caller re-checks such a shape after any change. The alternative — a
 /// guess — loses a violation, and an incremental validator that loses a violation is worse
 /// than none, because it is trusted.

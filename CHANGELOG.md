@@ -937,7 +937,7 @@ fixed. `compare_datasets` already does isomorphism; the update path now uses it.
 | SPARQL 1.0 | 262/263, 20 skipped | **275/276**, 7 skipped |
 | SPARQL 1.2 | 262/266, 3 skipped | **265/269**, 0 skipped |
 
-What the audit did *not* find: the remaining sparql11 group is honestly upstream. Almost all
+What the audit did *not* find: the remaining sparql11 group is upstream. Almost all
 of it is numeric lexical form — `"1.0"^^xsd:decimal` against `"1"^^xsd:decimal`, `"3.0E4"`
 against `"30000"` — and the suite compares RDF terms, so those really are evaluator
 differences rather than comparison bugs.

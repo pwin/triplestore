@@ -1,6 +1,6 @@
 # Packaging `holosdb` for PyPI
 
-## The `rocksdb` extra, and what it can honestly do
+## The `rocksdb` extra, and what it can actually do
 
 `pip install holosdb[rocksdb]` works and installs nothing extra. That is not a bug, and it is
 worth being precise about why, because the name promises something Python cannot deliver.
