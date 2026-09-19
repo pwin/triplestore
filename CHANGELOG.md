@@ -149,6 +149,37 @@ sequentially rather than fetching them; going lower means not decoding a literal
 bytes already say its datatype is not a geometry, which is a codec-level peek and a separate
 change.
 
+### Statistics are kept with the store, so `--reorder` stops costing a scan per run
+
+`--reorder` is what supplies the cardinality estimate; admission control refuses on the
+estimate, the `DISTINCT` spill is reached only through the refusal, and join reordering is
+the estimate applied. So it is the flag the other protections hang off — and on the CLI it
+was a full scan on **every invocation**, about 300 s on the 653.8-million-triple store, which
+made it a flag nobody could afford to set from the command line. A server paid the same scan
+on every restart.
+
+Now the statistics are saved with the store and loaded back while they still apply. What
+decides "still apply" is a new **write generation** on the store: a counter that moves on
+every insert, delete and bulk load, is put back by a rolled-back scope, and is persisted in
+the same batch as the change it counts, so a reopened store carries on from where it was.
+A snapshot records the generation it was built at, and is used only while the store still
+reports that number. `quad_count` could not serve — delete one quad and insert another and
+it does not move — and neither could the dictionary's size, which is append-only and does
+not grow for a quad whose terms it already held.
+
+On the real store, `holos query --reorder`: **194 s** on the first run, which builds and
+keeps; **20 s** on the second, all of it the query. The server with `--reorder` now prints
+`statistics loaded from the store in 0.00s` on a restart instead of scanning for minutes.
+
+The format is a versioned byte string owned by `holos-stats`; anything that is not exactly a
+snapshot this version wrote — another version, truncated, trailing bytes — is discarded and
+rebuilt, never reported. A cache that is wrong is a cache that is missing. Tests cover both
+directions the cache can fail in: a snapshot the store should still use and one it must
+refuse, and removing the generation check fails the second by name.
+
+The generation is also the answer to a question the store could not previously answer at all
+— *has anything changed?* — and the spatial index is the obvious next thing to ask it.
+
 ### Measured, not changed: what a large store is actually slow at
 
 A sweep of representative shapes against the 653.8-million-triple store, timed net of a 2.7 s
@@ -182,10 +213,10 @@ exactly this comparison — took **116.5 s against 122.3 s** with it on, both on
 Neutral, then. The first run with it on had read 198 s, and that was a cold page cache, not
 the fast path.
 
-**`--reorder` does not help, and on the CLI it cannot.** The statistics build is a full scan —
-about 300 s on this store — and the CLI redoes it on *every invocation*, so admission control
-and the `DISTINCT` spill are both effectively unreachable from the command line. A server
-builds them once at startup, which is where they work.
+**`--reorder` did not help the pushdown, and on the CLI it could not be afforded.** The
+statistics build is a full scan — about 300 s on this store — and at the time of this sweep
+the CLI redid it on *every invocation*, so admission control and the `DISTINCT` spill were
+both effectively unreachable from the command line. That is what the section above fixes.
 
 **`rangequery` had never run against `RocksDB`.** It built an in-memory store and always had,
 so the end-to-end range figures in BENCHMARKS.md are memory-only while the primitive in

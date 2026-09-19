@@ -246,25 +246,50 @@ struct State {
 
 impl State {
     /// Rebuilds the statistics snapshot, if reordering is on.
-    fn refresh_statistics(&self) {
+    /// Returns whether the statistics were rebuilt, as opposed to loaded from the snapshot
+    /// the store keeps. `false` also covers "reordering is off" and "it failed".
+    fn refresh_statistics(&self) -> bool {
         if !self.config.reorder {
-            return;
+            return false;
         }
+        // Under the read lock, so queries keep flowing during a scan that takes minutes
+        // on a large store. A current snapshot skips the scan entirely — the ordinary case
+        // at startup, and the reason a restart no longer costs a statistics pass.
         let built = {
             let Ok(engine) = self.engine.read() else {
-                return;
+                return false;
             };
-            holos_stats::Statistics::build(engine.store(), holos_store::GraphFilter::Default)
+            let graph = holos_store::GraphFilter::Default;
+            match holos_stats::Statistics::load_cached(engine.store(), graph) {
+                Ok(Some(stats)) => Ok((stats, false)),
+                Ok(None) => holos_stats::Statistics::build(engine.store(), graph)
+                    .map(|stats| (stats, true)),
+                Err(e) => Err(e),
+            }
         };
         match built {
-            Ok(stats) => {
+            Ok((stats, fresh)) => {
+                if fresh {
+                    // The write lock, briefly, and only to save. `save` re-checks the
+                    // generation, so a write that slipped in between the read lock going
+                    // and this one coming leaves the snapshot unsaved rather than wrong.
+                    if let Ok(mut engine) = self.engine.write() {
+                        if let Err(e) = stats.save(engine.store_mut()) {
+                            eprintln!("statistics could not be kept with the store: {e}");
+                        }
+                    }
+                }
                 if let Ok(mut slot) = self.statistics.write() {
                     *slot = Some(Arc::new(stats));
                 }
+                fresh
             }
             // Losing the statistics costs speed, not correctness, so a failure here is
             // reported and the server carries on without them.
-            Err(e) => eprintln!("statistics could not be rebuilt: {e}"),
+            Err(e) => {
+                eprintln!("statistics could not be rebuilt: {e}");
+                false
+            }
         }
     }
 
@@ -369,9 +394,10 @@ surprise, check that this is the directory the load wrote to."
     state.refresh_spatial();
     if state.config.reorder {
         let started = std::time::Instant::now();
-        state.refresh_statistics();
+        let built = state.refresh_statistics();
         eprintln!(
-            "  reorder  statistics built in {:.2}s",
+            "  reorder  statistics {} in {:.2}s",
+            if built { "built and kept with the store" } else { "loaded from the store" },
             started.elapsed().as_secs_f64()
         );
     }

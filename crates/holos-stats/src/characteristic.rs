@@ -72,6 +72,10 @@ pub struct Statistics {
     by_predicate: FxHashMap<TermId, Vec<usize>>,
     total_triples: u64,
     total_subjects: u64,
+    /// The store's [`Store::generation`] when this was built. A snapshot is exactly right
+    /// while the store still reports it and exactly wrong once it does not; `save` and
+    /// `load_cached` are the two sides of that check.
+    generation: u64,
 }
 
 impl Statistics {
@@ -125,6 +129,9 @@ impl Statistics {
     /// Propagates any error raised while scanning the store.
     pub fn build(store: &Store, graph: GraphFilter) -> Result<Self> {
         let mut stats = Self::default();
+        // Read first, so a write that lands during the scan makes this snapshot stale by
+        // its own account rather than silently claiming the generation after it.
+        stats.generation = store.generation();
         // Counted, not collected: `close` sees each subject exactly once and knows which
         // predicates it carried, so a set here would only be rediscovering that. The
         // docstring has why this is exact and what it depends on.
@@ -216,6 +223,73 @@ impl Statistics {
                 subjects,
                 occurrences,
             });
+        }
+        Ok(stats)
+    }
+
+    /// The generation of the store this describes. See [`Store::generation`].
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The snapshot the store keeps, if it still describes the store.
+    ///
+    /// `None` means build. It covers three cases and deliberately does not distinguish
+    /// them: nothing saved yet, a snapshot from an older format, or one from before the
+    /// last write. All three have the same remedy, and a snapshot is a cache — a bad one is
+    /// discarded, never reported.
+    ///
+    /// Only the default graph's statistics are ever kept, because every caller asks for
+    /// those. Another filter is built fresh each time.
+    ///
+    /// # Errors
+    ///
+    /// If the store cannot be read. A snapshot that cannot be *decoded* is `Ok(None)`.
+    pub fn load_cached(store: &Store, graph: GraphFilter) -> Result<Option<Self>> {
+        if !matches!(graph, GraphFilter::Default) {
+            return Ok(None);
+        }
+        let Some(bytes) = store.load_statistics()? else {
+            return Ok(None);
+        };
+        Ok(Self::from_bytes(&bytes).filter(|stats| stats.generation == store.generation()))
+    }
+
+    /// Keeps this snapshot with the store, if it still describes the store.
+    ///
+    /// Returns whether it did. `false` means a write landed since `build` read the
+    /// generation, and a snapshot that would be stale on arrival is not worth writing —
+    /// the next `load_cached` would reject it anyway.
+    ///
+    /// # Errors
+    ///
+    /// If the write fails.
+    pub fn save(&self, store: &mut Store) -> Result<bool> {
+        if store.generation() != self.generation {
+            return Ok(false);
+        }
+        store.save_statistics(&self.to_bytes())?;
+        Ok(true)
+    }
+
+    /// Loads the snapshot if it is current, otherwise builds and keeps one.
+    ///
+    /// The one-call form for a caller that holds the store exclusively — the CLI. The server
+    /// builds under a read lock so queries keep flowing during the scan, and uses the two
+    /// halves separately.
+    ///
+    /// # Errors
+    ///
+    /// Whatever building or saving returns. A snapshot that fails to save is still returned:
+    /// the statistics are right, they just will not be there next time.
+    pub fn cached(store: &mut Store, graph: GraphFilter) -> Result<Self> {
+        if let Some(stats) = Self::load_cached(store, graph)? {
+            return Ok(stats);
+        }
+        let stats = Self::build(store, graph)?;
+        if matches!(graph, GraphFilter::Default) {
+            stats.save(store)?;
         }
         Ok(stats)
     }
@@ -356,6 +430,133 @@ impl Statistics {
             estimate *= self.estimate_pattern(&pattern);
         }
         estimate
+    }
+}
+
+// --- the snapshot format -----------------------------------------------------------------
+//
+// Big-endian, fixed-width, versioned by a leading byte, and nothing else. `by_predicate` is
+// not written: it is derived from the sets and is rebuilt on read, which keeps the format
+// from being able to disagree with itself.
+//
+// Sized by the schema, not the data: a store with fourteen predicates and two shapes is a
+// few hundred bytes; one with ten thousand predicates and a hundred thousand shapes is some
+// megabytes. Either is one key in the default family.
+
+/// Bumped when the layout changes. A snapshot with another version is simply not current.
+const SNAPSHOT_VERSION: u8 = 1;
+
+impl Statistics {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(SNAPSHOT_VERSION);
+        put_u64(&mut out, self.generation);
+        put_u64(&mut out, self.total_triples);
+        put_u64(&mut out, self.total_subjects);
+
+        put_u32(&mut out, self.predicates.len());
+        for (predicate, stats) in &self.predicates {
+            put_u64(&mut out, predicate.to_raw());
+            put_u64(&mut out, stats.triples);
+            put_u64(&mut out, stats.subjects);
+            put_u64(&mut out, stats.objects);
+        }
+
+        put_u32(&mut out, self.sets.len());
+        for set in &self.sets {
+            put_u32(&mut out, set.predicates.len());
+            for predicate in &set.predicates {
+                put_u64(&mut out, predicate.to_raw());
+            }
+            put_u64(&mut out, set.subjects);
+            put_u32(&mut out, set.occurrences.len());
+            for (predicate, n) in &set.occurrences {
+                put_u64(&mut out, predicate.to_raw());
+                put_u64(&mut out, *n);
+            }
+        }
+        out
+    }
+
+    /// `None` for anything that is not exactly a snapshot this version wrote.
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut at = Cursor { bytes, pos: 0 };
+        if at.u8()? != SNAPSHOT_VERSION {
+            return None;
+        }
+        let mut stats = Self {
+            generation: at.u64()?,
+            total_triples: at.u64()?,
+            total_subjects: at.u64()?,
+            ..Self::default()
+        };
+
+        for _ in 0..at.u32()? {
+            let predicate = TermId::from_raw(at.u64()?);
+            let entry = PredicateStats {
+                triples: at.u64()?,
+                subjects: at.u64()?,
+                objects: at.u64()?,
+            };
+            stats.predicates.insert(predicate, entry);
+        }
+
+        for _ in 0..at.u32()? {
+            let mut predicates = Vec::new();
+            for _ in 0..at.u32()? {
+                predicates.push(TermId::from_raw(at.u64()?));
+            }
+            let subjects = at.u64()?;
+            let mut occurrences = FxHashMap::default();
+            for _ in 0..at.u32()? {
+                let predicate = TermId::from_raw(at.u64()?);
+                occurrences.insert(predicate, at.u64()?);
+            }
+            let index = stats.sets.len();
+            for predicate in &predicates {
+                stats.by_predicate.entry(*predicate).or_default().push(index);
+            }
+            stats.sets.push(CharacteristicSet {
+                predicates,
+                subjects,
+                occurrences,
+            });
+        }
+
+        // Trailing bytes mean this is not the snapshot it claims to be.
+        (at.pos == bytes.len()).then_some(stats)
+    }
+}
+
+fn put_u64(out: &mut Vec<u8>, v: u64) {
+    out.extend_from_slice(&v.to_be_bytes());
+}
+
+fn put_u32(out: &mut Vec<u8>, v: usize) {
+    // Lengths of in-memory collections; a count past `u32::MAX` is not a real case and is
+    // saturated rather than truncated so that it can never decode as a small number.
+    out.extend_from_slice(&u32::try_from(v).unwrap_or(u32::MAX).to_be_bytes());
+}
+
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl Cursor<'_> {
+    fn take(&mut self, n: usize) -> Option<&[u8]> {
+        let slice = self.bytes.get(self.pos..self.pos.checked_add(n)?)?;
+        self.pos += n;
+        Some(slice)
+    }
+    fn u8(&mut self) -> Option<u8> {
+        self.take(1).map(|b| b[0])
+    }
+    fn u32(&mut self) -> Option<u32> {
+        self.take(4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+    fn u64(&mut self) -> Option<u64> {
+        self.take(8).and_then(|b| b.try_into().ok()).map(u64::from_be_bytes)
     }
 }
 
@@ -549,6 +750,103 @@ mod tests {
         // And a predicate on one subject only, so a count that leaked across predicates shows.
         let name = stats.predicates[&id(&store, &ex("name"))];
         assert_eq!((name.triples, name.subjects, name.objects), (1, 1, 1));
+    }
+
+    /// The snapshot must give back exactly the statistics that went in — every count, every
+    /// shape, and the index derived from the shapes — because a snapshot that drifted would
+    /// make estimates wrong in a way nothing downstream can detect.
+    #[test]
+    fn a_snapshot_round_trips_exactly() {
+        let store = store();
+        let built = Statistics::build(&store, GraphFilter::Default).unwrap();
+        let back = Statistics::from_bytes(&built.to_bytes()).expect("decodes");
+
+        assert_eq!(back.generation, built.generation);
+        assert_eq!(back.total_triples, built.total_triples);
+        assert_eq!(back.total_subjects, built.total_subjects);
+        assert_eq!(back.predicates.len(), built.predicates.len());
+        for (p, s) in &built.predicates {
+            let b = back.predicates[p];
+            assert_eq!((b.triples, b.subjects, b.objects), (s.triples, s.subjects, s.objects));
+        }
+        assert_eq!(back.sets.len(), built.sets.len());
+        for (a, b) in built.sets.iter().zip(&back.sets) {
+            assert_eq!(a.predicates, b.predicates);
+            assert_eq!(a.subjects, b.subjects);
+            assert_eq!(a.occurrences, b.occurrences);
+        }
+        assert_eq!(back.by_predicate, built.by_predicate, "the index is rebuilt from the sets");
+
+        // And the estimates, which is what any of it is for.
+        let name = id(&store, &ex("name"));
+        let email = id(&store, &ex("email"));
+        let star = [Pattern::star(0, name, None), Pattern::star(0, email, None)];
+        assert_eq!(back.estimate_star(&star), built.estimate_star(&star));
+    }
+
+    /// Anything that is not a snapshot this version wrote is `None`, never a partial or a
+    /// panic: a cache is discarded, not trusted and not reported.
+    #[test]
+    fn a_snapshot_that_is_not_one_is_refused() {
+        let store = store();
+        let good = Statistics::build(&store, GraphFilter::Default).unwrap().to_bytes();
+
+        assert!(Statistics::from_bytes(&[]).is_none(), "empty");
+        let mut wrong_version = good.clone();
+        wrong_version[0] = SNAPSHOT_VERSION.wrapping_add(1);
+        assert!(Statistics::from_bytes(&wrong_version).is_none(), "another version");
+        assert!(Statistics::from_bytes(&good[..good.len() / 2]).is_none(), "truncated");
+        let mut trailing = good.clone();
+        trailing.push(0);
+        assert!(Statistics::from_bytes(&trailing).is_none(), "trailing bytes");
+        assert!(Statistics::from_bytes(&good).is_some(), "and the real one still decodes");
+    }
+
+    /// The whole point: a snapshot is used while the store is unchanged and rebuilt the
+    /// moment it is not. Both directions, because a cache that is never invalidated and one
+    /// that is never used are each a bug that passes a round-trip test.
+    #[test]
+    fn a_snapshot_is_used_until_a_write_and_not_after() {
+        let mut store = store();
+        assert!(
+            Statistics::load_cached(&store, GraphFilter::Default).unwrap().is_none(),
+            "nothing kept yet"
+        );
+
+        let first = Statistics::cached(&mut store, GraphFilter::Default).unwrap();
+        assert!(store.load_statistics().unwrap().is_some(), "cached() kept a snapshot");
+        let loaded = Statistics::load_cached(&store, GraphFilter::Default)
+            .unwrap()
+            .expect("the store is unchanged, so the snapshot is current");
+        assert_eq!(loaded.generation, first.generation);
+        assert_eq!(loaded.total_triples, first.total_triples);
+
+        // One write, and the snapshot no longer describes the store.
+        store
+            .insert(
+                Quad {
+                    subject: ex("newcomer").into(),
+                    predicate: ex("name"),
+                    object: Literal::new_simple_literal("N").into(),
+                    graph_name: GraphName::DefaultGraph,
+                }
+                .as_ref(),
+            )
+            .unwrap();
+        assert!(
+            Statistics::load_cached(&store, GraphFilter::Default).unwrap().is_none(),
+            "a write moved the generation, so the snapshot must be refused"
+        );
+
+        // A stale snapshot is not saved either: `save` re-checks.
+        assert!(!first.save(&mut store).unwrap(), "stale statistics are not kept");
+
+        let second = Statistics::cached(&mut store, GraphFilter::Default).unwrap();
+        assert_eq!(second.total_triples, first.total_triples + 1, "rebuilt from the store");
+        assert!(
+            Statistics::load_cached(&store, GraphFilter::Default).unwrap().is_some(),
+            "and kept again"
+        );
     }
 
     #[test]

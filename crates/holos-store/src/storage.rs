@@ -49,6 +49,39 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// a staleness signal, so it must be cheap: a counter, never a scan.
     fn dictionary_len(&self) -> usize;
 
+    /// A counter that moves every time the set of quads changes.
+    ///
+    /// Insert, delete, bulk load: each advances it, and a rolled-back scope puts it back.
+    /// Two reads that return the same value bracket an interval in which no quad was added
+    /// or removed — which is the question anything derived from the quads has to ask before
+    /// trusting itself. Statistics are the case in hand: a snapshot taken at generation `g`
+    /// describes the store exactly while `generation()` still returns `g`, and describes
+    /// something else the moment it does not.
+    ///
+    /// `quad_count` cannot serve, because deleting a quad and inserting another leaves it
+    /// where it was. Nor can the dictionary's size, since the dictionary is append-only and
+    /// the new quad may name only terms it already held. This is the counter those two are
+    /// not.
+    fn generation(&self) -> u64;
+
+    /// Keeps a statistics snapshot with the store, replacing any it already holds.
+    ///
+    /// The bytes are opaque here; `holos-stats` owns the format and records the generation
+    /// inside them. This does **not** advance the generation — a snapshot describes the
+    /// quads and is not one of them.
+    ///
+    /// # Errors
+    ///
+    /// If the write fails.
+    fn save_statistics(&mut self, bytes: &[u8]) -> Result<()>;
+
+    /// The snapshot [`Storage::save_statistics`] kept, if there is one.
+    ///
+    /// # Errors
+    ///
+    /// If the read fails.
+    fn load_statistics(&self) -> Result<Option<Vec<u8>>>;
+
     /// How many ids have been issued for one dictionary-backed tag.
     ///
     /// Each kind has its own dense index space, so this is also an enumeration bound:

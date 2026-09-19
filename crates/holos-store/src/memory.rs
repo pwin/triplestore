@@ -38,6 +38,14 @@ pub struct MemoryStorage {
     /// quad referring to it is unreachable rather than wrong, and `holos compact` is what
     /// reclaims those — rolling it back would mean invalidating ids a caller may hold.
     undo: Option<Vec<Undo>>,
+    /// See [`Storage::generation`].
+    generation: u64,
+    /// Where `generation` stood when the open scope began, so a rollback — which undoes
+    /// through `insert_encoded` and `remove_encoded`, each of which advances it — can put
+    /// it back rather than leave a store whose quads are unchanged looking changed.
+    generation_at_begin: u64,
+    /// See [`Storage::save_statistics`]. Kept for backend parity; nothing outlives the process.
+    statistics: Option<Vec<u8>>,
 }
 
 impl MemoryStorage {
@@ -101,6 +109,7 @@ impl Storage for MemoryStorage {
             ));
         }
         self.undo = Some(Vec::new());
+        self.generation_at_begin = self.generation;
         Ok(())
     }
 
@@ -132,10 +141,27 @@ impl Storage for MemoryStorage {
             // failure path have no failure path of its own.
             let _ = outcome;
         }
+        // Every undo above advanced the generation; the quads are back where they were, so
+        // the generation goes back too. Without this a rolled-back scope would leave a store
+        // whose contents are unchanged claiming that they changed.
+        self.generation = self.generation_at_begin;
     }
 
     fn in_scope(&self) -> bool {
         self.undo.is_some()
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn save_statistics(&mut self, bytes: &[u8]) -> Result<()> {
+        self.statistics = Some(bytes.to_vec());
+        Ok(())
+    }
+
+    fn load_statistics(&self) -> Result<Option<Vec<u8>>> {
+        Ok(self.statistics.clone())
     }
 
     fn dictionary_count_for(&self, tag: holos_core::Tag) -> usize {
@@ -163,6 +189,7 @@ impl Storage for MemoryStorage {
                 }
             }
             self.record(Undo::Inserted(quad));
+            self.generation += 1;
             Ok(true)
         } else {
             Ok(false)
@@ -173,6 +200,7 @@ impl Storage for MemoryStorage {
         if self.index.remove(quad)? {
             self.decrement(quad.predicate);
             self.record(Undo::Removed(quad));
+            self.generation += 1;
             Ok(true)
         } else {
             Ok(false)

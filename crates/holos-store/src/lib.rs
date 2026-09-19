@@ -89,6 +89,30 @@ impl Store {
         self.inner.dictionary_len()
     }
 
+    /// See [`Storage::generation`].
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.inner.generation()
+    }
+
+    /// See [`Storage::save_statistics`].
+    ///
+    /// # Errors
+    ///
+    /// If the write fails.
+    pub fn save_statistics(&mut self, bytes: &[u8]) -> Result<()> {
+        self.inner.save_statistics(bytes)
+    }
+
+    /// See [`Storage::load_statistics`].
+    ///
+    /// # Errors
+    ///
+    /// If the read fails.
+    pub fn load_statistics(&self) -> Result<Option<Vec<u8>>> {
+        self.inner.load_statistics()
+    }
+
     /// See [`Storage::for_each_in_range`].
     ///
     /// # Errors

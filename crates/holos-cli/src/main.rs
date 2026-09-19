@@ -168,7 +168,7 @@ fn main() -> Result<()> {
     }
 
     match command.as_str() {
-        "query" => query(&engine, &opts),
+        "query" => query(&mut engine, &opts),
         "stats" => stats(&engine, &opts),
         "dump" => dump(&engine, &opts),
         "update" => update_command(&mut engine, &opts),
@@ -180,7 +180,22 @@ fn main() -> Result<()> {
     }
 }
 
-fn query(engine: &Engine, opts: &Options) -> Result<()> {
+fn query(engine: &mut Engine, opts: &Options) -> Result<()> {
+    // Before the view is taken, because the view borrows the engine and saving a snapshot
+    // needs it mutably. First run on a store builds and keeps them; every run after loads
+    // them, until a write moves the generation. On a 653.8-million-triple store that is the
+    // difference between a 300 s statistics pass on every invocation and none — which was
+    // the difference between --reorder being usable from the command line and not.
+    let statistics = if opts.reorder {
+        Some(std::sync::Arc::new(holos_stats::Statistics::cached(
+            engine.store_mut(),
+            GraphFilter::Default,
+        )?))
+    } else {
+        None
+    };
+    let engine: &Engine = engine;
+
     let query = match (&opts.query, &opts.query_file) {
         (Some(q), _) => q.clone(),
         (None, Some(path)) => {
@@ -197,11 +212,8 @@ fn query(engine: &Engine, opts: &Options) -> Result<()> {
     let view = engine.view(&session);
     let audit = CollectingSink::new();
     let mut query_options = opts.query_options()?;
-    if opts.reorder {
-        // One pass over the store. Worth it whenever the saving beats the build, which a
-        // single badly ordered join usually does.
-        let stats = holos_stats::Statistics::build(engine.store(), GraphFilter::Default)?;
-        query_options = query_options.reordering(std::sync::Arc::new(stats));
+    if let Some(stats) = statistics {
+        query_options = query_options.reordering(stats);
     }
 
     let results = if opts.audit {

@@ -62,6 +62,12 @@ const TRIPLE_ORDERS: [&str; 3] = [DSPO, DPOS, DOSP];
 /// Metadata keys in the default column family.
 const META_VERSION: &[u8] = b"format_version";
 const META_QUADS: &[u8] = b"quad_count";
+/// See [`Storage::generation`]. Written in the same batch as every change to the quads.
+const META_GENERATION: &[u8] = b"generation";
+/// See [`Storage::save_statistics`]. In the default family, which is key-addressed only —
+/// `STATS` is iterated at open with every key read as a predicate id, so it cannot hold a
+/// blob whose key is not one.
+const META_STATISTICS: &[u8] = b"statistics";
 const META_NEXT: [(&[u8], Tag); 4] = [
     (b"next_iri", Tag::Iri),
     (b"next_blank", Tag::BlankNode),
@@ -84,6 +90,8 @@ pub struct RocksStorage {
     next: FxHashMap<Tag, u64>,
     quad_count: u64,
     predicate_counts: FxHashMap<TermId, u64>,
+    /// See [`Storage::generation`]. Persisted as `META_GENERATION` in the batch that moves it.
+    generation: u64,
     /// `Some` while a bulk load is running: see [`RocksStorage::begin_bulk_load`].
     bulk: Option<BulkState>,
     /// `Some` while a commit scope is open: see [`Storage::begin`].
@@ -158,6 +166,7 @@ struct ScopeState {
     /// in the same batch, so discarding the batch has to discard them too.
     quad_count: u64,
     predicate_counts: FxHashMap<TermId, u64>,
+    generation: u64,
 }
 
 /// What a bulk load has to remember that the database cannot yet answer.
@@ -352,6 +361,7 @@ impl RocksStorage {
             next.insert(tag, read_u64(&db, meta_key)?.unwrap_or(0));
         }
         let quad_count = read_u64(&db, META_QUADS)?.unwrap_or(0);
+        let generation = read_u64(&db, META_GENERATION)?.unwrap_or(0);
 
         // Statistics are small — one row per predicate — so they are read once at open
         // and served from memory, which is what lets `predicate_count` be infallible.
@@ -367,6 +377,7 @@ impl RocksStorage {
             next,
             quad_count,
             predicate_counts,
+            generation,
             bulk: None,
             scope: None,
             path,
@@ -734,10 +745,16 @@ impl RocksStorage {
             batch.put_cf(stats, put_id(*p), n.to_be_bytes());
         }
         batch.put(META_QUADS, total.to_be_bytes());
+        // A bulk load is one change however many quads it brought, and a recount that found
+        // nothing new is still a moment after which everything derived from the quads must
+        // be re-derived — the load may have replaced quads and kept the count.
+        let generation = self.generation + 1;
+        batch.put(META_GENERATION, generation.to_be_bytes());
         self.db.write(batch).map_err(rocks_err)?;
         // The counters are now authoritative again.
         self.predicate_counts = counts;
         self.quad_count = total;
+        self.generation = generation;
         Ok(())
     }
 
@@ -1239,6 +1256,21 @@ impl Storage for RocksStorage {
         usize::try_from(self.next.values().sum::<u64>()).unwrap_or(usize::MAX)
     }
 
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn save_statistics(&mut self, bytes: &[u8]) -> Result<()> {
+        // Straight to the database, outside any scope and without touching the generation:
+        // a snapshot describes the quads and is not a change to them, so a rollback has no
+        // reason to undo it and a reader has no reason to see it as a write.
+        self.db.put(META_STATISTICS, bytes).map_err(rocks_err)
+    }
+
+    fn load_statistics(&self) -> Result<Option<Vec<u8>>> {
+        self.db.get(META_STATISTICS).map_err(rocks_err)
+    }
+
     /// One bounded iterator over `id2str` instead of a point lookup per id.
     ///
     /// The ids for a tag are dense and the keys are their big-endian bytes, so `from..to` is
@@ -1365,6 +1397,12 @@ impl Storage for RocksStorage {
                 META_QUADS.to_vec().into(),
                 self.quad_count.to_be_bytes().to_vec().into(),
             ));
+            self.generation += 1;
+            ops.push(Pending::Put(
+                DEFAULT_CF,
+                META_GENERATION.to_vec().into(),
+                self.generation.to_be_bytes().to_vec().into(),
+            ));
             let count = self.predicate_counts.entry(p).or_insert(0);
             *count += 1;
             ops.push(Pending::Put(
@@ -1416,6 +1454,12 @@ impl Storage for RocksStorage {
             DEFAULT_CF,
             META_QUADS.to_vec().into(),
             self.quad_count.to_be_bytes().to_vec().into(),
+        ));
+        self.generation += 1;
+        ops.push(Pending::Put(
+            DEFAULT_CF,
+            META_GENERATION.to_vec().into(),
+            self.generation.to_be_bytes().to_vec().into(),
         ));
         decrement(&mut self.predicate_counts, p, &mut ops);
         self.commit_ops(ops)?;
@@ -1617,6 +1661,7 @@ impl Storage for RocksStorage {
         self.scope = Some(ScopeState {
             quad_count: self.quad_count,
             predicate_counts: self.predicate_counts.clone(),
+            generation: self.generation,
             ..ScopeState::default()
         });
         Ok(())
@@ -1664,6 +1709,7 @@ impl Storage for RocksStorage {
         // counters moved, and they go back to what the scope opened with.
         self.quad_count = scope.quad_count;
         self.predicate_counts = scope.predicate_counts;
+        self.generation = scope.generation;
         // `next` is deliberately left where it is. Restoring it would hand the ids the
         // abandoned scope minted to *different* terms, so a caller holding one would silently
         // read the wrong term; leaving it burns those ids instead, and a caller holding one
