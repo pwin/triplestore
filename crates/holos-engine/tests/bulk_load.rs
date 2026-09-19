@@ -85,3 +85,82 @@ fn iris_and_literals_are_untouched() {
     assert_eq!(engine.store().len(), 2);
     assert_eq!(subjects(&engine).len(), 1);
 }
+
+// --- the parse thread ----------------------------------------------------------------------
+//
+// Parsing runs on its own thread and hands batches to the loading thread over a bounded
+// channel. That introduces three ways a load could go wrong that a single loop could not:
+// a parse error partway through has to reach the caller as an error, not as a truncated
+// load that reports success; quads have to arrive in file order, since ids are issued in
+// arrival order and both backends are held to identical ids for identical input; and a
+// document larger than one batch, or than the whole queue, has to load completely.
+
+/// A few kilobytes of a triple per line, enough to cross several batch boundaries.
+fn many_lines(n: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for i in 0..n {
+        out.extend_from_slice(
+            format!("<http://example.com/s{i}> <http://example.com/p> \"{i}\" .\n").as_bytes(),
+        );
+    }
+    out
+}
+
+#[test]
+fn a_document_larger_than_the_queue_loads_completely_and_in_order() {
+    // 8,192 per batch and 4 batches of queue: 50,000 lines is well past both.
+    let doc = many_lines(50_000);
+    let mut engine = Engine::new();
+    let n = engine
+        .bulk_load(doc.as_slice(), RdfFormat::NTriples, None)
+        .expect("load");
+    assert_eq!(n, 50_000);
+    assert_eq!(engine.store().len(), 50_000);
+
+    // In order: the store issues ids as quads arrive, so `s0` must have the lowest subject
+    // id and `s49999` the highest. A batch delivered out of order would show up here.
+    let first = engine
+        .store()
+        .lookup_term(NamedNode::new_unchecked("http://example.com/s0").as_ref().into())
+        .expect("lookup")
+        .expect("present");
+    let last = engine
+        .store()
+        .lookup_term(NamedNode::new_unchecked("http://example.com/s49999").as_ref().into())
+        .expect("lookup")
+        .expect("present");
+    assert!(first < last, "s0 ({first:?}) must be issued before s49999 ({last:?})");
+}
+
+#[test]
+fn a_parse_error_partway_through_is_an_error_not_a_short_load() {
+    // Ten thousand good lines, one bad one, ten thousand more. With the parser a batch
+    // ahead of the loader, the error arrives after some quads have already been inserted;
+    // the caller must still see it.
+    let mut doc = many_lines(10_000);
+    doc.extend_from_slice(b"this is not a triple\n");
+    doc.extend_from_slice(&many_lines(10_000));
+
+    let mut engine = Engine::new();
+    let outcome = engine.bulk_load(doc.as_slice(), RdfFormat::NTriples, None);
+    assert!(
+        matches!(outcome, Err(holos_engine::EngineError::Parse(_))),
+        "expected a parse error, got {outcome:?}"
+    );
+    // What loaded before the error is whatever it is; what must not have happened is the
+    // lines *after* it loading as if nothing were wrong.
+    assert!(
+        engine.store().len() <= 10_000,
+        "lines after the parse error must not load, got {}",
+        engine.store().len()
+    );
+}
+
+#[test]
+fn an_empty_document_loads_nothing_and_returns() {
+    let mut engine = Engine::new();
+    let n = engine
+        .bulk_load(&b""[..], RdfFormat::NTriples, None)
+        .expect("empty is fine");
+    assert_eq!(n, 0);
+}

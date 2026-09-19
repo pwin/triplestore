@@ -289,6 +289,11 @@ struct BulkState {
     dict: Option<DictBuffers>,
     /// See [`crate::storage::BulkResolves`].
     resolves: crate::storage::BulkResolves,
+    /// Encodes since the last flush: the clock `Cached` positions are read from.
+    position: u32,
+    /// The counters as they stood at the previous flush, so each flush can report its own
+    /// window rather than a running total.
+    resolves_at_last_flush: crate::storage::BulkResolves,
     /// Sorted runs already written, per index order, once the load outgrew its buffer.
     ///
     /// Empty for any load that fits in one buffer, which is the common case: the merge then
@@ -296,45 +301,78 @@ struct BulkState {
     spilled: Option<Box<Spilled>>,
 }
 
-/// The hit count an entry needs to survive a flush: [`HOT_HITS`], raised until no more
-/// than [`HOT_CAPACITY`] entries qualify.
+/// The spread an entry needs to survive a flush: [`HOT_SPREAD`], raised until no more than
+/// [`HOT_CAPACITY`] entries qualify.
 ///
-/// Found by selection rather than a sort — the counts are copied out (four bytes each, so
+/// Found by selection rather than a sort — the spreads are copied out (four bytes each, so
 /// a few megabytes for a full cache) and the cap-th largest is picked in linear time.
 /// Ties at the threshold all survive, so the cap can be exceeded by however many entries
-/// share that exact count; that is bounded by the cache and is not worth a tiebreak.
-fn hot_threshold(hits: impl Iterator<Item = u32>) -> u32 {
-    let mut counts: Vec<u32> = hits.filter(|&h| h >= HOT_HITS).collect();
-    if counts.len() <= HOT_CAPACITY {
-        return HOT_HITS;
+/// share that exact value; that is bounded by the cache and is not worth a tiebreak.
+fn hot_threshold(spreads: impl Iterator<Item = u32>) -> u32 {
+    let mut wide: Vec<u32> = spreads.filter(|&s| s >= HOT_SPREAD).collect();
+    if wide.len() <= HOT_CAPACITY {
+        return HOT_SPREAD;
     }
     // The cap-th largest is at index `len - cap` once ascending.
-    let at = counts.len() - HOT_CAPACITY;
-    let (_, nth, _) = counts.select_nth_unstable(at);
-    (*nth).max(HOT_HITS)
+    let at = wide.len() - HOT_CAPACITY;
+    let (_, nth, _) = wide.select_nth_unstable(at);
+    (*nth).max(HOT_SPREAD)
 }
 
-/// A term-cache entry: the id, and how often it has been hit since the last flush.
+/// A term-cache entry: the id, and where in the current window it was first and last used.
+///
+/// Positions are in encodes since the last flush. Their difference — the *spread* — is
+/// what a flush keeps entries by, and it is a better signal than a hit count for the thing
+/// being asked, which is "will this term turn up again next window?" A subject's dozen
+/// quads are adjacent in the file, so it is hit a dozen times across a span of a dozen
+/// quads and then never again; a postal code shared by a thousand subjects is hit a
+/// handful of times across the whole window and again in every window after. Counting
+/// hits ranks the subject above the postal code. Measuring spread ranks them the right
+/// way round, and it is the postal code that costs a disk read every window if forgotten.
 #[derive(Debug, Clone, Copy)]
 struct Cached {
     id: TermId,
-    hits: u32,
+    /// First use in this window, or `NOT_USED` if none yet.
+    first: u32,
+    /// Most recent use in this window.
+    last: u32,
 }
 
-/// A cache entry survives a flush if it was hit at least this often since the last one.
-///
-/// Two, so a term seen once and never again — most of a dictionary — is dropped, and
-/// anything that recurred at all is a candidate. The cap below is what actually bounds it.
-const HOT_HITS: u32 = 2;
+impl Cached {
+    const NOT_USED: u32 = u32::MAX;
 
-/// The most entries a flush keeps, by hits. At 222 bytes each this is about 44 MB.
+    fn new(id: TermId, at: u32) -> Self {
+        Self { id, first: at, last: at }
+    }
+
+    fn touch(&mut self, at: u32) {
+        if self.first == Self::NOT_USED {
+            self.first = at;
+        }
+        self.last = at;
+    }
+
+    /// How far apart the first and last use were, in encodes. Zero if unused this window.
+    fn spread(&self) -> u32 {
+        if self.first == Self::NOT_USED {
+            0
+        } else {
+            self.last.saturating_sub(self.first)
+        }
+    }
+}
+
+/// A cache entry survives a flush if its uses in the window were at least this far apart.
 ///
-/// A subject with a dozen quads is hit a dozen times in a row and then never again; with a
-/// threshold alone, every one of those in a window would survive its flush and be dropped at
-/// the next, holding a window's worth of subjects for nothing. Keeping only the most-hit
-/// entries means that when there are hotter terms — and a predicate is hit a hundred
-/// thousand times a window — the subjects lose. When there are not, they are all there is,
-/// and forty megabytes of them is the price of not having to know the data in advance.
+/// In encodes, so about a third as many quads. A subject's cluster of quads spans a few
+/// dozen; anything spread across thousands has been used from more than one place in the
+/// file, which is what recurrence looks like from inside one window.
+const HOT_SPREAD: u32 = 8_192;
+
+/// The most entries a flush keeps, by spread. At 222 bytes each this is about 44 MB.
+///
+/// The bound, in case a dataset is nothing but spread-out terms — which would be unusual,
+/// and forty megabytes is the price of not having to know that in advance.
 const HOT_CAPACITY: usize = 200_000;
 
 /// The sorted runs on disk, one set per index order.
@@ -380,7 +418,7 @@ impl RocksStorage {
         db_opts.set_max_background_jobs(num_cpus());
 
         let mut families = vec![ColumnFamilyDescriptor::new(ID2STR, value_opts())];
-        families.push(ColumnFamilyDescriptor::new(STR2ID, value_opts()));
+        families.push(ColumnFamilyDescriptor::new(STR2ID, str2id_opts()));
         families.push(ColumnFamilyDescriptor::new(GRAPHS, index_opts(codec::ID)));
         families.push(ColumnFamilyDescriptor::new(STATS, value_opts()));
         for name in QUAD_ORDERS {
@@ -705,14 +743,38 @@ impl RocksStorage {
         // means looking them up again next window: keep the most-hit, up to a cap, and
         // start their counts over.
         if let Some(state) = self.bulk.as_mut() {
-            let threshold = hot_threshold(state.terms.values().map(|c| c.hits));
+            let threshold = hot_threshold(state.terms.values().map(Cached::spread));
             state.terms.retain(|_, cached| {
-                let keep = cached.hits >= threshold;
-                cached.hits = 0;
+                let keep = cached.spread() >= threshold;
+                // Unused until touched again; an entry that stays unused for a whole window
+                // has spread zero at the next flush and is dropped then.
+                cached.first = Cached::NOT_USED;
                 keep
             });
             state.terms.shrink_to_fit();
+            state.position = 0;
             state.resolves.retained += state.terms.len() as u64;
+
+            // One line per flush on stderr: the shape of the read cost across a load is what
+            // separates "a filter would help" from "the disk is saturated" from "nothing is
+            // wrong", and a single average at the end cannot show a shape.
+            let r = state.resolves;
+            let p = state.resolves_at_last_flush;
+            let (hits, misses, nanos) = (r.hits - p.hits, r.misses - p.misses, r.nanos - p.nanos);
+            let reads = hits + misses;
+            let b: Vec<u64> = (0..4).map(|i| r.buckets[i] - p.buckets[i]).collect();
+            eprintln!(
+                "  flush {sequence}: {} terms; reads {hits} hits + {misses} misses at {:.1} us \
+[<10us {} | <50 {} | <200 {} | 200+ {}]; {} kept hot",
+                state.seen.as_ref().map_or(0, seen::Seen::inserted),
+                if reads == 0 { 0.0 } else { nanos as f64 / 1e3 / reads as f64 },
+                b[0],
+                b[1],
+                b[2],
+                b[3],
+                state.terms.len(),
+            );
+            state.resolves_at_last_flush = r;
             let mut fresh = DictBuffers::new(&dir, budget);
             fresh.flushes = sequence + 1;
             state.dict = Some(fresh);
@@ -738,7 +800,7 @@ impl RocksStorage {
         let path = dir.join(format!("{family}.{sequence}.dict.sst"));
         // The family's own options, so the file is written with the comparator and
         // compression the column family will read it back with.
-        let opts = value_opts();
+        let opts = if family == STR2ID { str2id_opts() } else { value_opts() };
         let mut writer = rocksdb::SstFileWriter::create(&opts);
         writer.open(&path).map_err(rocks_err)?;
 
@@ -1016,8 +1078,10 @@ impl RocksStorage {
         let (dict_key, hashed) = Self::dictionary_key(&serialised);
 
         if let Some(state) = self.bulk.as_mut() {
+            state.position = state.position.wrapping_add(1);
+            let at = state.position;
             if let Some(cached) = state.terms.get_mut(&serialised) {
-                cached.hits = cached.hits.saturating_add(1);
+                cached.touch(at);
                 return Ok(cached.id);
             }
         }
@@ -1045,8 +1109,9 @@ impl RocksStorage {
             let timed = self.bulk.is_some().then(std::time::Instant::now);
             let resolved = self.resolve(&dict_key, hashed, term)?;
             if let (Some(started), Some(state)) = (timed, self.bulk.as_mut()) {
-                state.resolves.nanos +=
-                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                state
+                    .resolves
+                    .record(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
                 if resolved.is_some() {
                     state.resolves.hits += 1;
                 } else {
@@ -1060,7 +1125,8 @@ impl RocksStorage {
             // dominates a bulk load — a term appearing a thousand times is looked up a
             // thousand times.
             if let Some(state) = self.bulk.as_mut() {
-                state.terms.insert(serialised, Cached { id: existing, hits: 0 });
+                let at = state.position;
+                state.terms.insert(serialised, Cached::new(existing, at));
             }
             return Ok(existing);
         }
@@ -1070,7 +1136,8 @@ impl RocksStorage {
             if let Some(seen) = state.seen.as_mut() {
                 seen.insert(&serialised);
             }
-            state.terms.insert(serialised.clone(), Cached { id, hits: 0 });
+            let at = state.position;
+            state.terms.insert(serialised.clone(), Cached::new(id, at));
         }
         if let Some(state) = self.scope.as_mut() {
             state.terms.insert(serialised.clone(), id);
@@ -2245,6 +2312,49 @@ fn value_opts() -> Options {
     // 2.8 us for a filtered miss is the tell: with sixty uncompacted files a miss pays a
     // per-file check whatever the filter says, and a filter cannot fix the file count. The
     // load answers that question in memory instead — see `BulkState::seen`.
+    //
+    // And a fourth time, at full scale, where the reads that remained were 43.7 million
+    // *hits* at 28 us — 1,230 s of a 4,417 s load. A partitioned filter on `str2id` alone,
+    // measured on the same file: 1,300 s at 29.6 us. The reads that cost are not spent
+    // deciding which file holds the key. RocksDB's own log had `str2id` at two or three L0
+    // files throughout, so it is not the level structure either. Nor is it the page cache:
+    // opening the sort runs and the source with `FILE_FLAG_SEQUENTIAL_SCAN`, so they would
+    // not evict the dictionary, made the reads slower (27 and 34 us at the flushes where
+    // they had been 21 and 25), and the process sat at 139% CPU throughout — not waiting.
+    // Four measurements, four regimes, no filter; this note is so there is not a fifth.
+    opts
+}
+
+/// `str2id`: the value family's options plus a whole — not partitioned — bloom filter.
+///
+/// The fifth measurement of a filter on this family, and the one that found what the four
+/// before it were missing. They measured the *mean* cost of a dictionary read and found a
+/// filter did not move it, at any scale. A histogram of the same reads on the
+/// 653.8-million-triple load showed the shape instead: not a fast majority and a slow tail,
+/// as a disk problem would give, but the whole distribution walking right as the load went
+/// on — 66% of reads under 10 µs at the first flush, 9% by the eighth — while RocksDB's own
+/// log had the family at two or three L0 files throughout. A dictionary that size has half a
+/// dozen levels, and without a filter a get reads a data block at each to learn the key is
+/// not there. With a *partitioned* filter it reads a filter partition instead, and on a block
+/// cache too small to hold them that costs the same syscall — which is why partitioning
+/// measured as nothing, four times.
+///
+/// A whole filter is held by the table reader, outside any cache, for as long as the file
+/// is open. A get then checks each level in memory and reads one data block. Measured on
+/// the same eight flushes: **9.5 → 15.3 µs, flat from the fourth**, against 11.0 → 36.5 and
+/// still climbing. What is left is one block read per hit, which on this platform is the
+/// floor without holding data blocks in memory.
+///
+/// Whole, when the index families went partitioned in 0.9.0 to stop a bulk load building a
+/// filter over two gigabytes of file in one piece: this family's files are about sixty
+/// megabytes per flush, its whole filter over the entire 199-million-term dictionary is
+/// about 250 MB, and that is bounded by the dictionary rather than by the load. `id2str`
+/// keeps `value_opts`: it is read by id, ids are dense, and the load never reads it.
+fn str2id_opts() -> Options {
+    let mut opts = value_opts();
+    let mut block = rocksdb::BlockBasedOptions::default();
+    block.set_bloom_filter(10.0, false);
+    opts.set_block_based_table_factory(&block);
     opts
 }
 

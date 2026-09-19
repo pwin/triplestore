@@ -47,6 +47,24 @@ pub struct BulkResolves {
     /// Cache entries carried across a flush because they were hit often enough to be worth
     /// keeping, summed over every flush. Each one saved a hit for the next window.
     pub retained: u64,
+    /// Reads by cost: under 10 µs, 10–50, 50–200, and over 200. A mean of 28 µs can be
+    /// every read costing 28, or most costing 5 and a few costing 300 — a CPU problem or a
+    /// disk problem — and only the shape says which.
+    pub buckets: [u64; 4],
+}
+
+impl BulkResolves {
+    /// Files a read of `nanos` into its cost bucket.
+    pub fn record(&mut self, nanos: u64) {
+        self.nanos += nanos;
+        let i = match nanos {
+            n if n < 10_000 => 0,
+            n if n < 50_000 => 1,
+            n if n < 200_000 => 2,
+            _ => 3,
+        };
+        self.buckets[i] += 1;
+    }
 }
 
 /// implementation its single-writer/many-readers discipline for free.

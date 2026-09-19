@@ -93,7 +93,7 @@
 //! before believing anything else in the table.
 //!
 //! ```text
-//! cargo run --release -p holos-bench --bin loadprofile [file.nt] [bulk] [spill]
+//! cargo run --release -p holos-bench --bin loadprofile [file.nt] [bulk] [spill] [dict-bytes] [seen-bytes]
 //! ```
 //!
 //! `bulk` runs only the phases a bulk load goes through, which is what an A/B of the write
@@ -114,7 +114,7 @@ thread_local! {
     /// Carried out of `parse_and_encode`, whose signature is shared with the in-memory
     /// phases and has no room for a backend-specific figure.
     static RESOLVES: std::cell::Cell<holos_store::BulkResolves> =
-        const { std::cell::Cell::new(holos_store::BulkResolves { hits: 0, misses: 0, nanos: 0, skipped: 0, retained: 0 }) };
+        const { std::cell::Cell::new(holos_store::BulkResolves { hits: 0, misses: 0, nanos: 0, skipped: 0, retained: 0, buckets: [0; 4] }) };
 }
 
 fn open(path: &str) -> std::io::Result<BufReader<std::fs::File>> {
@@ -234,6 +234,14 @@ fn rocks_at(dir: std::path::PathBuf) -> Result<Store, Box<dyn std::error::Error>
         .and_then(|a| a.parse::<usize>().ok())
     {
         storage.set_dict_spill_bytes(bytes);
+    }
+    // Fifth argument: the seen filter's size, 0 to disable. For measuring what the filter
+    // itself costs to probe, which a 256 MiB table well outside every cache may do.
+    if let Some(bytes) = std::env::args()
+        .nth(5)
+        .and_then(|a| a.parse::<usize>().ok())
+    {
+        storage.set_seen_bytes(bytes);
     }
     Ok(Store::with_storage(storage))
 }

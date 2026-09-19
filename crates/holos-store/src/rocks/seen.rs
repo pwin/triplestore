@@ -110,6 +110,11 @@ impl Seen {
         self.inserted += 1;
     }
 
+    /// Keys inserted so far.
+    pub(super) fn inserted(&self) -> u64 {
+        self.inserted
+    }
+
     /// `false` means the key was never inserted. `true` means it may have been.
     pub(super) fn may_contain(&self, key: &[u8]) -> bool {
         let (h1, h2) = Self::hashes(key);

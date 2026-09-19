@@ -165,6 +165,22 @@ fn main() -> Result<()> {
             "loaded {total} quads in {:.2}s ({rate} quads/s)",
             elapsed.as_secs_f64()
         );
+        // What the dictionary cost, if this was a bulk load with one on disk. The numbers
+        // that told a 653.8-million-triple load apart from the profile that predicted it
+        // three times faster; printed so the next such gap can be read off rather than
+        // reconstructed.
+        let r = engine.store().bulk_resolves();
+        if r.hits + r.misses + r.skipped > 0 {
+            eprintln!(
+                "  dictionary reads: {} hits, {} misses, {:.1}s ({:.1} us each); {} skipped by the seen filter; {} entries kept hot across flushes",
+                r.hits,
+                r.misses,
+                r.nanos as f64 / 1e9,
+                if r.hits + r.misses == 0 { 0.0 } else { r.nanos as f64 / 1e3 / (r.hits + r.misses) as f64 },
+                r.skipped,
+                r.retained,
+            );
+        }
     }
 
     match command.as_str() {

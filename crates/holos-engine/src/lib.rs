@@ -127,7 +127,7 @@ impl Engine {
     /// rather than repeating the first.
     pub fn bulk_load(
         &mut self,
-        reader: impl Read,
+        reader: impl Read + Send,
         format: RdfFormat,
         base_iri: Option<&str>,
     ) -> Result<usize, EngineError> {
@@ -137,13 +137,8 @@ impl Engine {
                 .with_base_iri(base)
                 .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
         }
-        let mut n = 0;
-        for quad in parser.for_reader(reader) {
-            if self.store.insert(quad?.as_ref())? {
-                n += 1;
-            }
-        }
-        Ok(n)
+        let store = &mut self.store;
+        load_parsed(parser, reader, |quad| Ok(store.insert(quad.as_ref())?))
     }
 
     /// Loads RDF into one named graph, bypassing policy.
@@ -155,7 +150,7 @@ impl Engine {
     /// Blank nodes are renamed, for the reason [`Engine::bulk_load`] gives.
     pub fn bulk_load_into_graph(
         &mut self,
-        reader: impl Read,
+        reader: impl Read + Send,
         format: RdfFormat,
         base_iri: Option<&str>,
         graph: &oxrdf::GraphName,
@@ -166,17 +161,13 @@ impl Engine {
                 .with_base_iri(base)
                 .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
         }
-        let mut n = 0;
-        for quad in parser.for_reader(reader) {
-            let mut quad = quad?;
+        let store = &mut self.store;
+        load_parsed(parser, reader, |mut quad| {
             if quad.graph_name.is_default_graph() {
                 quad.graph_name = graph.clone();
             }
-            if self.store.insert(quad.as_ref())? {
-                n += 1;
-            }
-        }
-        Ok(n)
+            Ok(store.insert(quad.as_ref())?)
+        })
     }
 
     /// Evaluates an already-parsed query.
@@ -719,6 +710,76 @@ impl Engine {
 ///
 /// The [`Deadline`] is moved into the iterator so the watchdog stays alive exactly as long
 /// as the results do — no longer, so a query that finishes early leaves nothing parked.
+/// Quads per message from the parse thread to the loading thread.
+///
+/// Large enough that channel traffic is nothing per quad; small enough that a parse error
+/// surfaces within a few thousand quads of where it is, and that the queue holds megabytes
+/// rather than gigabytes.
+const PARSE_BATCH: usize = 8_192;
+
+/// Batches the parse thread may run ahead by. Four of `PARSE_BATCH` is about a hundred
+/// thousand quads of slack — enough to absorb a slow flush on the loading side without the
+/// parser stalling, and a few megabytes at most.
+const PARSE_QUEUE: usize = 4;
+
+/// Parses on one thread and applies `each` on the calling thread.
+///
+/// A load was one thread alternating between parsing a quad and interning it, at 99% of one
+/// core with seven idle. Parsing is a quarter of the work by `loadprofile` and shares nothing
+/// with the store, so it runs ahead on its own thread, and the calling thread only interns.
+/// Ids are still issued in file order by one thread: nothing about the dictionary changes.
+///
+/// A scoped thread, so the reader need not be `'static` — a byte slice or a borrowed file
+/// works — only `Send`. The channel is bounded, so a parser that outruns the store waits
+/// rather than filling memory. An error on either side ends the load: a parse error is sent
+/// down the channel and returned; an insert error drops the receiver, the next `send` fails,
+/// and the parse thread returns. The scope joins it before this returns.
+fn load_parsed<R: Read + Send>(
+    parser: RdfParser,
+    reader: R,
+    mut each: impl FnMut(oxrdf::Quad) -> Result<bool, EngineError>,
+) -> Result<usize, EngineError> {
+    std::thread::scope(|scope| {
+        let (tx, rx) =
+            std::sync::mpsc::sync_channel::<Result<Vec<oxrdf::Quad>, oxrdfio::RdfParseError>>(
+                PARSE_QUEUE,
+            );
+        scope.spawn(move || {
+            let mut batch = Vec::with_capacity(PARSE_BATCH);
+            for quad in parser.for_reader(reader) {
+                match quad {
+                    Ok(quad) => {
+                        batch.push(quad);
+                        if batch.len() == PARSE_BATCH {
+                            let full = std::mem::replace(&mut batch, Vec::with_capacity(PARSE_BATCH));
+                            if tx.send(Ok(full)).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
+                }
+            }
+            if !batch.is_empty() {
+                let _ = tx.send(Ok(batch));
+            }
+        });
+
+        let mut n = 0;
+        for batch in rx {
+            for quad in batch? {
+                if each(quad)? {
+                    n += 1;
+                }
+            }
+        }
+        Ok(n)
+    })
+}
+
 fn guard_with_deadline<'a>(results: QueryResults<'a>, deadline: Deadline) -> QueryResults<'a> {
     match results {
         QueryResults::Solutions(solutions) => {

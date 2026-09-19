@@ -5,60 +5,109 @@ them are in `BENCHMARKS.md` and are runnable.
 
 ## 0.10.0 — unreleased
 
+The release that made a bulk load **3.5× faster**: the 653.8-million-triple file that took
+3 h 43 m at 0.9.1 takes **64 minutes**, producing a byte-for-byte identical store. Four
+changes, each measured on that file, in the order they were found — because each one's
+measurement is what found the next.
+
+| | time | quads/s | peak memory |
+|---|---|---|---|
+| 0.9.1 | 13,379 s | 48,869 | 3,413 MiB |
+| + the seen filter and a hot set | 5,241 s | 124,752 | 3,915 MiB |
+| + parsing on its own thread | 4,479 s | 145,990 | 4,012 MiB |
+| + hot set by spread, not hits | 4,417 s | 148,011 | — |
+| + a whole bloom filter on `str2id` | **3,870 s** | **168,939** | 4,059 MiB |
+
 ### A bulk load stops asking the disk whether a term is new
 
-The 653.8-million-triple load ran at 48,869 quads/s. A 3-million-triple profile of the same
-data predicted 206,859. The difference was one thing, and it was not the thing this began by
-looking for.
-
-Every mid-load flush clears the term cache so memory stays flat. After the first flush, then,
-the cache no longer knows what it has forgotten, and **every new term** — all 199 million of
-them — is looked up in `str2id` on disk before it can be allocated, to prove it is new. Each
-of those reads consults every ingested file, and a load makes many. Counted on a 3-million
-load forced through sixty flushes: 1,268,458 reads that found nothing, against 100,287 that
-found something, at **3.9 µs each** where an empty store answered in 0.4 µs. They were the
+A 3-million-triple profile of the same data predicted 206,859 quads/s; the load ran at
+48,869. Every mid-load flush clears the term cache so memory stays flat, and after the first
+flush the cache no longer knows what it has forgotten — so **every new term**, all 199
+million, was looked up in `str2id` on disk before allocation, to prove it was new. Counted
+on a 3-million load forced through sixty flushes: 1,268,458 reads that found nothing against
+100,287 that found something, at 3.9 µs each where an empty store took 0.4. They were the
 whole of the flush penalty, and the misses were 92% of it.
 
-Two things were tried against the misses.
+`seen` is a bloom filter in memory over every term the load has interned — 256 MiB, seven
+hashes, 10.8 bits per key on this store. A term it has never seen was never interned by this
+load; when the load began on an empty dictionary, that means it does not exist, and it is
+allocated without a read. A false positive costs one read that was going to happen anyway; a
+false negative cannot happen. **A load into a populated store does not use it** — a term
+interned before the load is not in the filter — and a test loads a store in two halves to
+prove the second half makes zero skips. The filter's own tests include one that failed on
+the first version and was right to: a request for ten bits per key was rounded down to a
+power of two and got five, and the false-positive rate came out at 11.8%, which is what
+five bits gives. It is sized exactly now.
 
-A bloom filter on `str2id` — the textbook answer, and the one the note in `value_opts` had
-said might finally pay in this regime — took a miss from 3.7 to 2.8 µs. And the dictionary
-layer as a whole did not move, because every flush now built filter partitions and that cost
-landed on the write side. 2.8 µs for a *filtered* miss is the tell: with sixty uncompacted
-files, a miss pays a per-file check whatever each filter says. Reverted; the note records the
-third measurement beside the first two.
+The hot set went in at the same time: cache entries hit often enough survive a flush. On
+that run it saved 12% of the hits; the filter saved all of the misses. 653.8 million quads:
+5,241 s against 13,379, a store that answers identically, and misses at 0.09% of terms.
 
-The one that works never asks the disk. `seen` is a bloom filter in memory over the
-serialised bytes of every term the load has interned — 256 MiB, seven hashes, 10.8 bits per
-key on this store. A term it has never seen was never interned by this load; and when the
-load began on an empty dictionary, that means it does not exist, and it is allocated without
-a read. A false positive is one read that was going to happen anyway. A false negative cannot
-happen. **A load into a populated store does not use it** — a term interned before the load
-is not in the filter, and skipping its lookup would allocate it twice — and a test loads a
-store in two halves to prove the second half makes zero skips.
+### Parsing runs on its own thread
 
-The hot set, which is what this set out to build, is in too: cache entries hit at least
-twice survive a flush, capped at the 200,000 most-hit, so a predicate is not looked up again
-in every window. It saved 12% of the hits at the small scale. The filter saved all of the
-misses.
+With the misses gone the load sat at 99% of one core with seven idle, alternating between
+parsing a quad and interning it. Parsing is a quarter of the work by `loadprofile` and shares
+nothing with the store, so it runs ahead on its own thread over a bounded channel — four
+batches of 8,192 quads — and the calling thread only interns. Ids are still issued in file
+order by one thread; nothing about the dictionary changes, and the backend-parity test holds
+through it. A scoped thread, so a byte slice or a borrowed file still works as input; the
+reader gains a `Send` bound, which every existing caller already met.
 
-At 3 million quads and sixty forced flushes: dictionary reads **5.28 s → 0.57 s**, zero
-reaching the disk and coming back empty, the dictionary layer −25%.
+Tests cover a document larger than the whole queue arriving complete and in order, a parse
+error partway through surfacing as an error rather than a short load, and an empty
+document. 4,479 s, the process at 140% CPU — the parser takes 40% of a second core and the
+loading thread is the bottleneck.
 
-At 653.8 million quads, the same file as before on the same machine: **5,241 s** against
-13,379 s, **124,752 quads/s** against 48,869 — **2.55×** — with committed memory peaking at
-3,915 MiB against 3,413. The store it produced answers byte-for-byte identically to the old
-one. A projection made fifteen minutes in had said about 3.2×: the rate was 172k/s then and
-declined through the load, so something still grows with it — the likeliest candidate being
-each dictionary ingest checking overlap against an ever-larger set of files. That is the
-next thing `loadprofile` should be pointed at, and it is not this change's. The filter's own tests include one that failed on the first
-version and was right to: a request for ten bits per key was rounded down to a power of two
-and got five, and the false-positive rate came out at 11.8%, which is what five bits gives.
-The filter is now sized exactly.
+### The hot set keeps entries by spread, not by hit count
 
-`Store::bulk_resolves` reports the hits, misses, time, skips and retained entries of the last
-load, and `loadprofile` prints them, so the next person can see where a load's dictionary
-time goes rather than infer it.
+A subject's dozen quads are adjacent in the file, so it is hit a dozen times in a row and
+never again; a postal code shared by a thousand subjects is hit a handful of times across
+the whole window and again in every window after. Ranked by hits, 450,000 subjects a window
+beat the vocabulary and filled the cap with terms that would never recur. Ranked by the
+distance between first and last use in the window, they lose. Same hits at small scale,
+**7× fewer entries retained** for them, and at full scale the cap is finally binding on
+terms that deserve it.
+
+### A whole bloom filter on `str2id`, and how the fifth measurement found it
+
+With the misses gone and parsing off the critical path, the load's rate still fell from
+209k quads/s at ten minutes to 122k at sixty. `Store::bulk_resolves` — new counters the
+CLI now prints — said why: **43.7 million reads that found a term, 1,230 s at 28 µs each,
+28% of the load.** Those are the mid-frequency vocabulary, used a few times across the file
+in different windows, which no within-window signal can catch and which at 44 million
+distinct terms no hot set can hold.
+
+So each read had to get cheaper. Three things were tried, each measured on the same file:
+
+- **A partitioned bloom filter on `str2id`**, the fourth time a filter on this family had been
+  tried: 1,300 s at 29.6 µs. Nothing.
+- **Opening the sort runs and the source with `FILE_FLAG_SEQUENTIAL_SCAN`**, on the theory
+  that forty gigabytes of runs were evicting the dictionary from the page cache: slower, 27
+  and 34 µs at the flushes where they had been 21 and 25, and the process at 139% CPU
+  throughout — not waiting on anything.
+- **A block cache with index and filter partitions in it**: 9.0 → 15.9 µs and still climbing,
+  as data blocks evicted the partitions.
+
+What separated them was a histogram rather than a mean: the per-flush line now buckets each
+read at 10, 50 and 200 µs. The shape was not a fast majority with a slow tail, which a disk
+would give; it was the whole distribution walking right as the dictionary grew — 66% of reads
+under 10 µs at the first flush, 9% by the eighth — with RocksDB's own log showing the family
+at two or three L0 files throughout. What grows with a dictionary at constant L0 is its
+number of levels, and a get without a filter reads a data block at each to learn the key is
+not there. A *partitioned* filter reads a filter partition instead, which on a cache too small
+to hold it is the same syscall — which is why four measurements of one saw nothing.
+
+A whole filter is held by the table reader outside any cache. A get checks each level in
+memory and reads one data block: **9.5 → 15.3 µs and flat from the fourth flush**, then
+15.4 µs across all thirty-three at full scale. Whole is affordable here where the index
+families needed partitioning in 0.9.0: this family's files are sixty megabytes a flush and
+its filter over the entire dictionary is about 250 MB, bounded by the dictionary rather than
+by the load. 3,870 s; dictionary reads 677 s against the 650 the histogram predicted.
+
+What remains of the read cost is one block read per hit, which is the floor on this platform
+without holding data blocks in memory. Below that means batching hits into a `MultiGet`, or a
+dictionary that lives elsewhere than RocksDB. The loading thread is at 100% of a core with
+six idle, and the parse thread at 40% of another; the next factor is more threads.
 
 ## 0.9.1 — 2026-09-19
 

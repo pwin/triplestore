@@ -242,7 +242,9 @@ But use the RocksDB features Oxigraph currently leaves on the table:
   seen was never interned by this load, and when the dictionary was empty at the start that
   means it does not exist and is allocated without a read. Only then — a load into a
   populated store cannot know what predates it and runs as before. On the 653.8-million-
-  triple file that took the load from 48,869 to **124,752 quads/s**, 2.55×, for 256 MiB.
+  triple file that took the load from 48,869 to 124,752 quads/s, 2.55×, for 256 MiB — and
+  with parsing on its own thread and a whole bloom filter on `str2id` (the fifth measurement
+  of one, and the first taken as a histogram rather than a mean), to **168,939**, 3.46×.
 - **Merge operators** for dictionary refcounts and for the statistics counters in §7 — no
   read-modify-write on the write path.
 - **Checkpoints** for consistent backups *and* for holon branching: a checkpoint is a cheap
