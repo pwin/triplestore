@@ -231,6 +231,18 @@ But use the RocksDB features Oxigraph currently leaves on the table:
   asked to build a per-file structure over *every key in the store at once*, so any per-file
   structure that is not incremental is a load-sized allocation waiting to be found — and
   §16a's ceiling cannot see any of them.
+  **And the dictionary must not be asked whether a term is new.** Flushing the term cache
+  mid-load is what keeps memory flat, and it has a consequence: after the first flush every
+  new term is looked up in `str2id` on disk to prove it is new, and that read consults every
+  file the load has ingested so far. Counted at 3 million quads through sixty flushes:
+  1,268,458 such reads at 3.9 µs, against 100,287 that found anything — 92% of the flush
+  penalty, growing with the file count. A bloom filter *on the family* took a miss to 2.8 µs
+  and no further, because the per-file check remains whatever the filter says. So the load
+  keeps a bloom filter *in memory* over every term it has interned: a term it has never
+  seen was never interned by this load, and when the dictionary was empty at the start that
+  means it does not exist and is allocated without a read. Only then — a load into a
+  populated store cannot know what predates it and runs as before. On the 653.8-million-
+  triple file that took the load from 48,869 to **124,752 quads/s**, 2.55×, for 256 MiB.
 - **Merge operators** for dictionary refcounts and for the statistics counters in §7 — no
   read-modify-write on the write path.
 - **Checkpoints** for consistent backups *and* for holon branching: a checkpoint is a cheap

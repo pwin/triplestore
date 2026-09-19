@@ -110,6 +110,13 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "rocksdb")]
 use holos_store::RocksStorage;
 
+thread_local! {
+    /// Carried out of `parse_and_encode`, whose signature is shared with the in-memory
+    /// phases and has no room for a backend-specific figure.
+    static RESOLVES: std::cell::Cell<holos_store::BulkResolves> =
+        const { std::cell::Cell::new(holos_store::BulkResolves { hits: 0, misses: 0, nanos: 0, skipped: 0, retained: 0 }) };
+}
+
 fn open(path: &str) -> std::io::Result<BufReader<std::fs::File>> {
     Ok(BufReader::new(std::fs::File::open(path)?))
 }
@@ -195,6 +202,7 @@ fn parse_and_encode(
     let flushed = Instant::now();
     if bulk {
         store.end_bulk_load()?;
+        RESOLVES.with(|r| r.set(store.bulk_resolves()));
     }
     Ok((interned, flushed.elapsed()))
 }
@@ -311,6 +319,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(parse),
         );
         report_flush(quads, flush);
+        // The dictionary reads the cache did not absorb. Hits are recurring terms looked up
+        // again after a flush dropped them; misses are new terms checked before allocation.
+        let r = RESOLVES.with(std::cell::Cell::get);
+        let seconds = r.nanos as f64 / 1e9;
+        println!(
+            "     of which dictionary reads         {seconds:>8.2} s   {:>7} ns/quad   ({} hits, {} misses, {:.1} us each; {} skipped by the filter, {} kept hot)",
+            (r.nanos / quads.max(1) as u64),
+            r.hits,
+            r.misses,
+            if r.hits + r.misses == 0 { 0.0 } else { r.nanos as f64 / 1e3 / (r.hits + r.misses) as f64 },
+            r.skipped,
+            r.retained,
+        );
         let rocks_bulk = full_load(&path, rocks_at(scratch("bulk")?)?, true)?;
         report(
             "7. + index, bulk mode",

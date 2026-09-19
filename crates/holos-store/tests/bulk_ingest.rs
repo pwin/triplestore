@@ -386,3 +386,92 @@ fn the_range_walk_matches_point_lookups() -> Result<()> {
     assert_eq!(seen, 0);
     Ok(())
 }
+
+/// A load that flushes its dictionary many times, with the seen filter deciding which terms
+/// are new, must produce exactly the store a plain load produces.
+///
+/// The filter lets a term skip the on-disk lookup that proves it is new. The way that goes
+/// wrong is a term that is *not* new being skipped and allocated a second id — after which
+/// the two copies of a quad no longer join, and nothing else notices. The fixture repeats
+/// terms across what will be many flush windows, so every recurring term is a chance for
+/// that to happen, and equality with the plain load is the only assertion that catches it.
+#[test]
+fn a_load_that_flushes_the_dictionary_repeatedly_still_matches() -> Result<()> {
+    let quads = fixture();
+
+    let plain_dir = tempfile::tempdir().expect("temp dir");
+    let mut plain = opened(&plain_dir)?;
+    load(&mut plain, &quads, false)?;
+
+    let bulk_dir = tempfile::tempdir().expect("temp dir");
+    let mut storage = RocksStorage::open(bulk_dir.path())?;
+    // A few kilobytes of dictionary rows per flush: dozens of flushes across the fixture.
+    storage.set_dict_spill_bytes(4 * 1024);
+    let mut bulk = Store::with_storage(storage);
+    load(&mut bulk, &quads, true)?;
+
+    // That the filter was *used* is the point: a run where nothing was skipped would pass
+    // this test with the filter removed. The fixture's terms are almost all new, so nearly
+    // every one should have been allocated without a read.
+    let resolves = bulk.bulk_resolves();
+    assert!(
+        resolves.skipped > 0,
+        "expected the seen filter to skip lookups, got {resolves:?}"
+    );
+    assert_eq!(
+        resolves.misses, 0,
+        "with the filter on, nothing should reach the disk and come back empty: {resolves:?}"
+    );
+
+    assert_eq!(read(&bulk)?, read(&plain)?);
+    Ok(())
+}
+
+/// A bulk load into a store that already holds terms must not use the filter at all.
+///
+/// The filter knows only what *this* load interned. A term interned before the load began
+/// is not in it, so trusting it would allocate that term again — and the quads written by
+/// the two loads would stop joining on it. So a populated store runs the load exactly as it
+/// did before the filter existed, every term looked up on disk, and the ids the first load
+/// issued are the ids the second load finds.
+#[test]
+fn a_load_into_a_populated_store_does_not_use_the_filter() -> Result<()> {
+    let quads = fixture();
+    let (first_half, second_half) = quads.split_at(quads.len() / 2);
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut store = opened(&dir)?;
+    load(&mut store, first_half, true)?;
+    let after_first = store.bulk_resolves();
+    assert!(after_first.skipped > 0, "the first load began empty and should have used it");
+
+    // A term the first load interned, and its id.
+    let shared = first_half[0].predicate.as_ref();
+    let id_before = store.lookup_term(shared.into())?.expect("interned by the first load");
+
+    let mut storage_dir_store = store;
+    storage_dir_store.begin_bulk_load()?;
+    for quad in second_half {
+        storage_dir_store.insert(quad.as_ref())?;
+    }
+    // The first half again too, so recurring terms are guaranteed to be met.
+    for quad in first_half {
+        storage_dir_store.insert(quad.as_ref())?;
+    }
+    storage_dir_store.end_bulk_load()?;
+    let after_second = storage_dir_store.bulk_resolves();
+    assert_eq!(
+        after_second.skipped, 0,
+        "a load into a populated store must look every term up: {after_second:?}"
+    );
+
+    let id_after = storage_dir_store.lookup_term(shared.into())?.expect("still there");
+    assert_eq!(id_before, id_after, "the second load must find the first load's id");
+
+    // And the whole thing equals a plain load of everything.
+    let plain_dir = tempfile::tempdir().expect("temp dir");
+    let mut plain = opened(&plain_dir)?;
+    load(&mut plain, &quads, false)?;
+    assert_eq!(read(&storage_dir_store)?, read(&plain)?);
+    Ok(())
+}

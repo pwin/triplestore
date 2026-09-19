@@ -34,7 +34,7 @@ pub use index::{EncodedQuad, GraphFilter, IdRange, QuadIndex, QuadScan};
 pub use memory::MemoryStorage;
 #[cfg(feature = "rocksdb")]
 pub use rocks::RocksStorage;
-pub use storage::Storage;
+pub use storage::{BulkResolves, Storage};
 
 use holos_core::TermId;
 use oxrdf::{GraphName, GraphNameRef, Quad, QuadRef, Term, TermRef};
@@ -349,6 +349,12 @@ impl Store {
     #[must_use]
     pub fn bulk_spills(&self) -> usize {
         self.inner.bulk_spills()
+    }
+
+    /// See [`Storage::bulk_resolves`].
+    #[must_use]
+    pub fn bulk_resolves(&self) -> crate::storage::BulkResolves {
+        self.inner.bulk_resolves()
     }
 
     /// How many bytes this store occupies on disk, or `None` for an in-memory one.

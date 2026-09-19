@@ -3,6 +3,63 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.10.0 — unreleased
+
+### A bulk load stops asking the disk whether a term is new
+
+The 653.8-million-triple load ran at 48,869 quads/s. A 3-million-triple profile of the same
+data predicted 206,859. The difference was one thing, and it was not the thing this began by
+looking for.
+
+Every mid-load flush clears the term cache so memory stays flat. After the first flush, then,
+the cache no longer knows what it has forgotten, and **every new term** — all 199 million of
+them — is looked up in `str2id` on disk before it can be allocated, to prove it is new. Each
+of those reads consults every ingested file, and a load makes many. Counted on a 3-million
+load forced through sixty flushes: 1,268,458 reads that found nothing, against 100,287 that
+found something, at **3.9 µs each** where an empty store answered in 0.4 µs. They were the
+whole of the flush penalty, and the misses were 92% of it.
+
+Two things were tried against the misses.
+
+A bloom filter on `str2id` — the textbook answer, and the one the note in `value_opts` had
+said might finally pay in this regime — took a miss from 3.7 to 2.8 µs. And the dictionary
+layer as a whole did not move, because every flush now built filter partitions and that cost
+landed on the write side. 2.8 µs for a *filtered* miss is the tell: with sixty uncompacted
+files, a miss pays a per-file check whatever each filter says. Reverted; the note records the
+third measurement beside the first two.
+
+The one that works never asks the disk. `seen` is a bloom filter in memory over the
+serialised bytes of every term the load has interned — 256 MiB, seven hashes, 10.8 bits per
+key on this store. A term it has never seen was never interned by this load; and when the
+load began on an empty dictionary, that means it does not exist, and it is allocated without
+a read. A false positive is one read that was going to happen anyway. A false negative cannot
+happen. **A load into a populated store does not use it** — a term interned before the load
+is not in the filter, and skipping its lookup would allocate it twice — and a test loads a
+store in two halves to prove the second half makes zero skips.
+
+The hot set, which is what this set out to build, is in too: cache entries hit at least
+twice survive a flush, capped at the 200,000 most-hit, so a predicate is not looked up again
+in every window. It saved 12% of the hits at the small scale. The filter saved all of the
+misses.
+
+At 3 million quads and sixty forced flushes: dictionary reads **5.28 s → 0.57 s**, zero
+reaching the disk and coming back empty, the dictionary layer −25%.
+
+At 653.8 million quads, the same file as before on the same machine: **5,241 s** against
+13,379 s, **124,752 quads/s** against 48,869 — **2.55×** — with committed memory peaking at
+3,915 MiB against 3,413. The store it produced answers byte-for-byte identically to the old
+one. A projection made fifteen minutes in had said about 3.2×: the rate was 172k/s then and
+declined through the load, so something still grows with it — the likeliest candidate being
+each dictionary ingest checking overlap against an ever-larger set of files. That is the
+next thing `loadprofile` should be pointed at, and it is not this change's. The filter's own tests include one that failed on the first
+version and was right to: a request for ten bits per key was rounded down to a power of two
+and got five, and the false-positive rate came out at 11.8%, which is what five bits gives.
+The filter is now sized exactly.
+
+`Store::bulk_resolves` reports the hits, misses, time, skips and retained entries of the last
+load, and `loadprofile` prints them, so the next person can see where a load's dictionary
+time goes rather than infer it.
+
 ## 0.9.1 — 2026-09-19
 
 Two things learned by using 0.9.0 against the 653.8-million-triple store for a week: the

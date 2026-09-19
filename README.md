@@ -4,6 +4,10 @@ An RDF 1.2 triplestore with SPARQL 1.2, and fine-grained access policy enforced 
 
 Working name. Early — see [Status](#status) for exactly what runs.
 
+New here? [`ARCHITECTURE.md`](ARCHITECTURE.md) is the plan on one page and then the map:
+why this exists, where it stands, what the crates are, how a triple gets in and a query gets
+out, and which file to open for each. `DESIGN.md` is the full argument.
+
 ## Why
 
 Four things exist separately and nowhere together: worst-case-optimal join execution
@@ -29,7 +33,7 @@ The full argument, the layer design, the roadmap and the risks are in **[DESIGN.
 | **L5** Holon layer | ◐ Walking skeleton: scene, boundary enforced on the write path, event log with per-triple RDF 1.2 provenance, **165 validated commits/s at 41× a full pass**, boundary rules fired per tick, each tick one atomic commit. Owes isolation, maintained projections, time travel |
 | **L6** Protocol server | ◐ SPARQL 1.2 Protocol over HTTP (**34/34** W3C protocol tests) + **Graph Store Protocol** (**13/13**) + YASGUI console, **`POST /update`**, and **Python bindings** on PyPI as [`holosdb`](https://pypi.org/project/holosdb/) — five abi3 wheels plus an sdist, `pip install holosdb`. Owes WASM |
 
-855 unit and property tests pass (`cargo test --workspace`), plus the W3C suites below.
+863 unit and property tests pass (`cargo test --workspace`), plus the W3C suites below.
 
 **Documentation** — [MINTING-TRIPLES.md](MINTING-TRIPLES.md) is the getting-started guide to
 every route for getting data in, including RDF 1.2 triple terms and holons;

@@ -25,6 +25,30 @@ use oxrdf::{Term, TermRef};
 /// A place quads and their terms live.
 ///
 /// Reads take `&self` and writes `&mut self`, which is what gives a persistent
+/// How many times a bulk load asked the on-disk dictionary for a term, and what it cost.
+///
+/// The term cache in front of the dictionary is cleared at every mid-load flush, so a term
+/// seen again afterwards is a *hit* here — one read that finds it — and every new term is a
+/// *miss* — one read that does not, before the term is allocated. Both are random reads
+/// against a family that grows with the load, which is why they are counted rather than
+/// assumed: on a 653.8-million-triple load the dictionary layer ran 4.2× slower per quad
+/// than a 3-million-triple profile predicted, and these two are the candidates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BulkResolves {
+    /// Reads that found the term: a recurring term, re-looked-up after a flush dropped it.
+    pub hits: u64,
+    /// Reads that did not: a term seen for the first time.
+    pub misses: u64,
+    /// Time spent inside those reads, in nanoseconds.
+    pub nanos: u64,
+    /// Reads that never happened, because the load could prove the term was new. Each of
+    /// these would have been a miss.
+    pub skipped: u64,
+    /// Cache entries carried across a flush because they were hit often enough to be worth
+    /// keeping, summed over every flush. Each one saved a hit for the next window.
+    pub retained: u64,
+}
+
 /// implementation its single-writer/many-readers discipline for free.
 ///
 /// `Sync` as well as `Send`: the HTTP server (L6) puts a store behind an `RwLock` and
@@ -293,6 +317,13 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// is zero rather than an error: "it did not spill" is true of them.
     fn bulk_spills(&self) -> usize {
         0
+    }
+
+    /// What the dictionary cost during a bulk load, as the load saw it.
+    ///
+    /// Zero for a backend with no dictionary on disk. See [`BulkResolves`].
+    fn bulk_resolves(&self) -> BulkResolves {
+        BulkResolves::default()
     }
 
     /// How many bytes this store occupies on disk, if it is on disk at all.

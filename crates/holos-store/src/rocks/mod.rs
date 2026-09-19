@@ -18,6 +18,7 @@
 
 mod codec;
 mod dictsort;
+mod seen;
 mod sort;
 
 use crate::error::{Result, StorageError};
@@ -92,6 +93,9 @@ pub struct RocksStorage {
     predicate_counts: FxHashMap<TermId, u64>,
     /// See [`Storage::generation`]. Persisted as `META_GENERATION` in the batch that moves it.
     generation: u64,
+    /// The last bulk load's dictionary reads, kept past `end_bulk_load` so a profile can
+    /// read them after the fact.
+    last_resolves: crate::storage::BulkResolves,
     /// `Some` while a bulk load is running: see [`RocksStorage::begin_bulk_load`].
     bulk: Option<BulkState>,
     /// `Some` while a commit scope is open: see [`Storage::begin`].
@@ -103,6 +107,8 @@ pub struct RocksStorage {
     ingest_limit: usize,
     /// How many bytes of dictionary rows a load may hold before it spills a sorted run.
     dict_spill_bytes: usize,
+    /// How large a filter a load keeps over the terms it has interned. See `seen`.
+    seen_bytes: usize,
     /// How many times the current or most recent bulk load spilled.
     spills: usize,
 }
@@ -253,7 +259,17 @@ struct BulkState {
     /// literals sharing one would be handed the same id. On disk that case is resolved by
     /// verifying candidates against `id2str`, but a buffered term is not on disk yet, so
     /// the buffer has to be exact.
-    terms: FxHashMap<Vec<u8>, TermId>,
+    ///
+    /// Each entry counts its hits since the last flush, and a flush keeps the entries hit
+    /// often enough to be worth keeping — see `flush_dictionary`. A predicate, a class, an
+    /// enumerated literal: those recur in every window and were being looked up on disk
+    /// once per window after the flush dropped them.
+    terms: FxHashMap<Vec<u8>, Cached>,
+    /// Every term this load has interned, as a filter, so a new term can be allocated
+    /// without first proving on disk that it is new. `None` unless the dictionary was
+    /// empty when the load began — the only case in which "this load never interned it"
+    /// means "it does not exist". See `seen`.
+    seen: Option<seen::Seen>,
     /// Quads held back for sorted ingestion rather than written as index keys.
     ///
     /// One `EncodedQuad` here replaces the nine or ten key copies the batch path would have
@@ -271,12 +287,55 @@ struct BulkState {
     /// and most of that is these rows going through a `WriteBatch`. `None` when the load is
     /// not using the sorted path, in which case they go back to `pending`.
     dict: Option<DictBuffers>,
+    /// See [`crate::storage::BulkResolves`].
+    resolves: crate::storage::BulkResolves,
     /// Sorted runs already written, per index order, once the load outgrew its buffer.
     ///
     /// Empty for any load that fits in one buffer, which is the common case: the merge then
     /// collapses to sorting a vector and nothing touches the disk.
     spilled: Option<Box<Spilled>>,
 }
+
+/// The hit count an entry needs to survive a flush: [`HOT_HITS`], raised until no more
+/// than [`HOT_CAPACITY`] entries qualify.
+///
+/// Found by selection rather than a sort — the counts are copied out (four bytes each, so
+/// a few megabytes for a full cache) and the cap-th largest is picked in linear time.
+/// Ties at the threshold all survive, so the cap can be exceeded by however many entries
+/// share that exact count; that is bounded by the cache and is not worth a tiebreak.
+fn hot_threshold(hits: impl Iterator<Item = u32>) -> u32 {
+    let mut counts: Vec<u32> = hits.filter(|&h| h >= HOT_HITS).collect();
+    if counts.len() <= HOT_CAPACITY {
+        return HOT_HITS;
+    }
+    // The cap-th largest is at index `len - cap` once ascending.
+    let at = counts.len() - HOT_CAPACITY;
+    let (_, nth, _) = counts.select_nth_unstable(at);
+    (*nth).max(HOT_HITS)
+}
+
+/// A term-cache entry: the id, and how often it has been hit since the last flush.
+#[derive(Debug, Clone, Copy)]
+struct Cached {
+    id: TermId,
+    hits: u32,
+}
+
+/// A cache entry survives a flush if it was hit at least this often since the last one.
+///
+/// Two, so a term seen once and never again — most of a dictionary — is dropped, and
+/// anything that recurred at all is a candidate. The cap below is what actually bounds it.
+const HOT_HITS: u32 = 2;
+
+/// The most entries a flush keeps, by hits. At 222 bytes each this is about 44 MB.
+///
+/// A subject with a dozen quads is hit a dozen times in a row and then never again; with a
+/// threshold alone, every one of those in a window would survive its flush and be dropped at
+/// the next, holding a window's worth of subjects for nothing. Keeping only the most-hit
+/// entries means that when there are hotter terms — and a predicate is hit a hundred
+/// thousand times a window — the subjects lose. When there are not, they are all there is,
+/// and forty megabytes of them is the price of not having to know the data in advance.
+const HOT_CAPACITY: usize = 200_000;
 
 /// The sorted runs on disk, one set per index order.
 ///
@@ -378,11 +437,13 @@ impl RocksStorage {
             quad_count,
             predicate_counts,
             generation,
+            last_resolves: crate::storage::BulkResolves::default(),
             bulk: None,
             scope: None,
             path,
             ingest_limit: SPILL_QUADS,
             dict_spill_bytes: dictsort::SPILL_BYTES,
+            seen_bytes: seen::DEFAULT_BYTES,
             spills: 0,
         })
     }
@@ -423,6 +484,15 @@ impl RocksStorage {
         self.dict_spill_bytes = bytes;
     }
 
+    /// Sets the size of the filter a bulk load keeps over the terms it has interned.
+    ///
+    /// The default is [`seen::DEFAULT_BYTES`]. Larger is fewer false positives, each of
+    /// which is one dictionary read the load did not need; smaller is less memory. Zero
+    /// disables it, which is how the load ran before it existed.
+    pub fn set_seen_bytes(&mut self, bytes: usize) {
+        self.seen_bytes = bytes;
+    }
+
     /// Starts a bulk load: writes are buffered into large batches and the write-ahead
     /// log is skipped.
     ///
@@ -433,9 +503,14 @@ impl RocksStorage {
     fn start_bulk(&mut self) -> Result<()> {
         self.spills = 0;
         let dir = self.ingest_dir()?;
+        // The filter is only sound when nothing was interned before the load: a term that
+        // predates it is not in the filter, and skipping its lookup would allocate it twice.
+        let seen = (self.dictionary_len() == 0 && self.seen_bytes > 0)
+            .then(|| seen::Seen::with_bytes(self.seen_bytes));
         self.bulk = Some(BulkState {
             sst: true,
             dict: Some(DictBuffers::new(&dir, self.dict_spill_bytes)),
+            seen,
             ..BulkState::default()
         });
         // Auto-compaction during a load is wasted work: it rewrites levels that the rest
@@ -468,8 +543,10 @@ impl RocksStorage {
                 sst,
                 spilled,
                 dict,
+                resolves,
                 ..
             } = state;
+            self.last_resolves = resolves;
             // The dictionary first: the index files name term ids, and a store holding an id
             // it cannot decode is corrupt in a way no later step would notice.
             if let Some(dict) = dict {
@@ -623,10 +700,19 @@ impl RocksStorage {
             self.write_and_ingest_dict(&dir, family, sequence, runs.merge()?)?;
         }
 
-        // Only now: a term is safe to forget once *both* of its rows are readable.
+        // Only now: a term is safe to forget once *both* of its rows are readable. The
+        // ones worth remembering anyway are the ones hit often enough that forgetting them
+        // means looking them up again next window: keep the most-hit, up to a cap, and
+        // start their counts over.
         if let Some(state) = self.bulk.as_mut() {
-            state.terms.clear();
+            let threshold = hot_threshold(state.terms.values().map(|c| c.hits));
+            state.terms.retain(|_, cached| {
+                let keep = cached.hits >= threshold;
+                cached.hits = 0;
+                keep
+            });
             state.terms.shrink_to_fit();
+            state.resolves.retained += state.terms.len() as u64;
             let mut fresh = DictBuffers::new(&dir, budget);
             fresh.flushes = sequence + 1;
             state.dict = Some(fresh);
@@ -929,9 +1015,10 @@ impl RocksStorage {
         let serialised = put_term(term, components);
         let (dict_key, hashed) = Self::dictionary_key(&serialised);
 
-        if let Some(state) = self.bulk.as_ref() {
-            if let Some(existing) = state.terms.get(&serialised) {
-                return Ok(*existing);
+        if let Some(state) = self.bulk.as_mut() {
+            if let Some(cached) = state.terms.get_mut(&serialised) {
+                cached.hits = cached.hits.saturating_add(1);
+                return Ok(cached.id);
             }
         }
         if let Some(state) = self.scope.as_ref() {
@@ -939,19 +1026,51 @@ impl RocksStorage {
                 return Ok(*existing);
             }
         }
-        if let Some(existing) = self.resolve(&dict_key, hashed, term)? {
+
+        // A term the filter has never seen was never interned by this load, and the filter
+        // exists only when nothing was interned before it — so it is new, and the read that
+        // would have proved so is skipped. That read was the whole of the flush penalty:
+        // 1,268,458 misses at 3.9 us against 100,287 hits, measured.
+        let provably_new = self
+            .bulk
+            .as_ref()
+            .and_then(|s| s.seen.as_ref())
+            .is_some_and(|seen| !seen.may_contain(&serialised));
+        let resolved = if provably_new {
+            if let Some(state) = self.bulk.as_mut() {
+                state.resolves.skipped += 1;
+            }
+            None
+        } else {
+            let timed = self.bulk.is_some().then(std::time::Instant::now);
+            let resolved = self.resolve(&dict_key, hashed, term)?;
+            if let (Some(started), Some(state)) = (timed, self.bulk.as_mut()) {
+                state.resolves.nanos +=
+                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                if resolved.is_some() {
+                    state.resolves.hits += 1;
+                } else {
+                    state.resolves.misses += 1;
+                }
+            }
+            resolved
+        };
+        if let Some(existing) = resolved {
             // Remember it: without this every *repeated* term costs a random read, which
             // dominates a bulk load — a term appearing a thousand times is looked up a
             // thousand times.
             if let Some(state) = self.bulk.as_mut() {
-                state.terms.insert(serialised, existing);
+                state.terms.insert(serialised, Cached { id: existing, hits: 0 });
             }
             return Ok(existing);
         }
 
         let id = self.allocate(tag, ops)?;
         if let Some(state) = self.bulk.as_mut() {
-            state.terms.insert(serialised.clone(), id);
+            if let Some(seen) = state.seen.as_mut() {
+                seen.insert(&serialised);
+            }
+            state.terms.insert(serialised.clone(), Cached { id, hits: 0 });
         }
         if let Some(state) = self.scope.as_mut() {
             state.terms.insert(serialised.clone(), id);
@@ -1725,6 +1844,10 @@ impl Storage for RocksStorage {
         self.spills
     }
 
+    fn bulk_resolves(&self) -> crate::storage::BulkResolves {
+        self.last_resolves
+    }
+
     fn on_disk_bytes(&self) -> Option<u64> {
         Some(directory_bytes(&self.path))
     }
@@ -2114,6 +2237,14 @@ fn value_opts() -> Options {
     // and compaction, and that cost lands on the write path while the read it would save is
     // one the block cache was already serving. The textbook setting is for a family that is
     // read far more than it is written; during a load this one is the opposite.
+    //
+    // Revisited a third time, in the regime the note above asked for: sixty mid-load
+    // flushes, so a miss has ingested files to consult. A partitioned filter took a read
+    // from 3.7 to 2.8 us — and the dictionary layer as a whole did not move, because every
+    // flush now built filter partitions and that cost landed where the note said it would.
+    // 2.8 us for a filtered miss is the tell: with sixty uncompacted files a miss pays a
+    // per-file check whatever the filter says, and a filter cannot fix the file count. The
+    // load answers that question in memory instead — see `BulkState::seen`.
     opts
 }
 
