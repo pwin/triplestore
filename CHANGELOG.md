@@ -3,6 +3,59 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.9.1 — 2026-09-19
+
+Two things learned by using 0.9.0 against the 653.8-million-triple store for a week: the
+flag every protection depends on was too expensive to set from the command line, and one
+claim in the 0.9.0 notes was wrong.
+
+### Statistics are kept with the store, so `--reorder` stops costing a scan per run
+
+`--reorder` is what supplies the cardinality estimate; admission control refuses on the
+estimate, the `DISTINCT` spill is reached only through the refusal, and join reordering is
+the estimate applied. So it is the flag the other protections hang off — and on the CLI it
+was a full scan on **every invocation**, about 300 s on the 653.8-million-triple store, which
+made it a flag nobody could afford to set from the command line. A server paid the same scan
+on every restart.
+
+Now the statistics are saved with the store and loaded back while they still apply. What
+decides "still apply" is a new **write generation** on the store: a counter that moves on
+every insert, delete and bulk load, is put back by a rolled-back scope, and is persisted in
+the same batch as the change it counts, so a reopened store carries on from where it was.
+A snapshot records the generation it was built at, and is used only while the store still
+reports that number. `quad_count` could not serve — delete one quad and insert another and
+it does not move — and neither could the dictionary's size, which is append-only and does
+not grow for a quad whose terms it already held.
+
+On the real store, `holos query --reorder`: **194 s** on the first run, which builds and
+keeps; **20 s** on the second, all of it the query. The server with `--reorder` now prints
+`statistics loaded from the store in 0.00s` on a restart instead of scanning for minutes.
+
+The format is a versioned byte string owned by `holos-stats`; anything that is not exactly a
+snapshot this version wrote — another version, truncated, trailing bytes — is discarded and
+rebuilt, never reported. A cache that is wrong is a cache that is missing. Tests cover both
+directions the cache can fail in: a snapshot the store should still use and one it must
+refuse, and removing the generation check fails the second by name.
+
+The generation is also the answer to a question the store could not previously answer at all
+— *has anything changed?* — and the spatial index is the obvious next thing to ask it.
+
+### A switch for the bind join, and a claim withdrawn
+
+`QueryOptions::without_bind_join` answers a query through the evaluator alone. It exists so
+the fast path can be measured against its absence on the same store and the same rows —
+the only comparison that says what it is worth — and `pushdown` grows `--no-bind-join` to
+expose it.
+
+Using it corrects the 0.9.0 notes, which said the range pushdown on a literal-typed
+predicate was *slower* than a plain scan, quoting 123 s against 20 s. That compared a
+filtered `SELECT` with an unfiltered `COUNT`; the hundred seconds between them is evaluating
+the filter on 48 million string rows, and both paths pay it. The same query, same predicate,
+warm cache: **116.5 s** without the bind join, **122.3 s** with. Neutral. A first reading of
+198 s with it on was a cold page cache, which is why both arms were run in both orders
+before anything was written down. The pushdown still buys nothing on `xsd:date` or
+`xsd:string` objects, and that finding stands; it just costs nothing either.
+
 ## 0.9.0 — 2026-09-11
 
 The release that made a **load** unable to take the process down, after 0.8.0 did the same
@@ -149,37 +202,6 @@ sequentially rather than fetching them; going lower means not decoding a literal
 bytes already say its datatype is not a geometry, which is a codec-level peek and a separate
 change.
 
-### Statistics are kept with the store, so `--reorder` stops costing a scan per run
-
-`--reorder` is what supplies the cardinality estimate; admission control refuses on the
-estimate, the `DISTINCT` spill is reached only through the refusal, and join reordering is
-the estimate applied. So it is the flag the other protections hang off — and on the CLI it
-was a full scan on **every invocation**, about 300 s on the 653.8-million-triple store, which
-made it a flag nobody could afford to set from the command line. A server paid the same scan
-on every restart.
-
-Now the statistics are saved with the store and loaded back while they still apply. What
-decides "still apply" is a new **write generation** on the store: a counter that moves on
-every insert, delete and bulk load, is put back by a rolled-back scope, and is persisted in
-the same batch as the change it counts, so a reopened store carries on from where it was.
-A snapshot records the generation it was built at, and is used only while the store still
-reports that number. `quad_count` could not serve — delete one quad and insert another and
-it does not move — and neither could the dictionary's size, which is append-only and does
-not grow for a quad whose terms it already held.
-
-On the real store, `holos query --reorder`: **194 s** on the first run, which builds and
-keeps; **20 s** on the second, all of it the query. The server with `--reorder` now prints
-`statistics loaded from the store in 0.00s` on a restart instead of scanning for minutes.
-
-The format is a versioned byte string owned by `holos-stats`; anything that is not exactly a
-snapshot this version wrote — another version, truncated, trailing bytes — is discarded and
-rebuilt, never reported. A cache that is wrong is a cache that is missing. Tests cover both
-directions the cache can fail in: a snapshot the store should still use and one it must
-refuse, and removing the generation check fails the second by name.
-
-The generation is also the answer to a question the store could not previously answer at all
-— *has anything changed?* — and the spatial index is the obvious next thing to ask it.
-
 ### Measured, not changed: what a large store is actually slow at
 
 A sweep of representative shapes against the 653.8-million-triple store, timed net of a 2.7 s
@@ -205,13 +227,8 @@ this. Inline is `Integer`, `Float`, `DateTime`, `Small` — and `xsd:date` being
 `xsd:dateTime` is present is the kind of gap that looks like a typo in a dataset rather than
 a performance cliff.
 
-An earlier draft of this note said the pushdown was *slower* than a plain scan, quoting 123 s
-against 20 s. That compared a filtered `SELECT` with an unfiltered `COUNT`; the hundred seconds
-between them is evaluating the filter on 48 million string rows, which both paths pay. The
-same query with the bind join switched off — `QueryOptions::without_bind_join`, added for
-exactly this comparison — took **116.5 s against 122.3 s** with it on, both on a warm cache.
-Neutral, then. The first run with it on had read 198 s, and that was a cold page cache, not
-the fast path.
+As published, this note said the pushdown was *slower* than a plain scan. It is not; see
+0.9.1 for the measurement that corrected it.
 
 **`--reorder` did not help the pushdown, and on the CLI it could not be afforded.** The
 statistics build is a full scan — about 300 s on this store — and at the time of this sweep
