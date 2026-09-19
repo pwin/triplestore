@@ -161,17 +161,26 @@ store open. Nothing here is a fix; it is what the next piece of work should be a
 | two-hop join, `LIMIT 10` | ~0.1 s | |
 | count over a bound predicate, 48.4M rows | ~19.6 s | 2.47M quads/s |
 | `DISTINCT` over 3 distinct values | ~38 s | scans all 48.4M to find them |
-| range `FILTER`, 48.4M rows | **123 s** | slower than the plain scan above |
+| range `FILTER`, 48.4M literal rows | **~120 s** | the pushdown neither helps nor hurts here |
 | `ORDER BY` + `LIMIT 10`, 48.4M rows | **>15 min** | 8.4 GB buffered, then stopped by hand |
 
-**The range pushdown fires and still loses.** `bounded scans = 3` — it is not failing to
-engage. But a numeric span must also include the whole `Tag::Literal` range, because
-`xsd:decimal` is not an inline type and a dictionary-backed literal could satisfy the
-comparison. For a predicate whose objects are literals, that reads all of them. The same query
-with a cut matching **zero rows** took 123 s: the cost does not depend on selectivity at all.
-`xsd:date` is not inline either, so ranges over dates pay this too. Inline is `Integer`,
-`Float`, `DateTime`, `Small` — and `xsd:date` being absent while `xsd:dateTime` is present is
-the kind of gap that looks like a typo in a dataset rather than a performance cliff.
+**The range pushdown fires and buys nothing on a literal-typed predicate.** `bounded scans
+= 3` — it is not failing to engage. But a numeric span must also include the whole
+`Tag::Literal` range, because `xsd:decimal` is not an inline type and a dictionary-backed
+literal could satisfy the comparison. For a predicate whose objects are literals, that reads
+all of them, and the same query with a cut matching **zero rows** costs the same: selectivity
+has no effect at all. `xsd:date` is not inline either, so ranges over dates get nothing from
+this. Inline is `Integer`, `Float`, `DateTime`, `Small` — and `xsd:date` being absent while
+`xsd:dateTime` is present is the kind of gap that looks like a typo in a dataset rather than
+a performance cliff.
+
+An earlier draft of this note said the pushdown was *slower* than a plain scan, quoting 123 s
+against 20 s. That compared a filtered `SELECT` with an unfiltered `COUNT`; the hundred seconds
+between them is evaluating the filter on 48 million string rows, which both paths pay. The
+same query with the bind join switched off — `QueryOptions::without_bind_join`, added for
+exactly this comparison — took **116.5 s against 122.3 s** with it on, both on a warm cache.
+Neutral, then. The first run with it on had read 198 s, and that was a cold page cache, not
+the fast path.
 
 **`--reorder` does not help, and on the CLI it cannot.** The statistics build is a full scan —
 about 300 s on this store — and the CLI redoes it on *every invocation*, so admission control

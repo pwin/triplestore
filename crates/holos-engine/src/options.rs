@@ -86,6 +86,13 @@ pub struct QueryOptions {
     /// Collect the query plan, with per-operator statistics.
     pub explain: bool,
 
+    /// Skip the index nested-loop join and go straight to the evaluator.
+    ///
+    /// The bind join is the fast path for the fragment it accepts, and the only way to know
+    /// what it is worth on a given store is to run the same query without it. Spelled as the
+    /// negative so that `Default` — which is what `new` returns — leaves it on.
+    pub skip_bind_join: bool,
+
     /// Reorder each basic graph pattern by estimated cardinality before evaluating.
     ///
     /// The reused optimiser cannot be given statistics — there is no injection point — but
@@ -187,6 +194,13 @@ impl QueryOptions {
     #[must_use]
     pub fn explaining(mut self) -> Self {
         self.explain = true;
+        self
+    }
+
+    /// Answers through the evaluator alone, never the bind join. For measuring the latter.
+    #[must_use]
+    pub fn without_bind_join(mut self) -> Self {
+        self.skip_bind_join = true;
         self
     }
 

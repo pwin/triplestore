@@ -445,7 +445,11 @@ impl Engine {
         //
         // `plan` refuses anything outside its fragment, so the common case of falling
         // through costs one pattern match.
-        if !options.touches_dataset() && !options.explain && options.substitutions.is_empty() {
+        if !options.skip_bind_join
+            && !options.touches_dataset()
+            && !options.explain
+            && options.substitutions.is_empty()
+        {
             if let Some(results) = Self::try_bind_join(
                 view,
                 &parsed,
