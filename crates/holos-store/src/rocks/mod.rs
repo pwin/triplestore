@@ -294,11 +294,11 @@ struct BulkState {
     /// The counters as they stood at the previous flush, so each flush can report its own
     /// window rather than a running total.
     resolves_at_last_flush: crate::storage::BulkResolves,
-    /// Sorted runs already written, per index order, once the load outgrew its buffer.
+    /// The thread sorting and writing index runs, once the load outgrew its buffer.
     ///
-    /// Empty for any load that fits in one buffer, which is the common case: the merge then
+    /// Absent for any load that fits in one buffer, which is the common case: the merge then
     /// collapses to sorting a vector and nothing touches the disk.
-    spilled: Option<Box<Spilled>>,
+    spilled: Option<SpillWorker>,
 }
 
 /// The spread an entry needs to survive a flush: [`HOT_SPREAD`], raised until no more than
@@ -375,10 +375,71 @@ const HOT_SPREAD: u32 = 8_192;
 /// and forty megabytes is the price of not having to know that in advance.
 const HOT_CAPACITY: usize = 200_000;
 
+/// The thread that sorts and writes index runs, and the channel that feeds it.
+///
+/// The loading thread was doing this itself: every four million quads, stop interning, sort
+/// the buffer once per order, write each out, resume. By `loadprofile` that is about 15% of
+/// the loading thread's time, and none of it touches the dictionary or the id sequence — so
+/// it is the cleanest piece of the load to take off that thread. The buffer is handed over
+/// whole, the worker sorts and writes it while the loading thread fills the next, and the
+/// run paths accumulate in the worker's `Spilled`, which comes back when the sender is
+/// dropped and the thread joined.
+///
+/// A channel of capacity one is the whole memory story: at most one buffer is being sorted
+/// while one is being filled, so the extra cost is one buffer — 128 MB at the default
+/// `ingest_limit` — and a loading thread that outruns the sorter blocks on `send` rather
+/// than stacking buffers up.
+struct SpillWorker {
+    to_worker: std::sync::mpsc::SyncSender<Vec<EncodedQuad>>,
+    handle: std::thread::JoinHandle<Result<Box<Spilled>>>,
+}
+
+impl SpillWorker {
+    fn start(dir: &std::path::Path) -> Self {
+        let (to_worker, from_loader) = std::sync::mpsc::sync_channel::<Vec<EncodedQuad>>(1);
+        let mut spilled = Box::new(Spilled::new(dir));
+        let handle = std::thread::spawn(move || {
+            for quads in from_loader {
+                let (mut triples, mut named) = partition(&quads);
+                drop(quads);
+                // One buffer, nine orders, sorted in place each time. Copying it per order
+                // would multiply by nine the memory this whole mechanism exists to bound.
+                for (runs, perm) in spilled.triples.iter_mut().zip(TRIPLE_PERMS.map(|(_, p)| p)) {
+                    runs.spill(&mut triples, perm)?;
+                }
+                for (runs, perm) in spilled.named.iter_mut().zip(QUAD_PERMS.map(|(_, p)| p)) {
+                    runs.spill(&mut named, perm)?;
+                }
+            }
+            Ok(spilled)
+        });
+        Self { to_worker, handle }
+    }
+
+    /// Hands a buffer over. Blocks while the worker is still on the previous one.
+    ///
+    /// Fails only when the worker has already stopped, which it does on a write that failed;
+    /// the buffer comes back so the caller can join the worker and report that failure.
+    fn send(&self, quads: Vec<EncodedQuad>) -> std::result::Result<(), Vec<EncodedQuad>> {
+        self.to_worker.send(quads).map_err(|e| e.0)
+    }
+
+    /// Ends the worker and returns every run it wrote.
+    ///
+    /// A worker that panicked is reported as an error rather than propagated as a panic:
+    /// the load has already failed at that point, and the caller can say so.
+    fn finish(self) -> Result<Box<Spilled>> {
+        drop(self.to_worker);
+        self.handle
+            .join()
+            .map_err(|_| StorageError::Io(std::io::Error::other("the spill worker panicked")))?
+    }
+}
+
 /// The sorted runs on disk, one set per index order.
 ///
-/// Boxed inside `BulkState` because it is `None` for most loads and holds nine vectors of
-/// paths when it is not.
+/// Boxed inside `SpillWorker` because it holds nine vectors of paths and crosses a thread
+/// boundary twice.
 struct Spilled {
     triples: [sort::Runs<3>; 3],
     named: [sort::Runs<4>; 6],
@@ -598,6 +659,10 @@ impl RocksStorage {
                 }
             }
             self.write_pending(pending, true)?;
+            // Everything the worker wrote, once it has written it. Joined here and not
+            // earlier: the dictionary's own flush above ran on this thread while the worker
+            // was still sorting, which is the overlap the worker exists for.
+            let spilled = spilled.map(SpillWorker::finish).transpose()?;
             if sst && !(quads.is_empty() && spilled.is_none()) {
                 self.ingest_quads(quads, &graphs, spilled)?;
             }
@@ -617,19 +682,18 @@ impl RocksStorage {
             return Ok(());
         };
         let quads = std::mem::take(&mut state.quads);
-        let spilled = state
-            .spilled
-            .get_or_insert_with(|| Box::new(Spilled::new(&dir)));
-
-        let (mut triples, mut named) = partition(&quads);
-        drop(quads);
-        // One buffer, nine orders, sorted in place each time. Copying it per order would
-        // multiply by nine the memory this whole mechanism exists to bound.
-        for (runs, perm) in spilled.triples.iter_mut().zip(TRIPLE_PERMS.map(|(_, p)| p)) {
-            runs.spill(&mut triples, perm)?;
-        }
-        for (runs, perm) in spilled.named.iter_mut().zip(QUAD_PERMS.map(|(_, p)| p)) {
-            runs.spill(&mut named, perm)?;
+        // The buffer's capacity went with it; the next one grows back to the limit as it
+        // fills, which costs a few reallocations per spill and nothing worth reserving for.
+        let worker = state.spilled.get_or_insert_with(|| SpillWorker::start(&dir));
+        if worker.send(quads).is_err() {
+            // The worker stops early only on a write that failed. Joining it yields that
+            // error, which is the one worth reporting; a worker that somehow stopped clean
+            // is reported as the stop itself.
+            let worker = state.spilled.take().expect("the worker was just there");
+            worker.finish()?;
+            return Err(StorageError::Io(std::io::Error::other(
+                "the spill worker stopped before the load finished",
+            )));
         }
         Ok(())
     }
