@@ -41,8 +41,11 @@ use super::codec;
 /// How many rows a run reader holds at a time.
 ///
 /// The merge touches one row per run at a time but reads in blocks, so this trades memory
-/// against syscalls. At `N = 4` a block is 32 KiB per run.
-const READ_ROWS: usize = 1024;
+/// against reads. At `N = 4` a block is 256 KiB per run, and a load of 654 million quads
+/// has 156 runs per order: forty megabytes a merge, three merges at once, and 468 readers
+/// refilling from one disk. The fewer and larger the refills, the better a disk behind a
+/// USB port copes, and that is the disk the number was chosen on.
+const READ_ROWS: usize = 8192;
 
 /// The sorted runs written for one index order.
 ///

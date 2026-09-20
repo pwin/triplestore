@@ -119,12 +119,15 @@ against everything above, and `holos-bench` holds every measurement the design c
    named graphs. A single write puts the key in all of them in one `WriteBatch`; a bulk load
    instead sorts and spills runs ([`rocks/sort.rs`](crates/holos-store/src/rocks/sort.rs),
    [`rocks/dictsort.rs`](crates/holos-store/src/rocks/dictsort.rs)), merges them at the end,
-   and hands RocksDB one finished file per order. A bulk load is four threads: the parser
-   (`load_parsed` in [`crates/holos-engine/src/lib.rs`](crates/holos-engine/src/lib.rs)),
-   the loading thread that interns and issues ids in file order, a `SpillWorker` that sorts
-   and writes the index runs, and a thread per dictionary window that writes its files
-   (`DictFlush`, both in [`rocks/mod.rs`](crates/holos-store/src/rocks/mod.rs)). Only the
-   loading thread touches the dictionary, which is what keeps ids identical across backends.
+   and hands RocksDB finished files per order, of bounded size. A bulk load is four threads
+   while it streams: the parser (`load_parsed` in
+   [`crates/holos-engine/src/lib.rs`](crates/holos-engine/src/lib.rs)), the loading thread
+   that interns and issues ids in file order, a `SpillWorker` that sorts and writes the
+   index runs, and a thread per dictionary window that writes its files (`DictFlush`); at
+   the end, three merge threads (`MergeJob`) write the orders while the loading thread
+   ingests each file as it lands — all in
+   [`rocks/mod.rs`](crates/holos-store/src/rocks/mod.rs). Only the loading thread touches
+   the dictionary, which is what keeps ids identical across backends.
 
 The entry points: `Store::insert` / `Store::remove` in
 [`crates/holos-store/src/lib.rs`](crates/holos-store/src/lib.rs) for one quad;

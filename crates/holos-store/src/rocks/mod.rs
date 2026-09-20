@@ -105,6 +105,8 @@ pub struct RocksStorage {
     path: std::path::PathBuf,
     /// How many quads a load may hold before it spills them to a sorted run.
     ingest_limit: usize,
+    /// How many rows the final merge puts in one index file before starting the next.
+    index_file_rows: usize,
     /// How many bytes of dictionary rows a load may hold before it spills a sorted run.
     dict_spill_bytes: usize,
     /// How large a filter a load keeps over the terms it has interned. See `seen`.
@@ -210,6 +212,16 @@ enum Pending {
 /// Larger is faster, up to a point, because it means fewer runs to merge and fewer bytes
 /// written to disk and read back. Smaller is friendlier to a machine doing other things.
 const SPILL_QUADS: usize = 4 << 20;
+
+/// How many rows the final merge puts in one index file before starting the next.
+///
+/// An `SstFileWriter` holds a file's filter and index in memory until the file is finished,
+/// and for an order over 654 million quads that is about a gigabyte — which was the load's
+/// memory peak, reached three times over once three orders were written at once. Cutting
+/// each order's stream into files of this many rows bounds that by the file rather than by
+/// the load: the files do not overlap, so `RocksDB` still adopts every one at the bottom
+/// level, and the loading thread ingests each as it lands rather than waiting for the order.
+const INDEX_FILE_ROWS: usize = 32 << 20;
 
 /// The two dictionary families, each accumulating sorted runs.
 ///
@@ -467,6 +479,51 @@ impl SpillWorker {
     }
 }
 
+/// How many index orders the final merge works on at once.
+///
+/// Three, not nine: each merge holds a copy of the in-memory tail and a reader per run, and
+/// each streams a run set off the disk while writing a file back to it. Three is the whole
+/// of a default-graph load's orders, and on an SSD three streams each way is still well
+/// short of the disk. Past that the number is a guess, and a guess that costs memory.
+const MERGE_THREADS: usize = 3;
+
+/// One order's share of the final merge.
+#[derive(Clone, Copy)]
+enum MergeJob {
+    Triples(usize),
+    Named(usize),
+}
+
+impl MergeJob {
+    /// Merges the order's runs with its tail and writes its files, on whichever thread
+    /// claimed it, handing each finished file to `emit`. The tail is copied because the
+    /// merge sorts it in place and the other orders need it unsorted.
+    fn run(
+        self,
+        dir: &std::path::Path,
+        spilled: &Spilled,
+        triples: &[[TermId; 3]],
+        named: &[[TermId; 4]],
+        file_rows: usize,
+        emit: &mut dyn FnMut(&'static str, std::path::PathBuf),
+    ) -> Result<()> {
+        match self {
+            Self::Triples(i) => {
+                let (family, perm) = TRIPLE_PERMS[i];
+                let mut tail = triples.to_vec();
+                let merged = spilled.triples[i].merge(&mut tail, perm)?;
+                write_index_files(dir, family, merged, file_rows, emit)
+            }
+            Self::Named(i) => {
+                let (family, perm) = QUAD_PERMS[i];
+                let mut tail = named.to_vec();
+                let merged = spilled.named[i].merge(&mut tail, perm)?;
+                write_index_files(dir, family, merged, file_rows, emit)
+            }
+        }
+    }
+}
+
 /// The sorted runs on disk, one set per index order.
 ///
 /// Boxed inside `SpillWorker` because it holds nine vectors of paths and crosses a thread
@@ -572,6 +629,7 @@ impl RocksStorage {
             scope: None,
             path,
             ingest_limit: SPILL_QUADS,
+            index_file_rows: INDEX_FILE_ROWS,
             dict_spill_bytes: dictsort::SPILL_BYTES,
             seen_bytes: seen::DEFAULT_BYTES,
             spills: 0,
@@ -602,6 +660,14 @@ impl RocksStorage {
     /// a slow load into a killed one.
     pub fn set_ingest_limit(&mut self, quads: usize) {
         self.ingest_limit = quads;
+    }
+
+    /// How many rows the final merge writes to one index file before starting the next.
+    ///
+    /// See [`INDEX_FILE_ROWS`]. Tests set it low to make a small load produce several
+    /// files per order.
+    pub fn set_index_file_rows(&mut self, rows: usize) {
+        self.index_file_rows = rows.max(1);
     }
 
     /// How many bytes of dictionary rows a load holds before spilling a sorted run.
@@ -749,9 +815,15 @@ impl RocksStorage {
     /// compact it all again; a sorted file that does not overlap what is already there can be
     /// adopted at the bottom level without any of that.
     ///
-    /// The quads are sorted once per order, in place, and the keys are generated while each
-    /// file is written. Keeping nine key sets instead would cost nine times the memory for
-    /// the same result.
+    /// The orders are merged [`MERGE_THREADS`] at a time. Each merge is a heap over the
+    /// order's runs feeding a compressed file, and one thread doing nine of them in turn
+    /// took fourteen minutes of a 56-minute load at 654 million quads while the other cores
+    /// sat idle. Each thread takes its own copy of the in-memory tail, because the merge
+    /// sorts it in place; the tail is at most one buffer, so three copies is bounded the way
+    /// everything else here is. Each order is written as files of [`INDEX_FILE_ROWS`], and
+    /// the ingest of each stays on this thread — it needs the database — and happens as the
+    /// file lands, so scratch holds runs plus the files in flight rather than runs plus
+    /// every order's output.
     fn ingest_quads(
         &mut self,
         quads: Vec<EncodedQuad>,
@@ -759,7 +831,7 @@ impl RocksStorage {
         spilled: Option<Box<Spilled>>,
     ) -> Result<()> {
         let dir = self.ingest_dir()?;
-        let (mut triples, mut named) = partition(&quads);
+        let (triples, named) = partition(&quads);
         drop(quads);
 
         // No spills means no runs, and the merge below is then a sort of what is in memory —
@@ -767,17 +839,69 @@ impl RocksStorage {
         let spilled = spilled.unwrap_or_else(|| Box::new(Spilled::new(&dir)));
 
         let outcome = (|| -> Result<()> {
-            for (i, (family, perm)) in TRIPLE_PERMS.into_iter().enumerate() {
-                // Re-sorted in place for each order rather than copied. The borrow ends when
-                // `write_and_ingest` consumes the merge, which is what lets the next order
-                // sort the same buffer again.
-                let merged = spilled.triples[i].merge(&mut triples, perm)?;
-                self.write_and_ingest(&dir, family, merged)?;
-            }
-            for (i, (family, perm)) in QUAD_PERMS.into_iter().enumerate() {
-                let merged = spilled.named[i].merge(&mut named, perm)?;
-                self.write_and_ingest(&dir, family, merged)?;
-            }
+            // One job per order, claimed by index: a counter past the end is how a failure
+            // tells the other threads to stop after the file they are on.
+            let jobs: Vec<MergeJob> = (0..TRIPLE_PERMS.len())
+                .map(MergeJob::Triples)
+                .chain((0..QUAD_PERMS.len()).map(MergeJob::Named))
+                .collect();
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let claim = || {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                jobs.get(i).copied()
+            };
+            let stop = || next.store(jobs.len(), std::sync::atomic::Ordering::Relaxed);
+
+            let (done, finished) = std::sync::mpsc::channel();
+            // Borrowed here, by name, so the `move` below takes references and not the
+            // values: the runs and the tails are shared by every worker.
+            let (dir, spilled, triples, named) = (&dir, &*spilled, &triples, &named);
+            let file_rows = self.index_file_rows;
+            std::thread::scope(|scope| -> Result<()> {
+                let workers: Vec<_> = (0..MERGE_THREADS.min(jobs.len()))
+                    .map(|_| {
+                        let done = done.clone();
+                        scope.spawn(move || {
+                            // A receiver that has gone is a load that has already failed;
+                            // there is nobody left to tell.
+                            let mut emit = |family, path| {
+                                let _ = done.send(Ok((family, path)));
+                            };
+                            while let Some(job) = claim() {
+                                let ran =
+                                    job.run(dir, spilled, triples, named, file_rows, &mut emit);
+                                if let Err(e) = ran {
+                                    let _ = done.send(Err(e));
+                                    stop();
+                                    return;
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+                // This thread's own sender, so the channel closes when the workers are done.
+                drop(done);
+
+                // The first failure is the one reported; what arrives after it is drained
+                // so the workers can finish, and ignored.
+                let mut outcome = Ok(());
+                for written in finished {
+                    if outcome.is_err() {
+                        continue;
+                    }
+                    outcome =
+                        written.and_then(|(family, path)| self.ingest_index_sst(family, path));
+                    if outcome.is_err() {
+                        stop();
+                    }
+                }
+                for worker in workers {
+                    worker.join().map_err(|_| {
+                        StorageError::Io(std::io::Error::other("a merge thread panicked"))
+                    })?;
+                }
+                outcome
+            })?;
 
             // The catalogue is one row per graph, so a batch is the right tool.
             let mut batch = WriteBatch::default();
@@ -951,40 +1075,8 @@ impl RocksStorage {
             .map_err(rocks_err)
     }
 
-    /// Sorts `rows` into one order, writes them as a single SST, and ingests it.
-    ///
-    /// `perm` says which components the order's key is made of, in which positions —
-    /// `[1, 2, 0]` is `pos` over `spo`. It is applied in the sort key and again when the key
-    /// bytes are written, so the two cannot drift apart.
-    fn write_and_ingest<const N: usize>(
-        &self,
-        dir: &std::path::Path,
-        family: &'static str,
-        mut merged: sort::Merged<'_, N>,
-    ) -> Result<()> {
-        let path = dir.join(format!("{family}.sst"));
-        // Held in a binding: the writer borrows its options for its whole life.
-        let opts = index_opts(codec::ID);
-        let mut writer = rocksdb::SstFileWriter::create(&opts);
-        writer.open(&path).map_err(rocks_err)?;
-
-        // The merge is already sorted and already deduplicated, which is what an
-        // `SstFileWriter` requires and a `WriteBatch` never did.
-        let width = sort::Merged::<N>::width();
-        let mut wrote = false;
-        while let Some(row) = merged.next()? {
-            writer.put(&row[..width], []).map_err(rocks_err)?;
-            wrote = true;
-        }
-        if !wrote {
-            // An empty file is not ingestable, and an order with nothing in it is ordinary:
-            // a load of only default-graph triples writes no quad orders at all.
-            drop(writer);
-            let _ = std::fs::remove_file(&path);
-            return Ok(());
-        }
-        writer.finish().map_err(rocks_err)?;
-
+    /// Ingests one index SST that `write_index_sst` wrote.
+    fn ingest_index_sst(&self, family: &'static str, path: std::path::PathBuf) -> Result<()> {
         let mut opts = rocksdb::IngestExternalFileOptions::default();
         // The file was written for this store and is of no use afterwards.
         opts.set_move_files(true);
@@ -1515,6 +1607,53 @@ impl Storage for RocksStorage {
         }
         let (dict_key, hashed) = Self::dictionary_key(&serialised);
         self.resolve(&dict_key, hashed, term)
+    }
+
+    /// One `MultiGet` for every term that needs the disk; the rest answered in line.
+    ///
+    /// Well-known and inline terms never touch the dictionary, a term interned in an open
+    /// scope has no row yet, and a hashed key needs its candidates verified one by one —
+    /// those go through [`Storage::lookup`]. Everything else is a plain key, and those are
+    /// gathered and asked for together, sorted, since a batch in key order lets `RocksDB`
+    /// walk each file once.
+    fn lookup_many(&self, terms: &[TermRef<'_>]) -> Result<Vec<Option<TermId>>> {
+        let mut answers = vec![None; terms.len()];
+        // (key, index into `terms`) for the ones the batch will answer.
+        let mut batch: Vec<(Vec<u8>, usize)> = Vec::new();
+        for (i, term) in terms.iter().enumerate() {
+            let plain = match term {
+                TermRef::NamedNode(n) => vocab::encode_iri(n.as_str()).is_none(),
+                TermRef::Literal(l) => inline::encode_literal(*l).is_none(),
+                TermRef::BlankNode(_) => true,
+                TermRef::Triple(_) => false,
+            };
+            if !plain || self.scope.is_some() {
+                answers[i] = self.lookup(*term)?;
+                continue;
+            }
+            let serialised = put_term(*term, None);
+            let (dict_key, hashed) = Self::dictionary_key(&serialised);
+            if hashed {
+                answers[i] = self.resolve(&dict_key, true, *term)?;
+            } else {
+                batch.push((dict_key, i));
+            }
+        }
+        if batch.is_empty() {
+            return Ok(answers);
+        }
+        batch.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let found = self.db.batched_multi_get_cf(
+            cf(&self.db, STR2ID)?,
+            batch.iter().map(|(key, _)| key),
+            true,
+        );
+        for ((_, i), value) in batch.iter().zip(found) {
+            if let Some(value) = value.map_err(rocks_err)? {
+                answers[*i] = Some(read_id(&value)?);
+            }
+        }
+        Ok(answers)
     }
 
     fn decode(&self, id: TermId) -> Result<Option<Term>> {
@@ -2213,6 +2352,50 @@ impl Spilled {
             named: QUAD_PERMS.map(|(family, _)| sort::Runs::new(dir, family)),
         }
     }
+}
+
+/// Writes one merged index order as SSTs of at most `file_rows` rows, handing each to
+/// `emit` as it is finished. An order with nothing in it writes nothing, which is ordinary:
+/// a load of only default-graph triples writes no quad orders at all.
+///
+/// The merge is already sorted and already deduplicated, which is what an `SstFileWriter`
+/// requires and a `WriteBatch` never did. Consecutive files of one order do not overlap, so
+/// the ingest treats them as it would one file. Free of the store so it can run on any
+/// thread.
+fn write_index_files<const N: usize>(
+    dir: &std::path::Path,
+    family: &'static str,
+    mut merged: sort::Merged<'_, N>,
+    file_rows: usize,
+    emit: &mut dyn FnMut(&'static str, std::path::PathBuf),
+) -> Result<()> {
+    // Held in a binding: a writer borrows its options for its whole life.
+    let opts = index_opts(codec::ID);
+    let width = sort::Merged::<N>::width();
+    let mut files = 0;
+    let mut open: Option<(rocksdb::SstFileWriter<'_>, std::path::PathBuf, usize)> = None;
+    while let Some(row) = merged.next()? {
+        if open.is_none() {
+            let path = dir.join(format!("{family}.{files}.sst"));
+            files += 1;
+            let writer = rocksdb::SstFileWriter::create(&opts);
+            writer.open(&path).map_err(rocks_err)?;
+            open = Some((writer, path, 0));
+        }
+        let (writer, _, rows) = open.as_mut().expect("opened above");
+        writer.put(&row[..width], []).map_err(rocks_err)?;
+        *rows += 1;
+        if *rows >= file_rows {
+            let (mut writer, path, _) = open.take().expect("just written to");
+            writer.finish().map_err(rocks_err)?;
+            emit(family, path);
+        }
+    }
+    if let Some((mut writer, path, _)) = open {
+        writer.finish().map_err(rocks_err)?;
+        emit(family, path);
+    }
+    Ok(())
 }
 
 /// Merges one dictionary window into an SST per family, ready to ingest.

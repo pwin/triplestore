@@ -424,6 +424,14 @@ impl Store {
         self.inner.lookup(term)
     }
 
+    /// Looks up several terms at once, one answer per term in the same order.
+    ///
+    /// On `RocksDB` this is one `MultiGet` rather than a read per term; see
+    /// [`Storage::lookup_many`].
+    pub fn lookup_terms(&self, terms: &[TermRef<'_>]) -> Result<Vec<Option<TermId>>> {
+        self.inner.lookup_many(terms)
+    }
+
     /// Decodes a term id. `Ok(None)` means the dictionary never issued it.
     pub fn decode_term(&self, id: TermId) -> Result<Option<Term>> {
         self.inner.decode(id)

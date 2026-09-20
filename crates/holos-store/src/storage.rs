@@ -81,6 +81,15 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// Looks a term up without interning it. `Ok(None)` means it has never been seen.
     fn lookup(&self, term: TermRef<'_>) -> Result<Option<TermId>>;
 
+    /// Looks several terms up at once, one answer per term in the same order.
+    ///
+    /// The default is [`Storage::lookup`] in a loop, which is all an in-memory dictionary
+    /// can do. A backend that reads from disk can answer a batch for less than the sum of
+    /// its lookups, and overrides this.
+    fn lookup_many(&self, terms: &[TermRef<'_>]) -> Result<Vec<Option<TermId>>> {
+        terms.iter().map(|term| self.lookup(*term)).collect()
+    }
+
     /// Turns an id back into a term. `Ok(None)` means this store never issued it.
     fn decode(&self, id: TermId) -> Result<Option<Term>>;
 

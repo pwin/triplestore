@@ -266,6 +266,74 @@ fn a_load_that_spills_to_disk_still_matches() -> Result<()> {
     Ok(())
 }
 
+/// The final merge writes each order as several files when the order is longer than one
+/// file's worth of rows, and ingests them as they land. Consecutive files of one order do
+/// not overlap, so the store should not be able to tell — and neither should a batched
+/// lookup, which reads the dictionary those files were written against.
+#[test]
+fn a_merge_cut_into_several_files_still_matches() -> Result<()> {
+    let quads = fixture();
+
+    let plain_dir = tempfile::tempdir().expect("temp dir");
+    let mut plain = opened(&plain_dir)?;
+    load(&mut plain, &quads, false)?;
+
+    let bulk_dir = tempfile::tempdir().expect("temp dir");
+    let mut storage = RocksStorage::open(bulk_dir.path())?;
+    storage.set_ingest_limit(100);
+    // A prime well below the fixture's size, so every order is cut several times and the
+    // cuts land in the middle of runs rather than on their boundaries.
+    storage.set_index_file_rows(37);
+    let mut bulk = Store::with_storage(storage);
+    load(&mut bulk, &quads, true)?;
+    assert_eq!(read(&bulk)?, read(&plain)?);
+
+    // That it was *cut* is the point, and equality alone cannot show it: one file per order
+    // would produce the same store. The fixture is a thousand triples and five hundred quads,
+    // so at 37 rows a file the nine orders come to well over a hundred files, against nine.
+    let sst_files = std::fs::read_dir(bulk_dir.path())?
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "sst"))
+        .count();
+    assert!(
+        sst_files > 100,
+        "expected the merge to write many files per order, found {sst_files}"
+    );
+
+    // Every term the fixture has, asked for in one batch and one at a time: the batch
+    // answers with the same ids, in the same order, including the ones that are inline or
+    // well-known and never reach the disk.
+    let terms: Vec<Term> = quads
+        .iter()
+        .flat_map(|q| {
+            [
+                Term::from(q.subject.clone()),
+                Term::from(q.predicate.clone()),
+                q.object.clone(),
+            ]
+        })
+        .chain([Term::from(NamedNode::new_unchecked(
+            "http://never.example/absent",
+        ))])
+        .collect();
+    let refs: Vec<_> = terms.iter().map(Term::as_ref).collect();
+    let batched = bulk.lookup_terms(&refs)?;
+    let single: Vec<_> = refs
+        .iter()
+        .map(|t| bulk.lookup_term(*t))
+        .collect::<Result<_>>()?;
+    assert_eq!(batched, single);
+    assert!(
+        batched.last().is_some_and(Option::is_none),
+        "the absent term is absent"
+    );
+    assert!(
+        batched.iter().filter(|a| a.is_some()).count() > terms.len() / 2,
+        "most of the fixture's terms are in the store"
+    );
+    Ok(())
+}
+
 /// Loading into a store that already holds data: the ingested files overlap what is there,
 /// which is the case RocksDB cannot place at the bottom level and has to work harder for.
 #[test]

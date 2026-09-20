@@ -6,8 +6,8 @@ them are in `BENCHMARKS.md` and are runnable.
 ## 0.10.0 — unreleased
 
 The release that made a bulk load **4× faster**: the 653.8-million-triple file that took
-3 h 43 m at 0.9.1 takes **56 minutes**, producing a store with the same counts and the
-same answers. Six changes, each measured on that file, in the order they were found —
+3 h 43 m at 0.9.1 takes **55 minutes**, producing a store with the same counts and the
+same answers. Seven changes, each measured on that file, in the order they were found —
 because each one's measurement is what found the next.
 
 | | time | quads/s | peak memory |
@@ -18,7 +18,8 @@ because each one's measurement is what found the next.
 | + hot set by spread, not hits | 4,417 s | 148,011 | — |
 | + a whole bloom filter on `str2id` | 3,870 s | 168,939 | 4,059 MiB |
 | + index runs sorted and written on a thread | 3,597 s | 181,793 | 4,208 MiB |
-| + dictionary windows written on a thread | **3,360 s** | **194,574** | 3,855 MiB |
+| + dictionary windows written on a thread | 3,360 s | 194,574 | 3,855 MiB |
+| + the final merge three orders at a time, in bounded files | **3,277 s** | **199,545** | 3,434 MiB |
 
 ### A bulk load stops asking the disk whether a term is new
 
@@ -160,6 +161,53 @@ reads; the process runs at about 200% CPU on eight cores. Interning is one threa
 design — it is what keeps ids in file order — so the next factor is not another thread
 here but the read cost itself, or the final merge, which runs its nine orders one after
 another and could run three at once.
+
+### The final merge, three orders at a time — and where its memory had been going
+
+The merge is a heap over an order's runs feeding a compressed file, and one thread doing
+nine of them in turn was 14 minutes of the load with the other cores idle. Now three
+threads claim orders from a counter, each takes its own copy of the in-memory tail (the
+merge sorts it in place; the tail is at most one buffer), and the loading thread ingests
+each finished file as it lands. The first version wrote one file per order as before, and
+measured 3,360 → 3,234 s with a peak of **6,132 MiB** against 3,855. Two things were
+learned from that run.
+
+The disk `E:` is an mSATA SSD behind a USB bridge. The merge was reading 156 runs per order
+in 24 KB blocks, and three merges at once meant 468 readers refilling through one USB link:
+the phase went from 14 minutes to 11, not to 5, because the link was the ceiling. Run
+readers now refill in 256 KB blocks — forty megabytes a merge — which is a number chosen on
+this disk and does no harm on a better one.
+
+The memory was the `SstFileWriter`: it holds a file's bloom filter and index in memory until
+the file is finished, and for an order over 654 million keys that is about a gigabyte.
+That had been the load's peak all along — the 2.9 → 4.2 GB cycle visible in every earlier
+run's merge phase was one file's filter growing and being written — and three at once made
+it three gigabytes. Each order is now written as files of 32 million rows. Consecutive files
+of one order do not overlap, so `RocksDB` still adopts every one at the bottom level, and
+memory follows the file rather than the load: **flat at 2.9–3.0 GB through the merge**, in
+all three threads, against a peak that used to arrive there. A test cuts the fixture into
+37-row files and counts them. 3,277 s all told, the merge phase 11 minutes, and the
+same counts and rows as every store before it.
+
+### `MultiGet` on the dictionary: measured, not built
+
+What is left of the dictionary reads is 43 million terms that recur across windows at
+16 µs each, about 700 s. `RocksDB` answers a batch of keys in one `MultiGet`, walking each
+file once for the batch rather than once per key, so `Store::lookup_terms` now does that —
+one sorted batched get for every plain key, with well-known, inline, hashed and scoped terms
+answered in line — and `dictget` in `holos-bench` asks whether it pays: 200,000 distinct
+terms from the front of the file, alternating chunks between one get per term and a batch.
+Cold, from the disk: 108 → 98 µs a term. Warm, from the page cache, which is where the
+load's reads come from: **8.8 → 6.4 µs at a batch of 1,024**, 7.9 → 6.2 at 256, 8.8 → 7.5
+at 64.
+
+So batching is worth a fifth to a quarter of the read cost, at most 150 s, *if* it cost
+nothing to batch — and it would not. A term's key is its serialisation, so to ask for a
+batch ahead of interning it, every term of the batch is serialised on the loading thread
+before it is needed, and two of every three of those are then found in the cache and never
+needed a key at all. That is the same order of cost as the saving, spent restructuring the
+one piece of the load that keeps ids in file order. The lookup stays, as an API and a
+number; the load does not use it.
 
 ## 0.9.1 — 2026-09-19
 
