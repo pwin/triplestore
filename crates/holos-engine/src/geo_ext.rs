@@ -81,12 +81,30 @@ const GET_SRID: NamedNodeRef<'_> =
 /// does not have, so it goes in this project's own.
 const TRANSFORM: NamedNodeRef<'_> = NamedNodeRef::new_unchecked("https://holos.dev/ns#transform");
 
+/// Apache Jena's spatial function namespace, `spatialF:` in its documentation.
+///
+/// Jena fills the same gap with three functions, and a query written for Jena should run
+/// here without renaming them: `transformSRS(geom, srs)` is `holos:transform` argument for
+/// argument, `transformDatatype(geom, datatype)` rewrites a literal between WKT and `GeoJSON`,
+/// and `transform(geom, datatype, srs)` does both. The rest of Jena's namespace — `nearby`,
+/// `withinCircle`, `greatCircle` and the rest — is not claimed here.
+const SPATIALF_TRANSFORM_SRS: NamedNodeRef<'_> =
+    NamedNodeRef::new_unchecked("http://jena.apache.org/function/spatial#transformSRS");
+const SPATIALF_TRANSFORM_DATATYPE: NamedNodeRef<'_> =
+    NamedNodeRef::new_unchecked("http://jena.apache.org/function/spatial#transformDatatype");
+const SPATIALF_TRANSFORM: NamedNodeRef<'_> =
+    NamedNodeRef::new_unchecked("http://jena.apache.org/function/spatial#transform");
+
 /// The functions this module adds to, or replaces in, `spargeo`'s 43.
-pub const EXTRA_GEOSPARQL_FUNCTIONS: [(NamedNodeRef<'static>, fn(&[Term]) -> Option<Term>); 9] = [
+pub const EXTRA_GEOSPARQL_FUNCTIONS: [(NamedNodeRef<'static>, fn(&[Term]) -> Option<Term>); 12] = [
     (BUFFER, geof_buffer),
     (BOUNDARY, geof_boundary),
     // Not a geometry operation at all: the one thing GeoSPARQL leaves out.
     (TRANSFORM, holos_transform),
+    // Jena's names for the same operation, so its queries run unchanged.
+    (SPATIALF_TRANSFORM_SRS, spatialf_transform_srs),
+    (SPATIALF_TRANSFORM_DATATYPE, spatialf_transform_datatype),
+    (SPATIALF_TRANSFORM, spatialf_transform),
     // A replacement, because `spargeo`'s answers CRS84 unconditionally — true of every
     // literal it could parse, and false of every literal this module added support for.
     (GET_SRID, geof_get_srid),
@@ -106,7 +124,7 @@ pub const EXTRA_GEOSPARQL_FUNCTIONS: [(NamedNodeRef<'static>, fn(&[Term]) -> Opt
 // literal plumbing — deliberately identical in behaviour to spargeo's private helpers
 // ---------------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
     Wkt,
     GeoJson,
@@ -738,11 +756,55 @@ fn holos_transform(args: &[Term]) -> Option<Term> {
         return None;
     };
     let target = Crs::from_uri(extract_units_iri(target)?)?;
-    // The literal arrives in CRS84 whatever it declared, because `extract_geometry` moved
-    // it there. So this is one hop, not two, and transforming to CRS84 is a no-op.
+    transform_to(term, target, pick_output_kind(args))
+}
+
+/// <http://jena.apache.org/function/spatial#transformSRS>
+///
+/// `spatialF:transformSRS(geom, srsURI)`: Jena's name for [`holos_transform`], argument for
+/// argument. The systems it can reach are the ones `crate::crs` can; Jena resolves any EPSG
+/// code through `GeoTools`, and a code this engine has no transformation for comes back
+/// unbound here rather than as the geometry relabelled.
+fn spatialf_transform_srs(args: &[Term]) -> Option<Term> {
+    holos_transform(args)
+}
+
+/// <http://jena.apache.org/function/spatial#transformDatatype>
+///
+/// `spatialF:transformDatatype(geom, datatypeURI)`: the same geometry, in the same reference
+/// system, serialised as the other datatype. WKT to `GeoJSON` is only possible for CRS84,
+/// for the reason `transform_to` gives; `GeoJSON` to WKT always is. GML is Jena's third
+/// datatype and is not one this engine writes, so it is refused.
+fn spatialf_transform_datatype(args: &[Term]) -> Option<Term> {
+    let [term, datatype] = args else {
+        return None;
+    };
+    let kind = kind_of_datatype(extract_units_iri(datatype)?)?;
+    let system = declared_system(term)?;
+    transform_to(term, system, kind)
+}
+
+/// <http://jena.apache.org/function/spatial#transform>
+///
+/// `spatialF:transform(geom, datatypeURI, srsURI)`: both at once, in Jena's argument order.
+fn spatialf_transform(args: &[Term]) -> Option<Term> {
+    let [term, datatype, target] = args else {
+        return None;
+    };
+    let kind = kind_of_datatype(extract_units_iri(datatype)?)?;
+    let target = Crs::from_uri(extract_units_iri(target)?)?;
+    transform_to(term, target, kind)
+}
+
+/// The shared core of the four transform functions: `term`'s geometry, expressed in
+/// `target` and serialised as `kind`.
+///
+/// The literal arrives in CRS84 whatever it declared, because `extract_geometry` moved it
+/// there. So this is one hop, not two, and transforming to CRS84 is a no-op.
+fn transform_to(term: &Term, target: Crs, kind: Kind) -> Option<Term> {
     let geom = extract_geometry(term)?;
     let moved = reproject(&geom, Crs::Crs84, target)?;
-    let literal = match pick_output_kind(args) {
+    let literal = match kind {
         // GeoJSON cannot express another reference system: RFC 7946 removed the `crs`
         // member and fixed the format at CRS84. Answering with GeoJSON would produce a
         // document whose numbers are eastings and whose schema says they are degrees.
@@ -754,6 +816,32 @@ fn holos_transform(args: &[Term]) -> Option<Term> {
         ),
     };
     Some(literal.into())
+}
+
+/// The serialisation a geometry datatype IRI names, for the functions that take one.
+fn kind_of_datatype(iri: &str) -> Option<Kind> {
+    if iri == WKT_LITERAL.as_str() {
+        Some(Kind::Wkt)
+    } else if iri == GEO_JSON_LITERAL.as_str() {
+        Some(Kind::GeoJson)
+    } else {
+        None
+    }
+}
+
+/// The reference system a geometry literal declares — the prefix of a WKT literal, and
+/// CRS84 for `GeoJSON`, which can declare nothing else.
+fn declared_system(term: &Term) -> Option<Crs> {
+    let Term::Literal(literal) = term else {
+        return None;
+    };
+    if literal.datatype() == WKT_LITERAL {
+        declared_crs(literal.value().trim()).map(|(crs, _)| crs)
+    } else if literal.datatype() == GEO_JSON_LITERAL {
+        Some(Crs::Crs84)
+    } else {
+        None
+    }
 }
 
 /// A `spargeo` function, taught to read every reference system this module does.
@@ -1125,6 +1213,106 @@ mod tests {
     fn transform_refuses_a_system_it_cannot_reach() {
         let target = crs_iri("http://www.opengis.net/def/crs/EPSG/0/2154");
         assert!(holos_transform(&[wkt("POINT(0 0)"), target]).is_none());
+    }
+
+    fn datatype_iri(node: NamedNodeRef<'_>) -> Term {
+        Term::NamedNode(node.into_owned())
+    }
+
+    /// Jena's `transformSRS` is `holos:transform` under another name: the same literal in,
+    /// the same literal out, for every system and for the refusal.
+    #[test]
+    fn jena_transform_srs_answers_exactly_as_holos_transform_does() {
+        for (crs, _) in CARDIFF {
+            let args = [wkt("POINT(-3.181 51.4816)"), crs_iri(crs)];
+            assert_eq!(
+                spatialf_transform_srs(&args),
+                holos_transform(&args),
+                "{crs}"
+            );
+            assert!(spatialf_transform_srs(&args).is_some(), "{crs} was refused");
+        }
+        let unknown = [
+            wkt("POINT(0 0)"),
+            crs_iri("http://www.opengis.net/def/crs/EPSG/0/2154"),
+        ];
+        assert!(spatialf_transform_srs(&unknown).is_none());
+        assert!(
+            spatialf_transform_srs(&[wkt("POINT(0 0)")]).is_none(),
+            "wrong arity"
+        );
+    }
+
+    /// `transformDatatype` changes the serialisation and keeps the reference system: a
+    /// National Grid literal asked for as WKT stays on the grid, and asked for as GeoJSON is
+    /// refused, because GeoJSON cannot say it is on the grid.
+    #[test]
+    fn jena_transform_datatype_keeps_the_system_and_changes_the_serialisation() {
+        let grid = crs_wkt(crate::crs::EPSG_27700_URI, "POINT(318086.06 176511.05)");
+        let as_wkt = spatialf_transform_datatype(&[grid.clone(), datatype_iri(WKT_LITERAL)])
+            .expect("WKT to WKT");
+        let Term::Literal(literal) = &as_wkt else {
+            panic!("expected a literal");
+        };
+        assert!(literal
+            .value()
+            .starts_with(&format!("<{}>", crate::crs::EPSG_27700_URI)));
+        assert!(
+            spatialf_transform_datatype(&[grid, datatype_iri(GEO_JSON_LITERAL)]).is_none(),
+            "GeoJSON cannot carry a grid reference"
+        );
+
+        // CRS84 goes both ways, and comes back where it started.
+        let degrees = wkt("POINT(-3.181 51.4816)");
+        let json = spatialf_transform_datatype(&[degrees.clone(), datatype_iri(GEO_JSON_LITERAL)])
+            .expect("WKT to GeoJSON");
+        assert_eq!(detect_kind(&json), Some(Kind::GeoJson));
+        let back = spatialf_transform_datatype(&[json, datatype_iri(WKT_LITERAL)])
+            .expect("GeoJSON to WKT");
+        assert_eq!(detect_kind(&back), Some(Kind::Wkt));
+        let Geometry::Point(point) = geometry_of(&back) else {
+            panic!("expected a point");
+        };
+        assert!((point.x() + 3.181).abs() < 1e-9 && (point.y() - 51.4816).abs() < 1e-9);
+
+        // GML is Jena's third datatype and not one this engine writes.
+        let gml = Term::NamedNode(NamedNode::new_unchecked(
+            "http://www.opengis.net/ont/geosparql#gmlLiteral",
+        ));
+        assert!(spatialf_transform_datatype(&[degrees, gml]).is_none());
+    }
+
+    /// `transform` is both at once, in Jena's argument order: geometry, datatype, system.
+    #[test]
+    fn jena_transform_takes_datatype_then_system() {
+        let out = spatialf_transform(&[
+            wkt("POINT(-3.181 51.4816)"),
+            datatype_iri(WKT_LITERAL),
+            crs_iri(crate::crs::EPSG_27700_URI),
+        ])
+        .expect("transformed");
+        assert_eq!(
+            Some(out.clone()),
+            holos_transform(&[
+                wkt("POINT(-3.181 51.4816)"),
+                crs_iri(crate::crs::EPSG_27700_URI)
+            ])
+        );
+        // The arguments the other way round are a datatype where a system should be, and
+        // are refused rather than guessed at.
+        assert!(spatialf_transform(&[
+            wkt("POINT(-3.181 51.4816)"),
+            crs_iri(crate::crs::EPSG_27700_URI),
+            datatype_iri(WKT_LITERAL),
+        ])
+        .is_none());
+        // GeoJSON in another system is refused here as everywhere.
+        assert!(spatialf_transform(&[
+            wkt("POINT(-3.181 51.4816)"),
+            datatype_iri(GEO_JSON_LITERAL),
+            crs_iri(crate::crs::EPSG_27700_URI),
+        ])
+        .is_none());
     }
 
     /// RFC 7946 fixed GeoJSON at CRS84 and removed the `crs` member, so there is no correct

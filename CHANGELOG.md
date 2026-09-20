@@ -19,6 +19,22 @@ tiles requested, twelve loaded, every one carrying `referrerpolicy="strict-origi
 
 The console object is now `window.holosConsole`, so a script or a test can reach it.
 
+### Jena's `spatialF:` transforms, so its queries run unchanged
+
+Apache Jena fills GeoSPARQL's missing transform with three functions in
+`<http://jena.apache.org/function/spatial#>`, and they are now names over the code
+`holos:transform` already had: `spatialF:transformSRS(geom, srs)` is `holos:transform`
+argument for argument and answers identically for every system and for the refusal;
+`spatialF:transformDatatype(geom, datatype)` rewrites a literal between WKT and GeoJSON
+while keeping its reference system — GeoJSON only for CRS84, since RFC 7946 fixed it there,
+and GML refused since this engine does not write it; `spatialF:transform(geom, datatype,
+srs)` does both, in Jena's argument order. Checked from SPARQL against the GeoSPARQL example:
+a CRS84 point to Web Mercator, to GeoJSON, and to EPSG:4326 with its axes swapped.
+
+The reach is what `crs.rs` has — CRS84, EPSG:4326, 27700 and 3857 — where Jena resolves any
+EPSG code through GeoTools; a code this engine cannot transform comes back unbound, not
+relabelled. Jena's other spatial functions are not claimed.
+
 ## 0.11.0 — 2026-09-20
 
 ### The console: MatGUI, and a policy that keeps it at home

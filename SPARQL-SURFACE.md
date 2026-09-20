@@ -227,7 +227,7 @@ A yes means *this build evaluates it*, not that every edge case of the specifica
 | `triple term pattern` | 1.2 | ✅ yes | matches a triple term in object position; zero rows here is correct |
 | `VERSION` | 1.2 | ✅ yes |  |
 
-### GeoSPARQL (sample of 45, plus holos:transform)
+### GeoSPARQL (sample of 45, plus holos:transform and Jena's spatialF transforms)
 
 | Function | Spec | Status | Notes |
 |---|---|---|---|
@@ -245,6 +245,9 @@ A yes means *this build evaluates it*, not that every edge case of the specifica
 | `geof:getSRID` | GeoSPARQL | ✅ yes | **replaced**: reports the declared system, not CRS84 |
 | `reference systems` | GeoSPARQL | ✅ yes | **added by HOLOS**: EPSG:4326, 27700 and 3857, not CRS84 alone |
 | `holos:transform` | HOLOS | ✅ yes | **added by HOLOS**: GeoSPARQL has no transform |
+| `spatialF:transformSRS` | Jena | ✅ yes | `holos:transform` under Jena's name, argument for argument; the systems above, not any EPSG code |
+| `spatialF:transformDatatype` | Jena | ✅ yes | WKT ↔ GeoJSON, keeping the system; GeoJSON only for CRS84; GML refused |
+| `spatialF:transform` | Jena | ✅ yes | both, in Jena's order: geometry, datatype, system |
 
 ### Extension libraries
 
@@ -317,7 +320,11 @@ For `fn:`, the SPARQL built-ins cover the same ground under different names:
 ## The complete GeoSPARQL set
 
 All 45 `geof:` functions are registered — 43 from `spargeo`, plus `geof:buffer`
-and `geof:boundary` implemented here — and `holos:transform` alongside them.
+and `geof:boundary` implemented here — and `holos:transform` alongside them, with
+Jena's `spatialF:transformSRS`, `transformDatatype` and `transform`
+(`<http://jena.apache.org/function/spatial#>`) as names over the same code, so a
+query written for Jena's GeoSPARQL runs unchanged. The rest of Jena's `spatialF:`
+namespace is not claimed.
 Six of the 43 are **replaced** rather than reused: `distance`, `getSRID` and the
 four set operations, where `spargeo`'s answer was narrower than the
 specification's. The table above samples them; the full list is:
