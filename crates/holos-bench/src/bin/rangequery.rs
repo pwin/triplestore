@@ -122,7 +122,11 @@ fn main() {
         Arc::new(Statistics::build(engine.store(), GraphFilter::Default).expect("statistics"));
     let options = QueryOptions::new().reordering(stats);
 
-    let backend = if dir.is_some() { "rocksdb" } else { "in memory" };
+    let backend = if dir.is_some() {
+        "rocksdb"
+    } else {
+        "in memory"
+    };
     println!("{QUADS} subjects, one `age` and one `name` each — {backend}\n");
     println!(
         "{:>12}  {:>10}  {:>14}  {:>16}",

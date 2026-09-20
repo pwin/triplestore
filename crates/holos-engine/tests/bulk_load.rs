@@ -121,15 +121,26 @@ fn a_document_larger_than_the_queue_loads_completely_and_in_order() {
     // id and `s49999` the highest. A batch delivered out of order would show up here.
     let first = engine
         .store()
-        .lookup_term(NamedNode::new_unchecked("http://example.com/s0").as_ref().into())
+        .lookup_term(
+            NamedNode::new_unchecked("http://example.com/s0")
+                .as_ref()
+                .into(),
+        )
         .expect("lookup")
         .expect("present");
     let last = engine
         .store()
-        .lookup_term(NamedNode::new_unchecked("http://example.com/s49999").as_ref().into())
+        .lookup_term(
+            NamedNode::new_unchecked("http://example.com/s49999")
+                .as_ref()
+                .into(),
+        )
         .expect("lookup")
         .expect("present");
-    assert!(first < last, "s0 ({first:?}) must be issued before s49999 ({last:?})");
+    assert!(
+        first < last,
+        "s0 ({first:?}) must be issued before s49999 ({last:?})"
+    );
 }
 
 #[test]

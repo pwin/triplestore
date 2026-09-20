@@ -514,7 +514,11 @@ impl Statistics {
             }
             let index = stats.sets.len();
             for predicate in &predicates {
-                stats.by_predicate.entry(*predicate).or_default().push(index);
+                stats
+                    .by_predicate
+                    .entry(*predicate)
+                    .or_default()
+                    .push(index);
             }
             stats.sets.push(CharacteristicSet {
                 predicates,
@@ -553,10 +557,13 @@ impl Cursor<'_> {
         self.take(1).map(|b| b[0])
     }
     fn u32(&mut self) -> Option<u32> {
-        self.take(4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        self.take(4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
     }
     fn u64(&mut self) -> Option<u64> {
-        self.take(8).and_then(|b| b.try_into().ok()).map(u64::from_be_bytes)
+        self.take(8)
+            .and_then(|b| b.try_into().ok())
+            .map(u64::from_be_bytes)
     }
 }
 
@@ -745,7 +752,10 @@ mod tests {
         let counts = stats.predicates[&id(&store, &email)];
         assert_eq!(counts.triples, 4, "four email triples");
         assert_eq!(counts.subjects, 2, "over two subjects");
-        assert_eq!(counts.objects, 3, "with three distinct addresses between them");
+        assert_eq!(
+            counts.objects, 3,
+            "with three distinct addresses between them"
+        );
 
         // And a predicate on one subject only, so a count that leaked across predicates shows.
         let name = stats.predicates[&id(&store, &ex("name"))];
@@ -767,7 +777,10 @@ mod tests {
         assert_eq!(back.predicates.len(), built.predicates.len());
         for (p, s) in &built.predicates {
             let b = back.predicates[p];
-            assert_eq!((b.triples, b.subjects, b.objects), (s.triples, s.subjects, s.objects));
+            assert_eq!(
+                (b.triples, b.subjects, b.objects),
+                (s.triples, s.subjects, s.objects)
+            );
         }
         assert_eq!(back.sets.len(), built.sets.len());
         for (a, b) in built.sets.iter().zip(&back.sets) {
@@ -775,7 +788,10 @@ mod tests {
             assert_eq!(a.subjects, b.subjects);
             assert_eq!(a.occurrences, b.occurrences);
         }
-        assert_eq!(back.by_predicate, built.by_predicate, "the index is rebuilt from the sets");
+        assert_eq!(
+            back.by_predicate, built.by_predicate,
+            "the index is rebuilt from the sets"
+        );
 
         // And the estimates, which is what any of it is for.
         let name = id(&store, &ex("name"));
@@ -789,17 +805,31 @@ mod tests {
     #[test]
     fn a_snapshot_that_is_not_one_is_refused() {
         let store = store();
-        let good = Statistics::build(&store, GraphFilter::Default).unwrap().to_bytes();
+        let good = Statistics::build(&store, GraphFilter::Default)
+            .unwrap()
+            .to_bytes();
 
         assert!(Statistics::from_bytes(&[]).is_none(), "empty");
         let mut wrong_version = good.clone();
         wrong_version[0] = SNAPSHOT_VERSION.wrapping_add(1);
-        assert!(Statistics::from_bytes(&wrong_version).is_none(), "another version");
-        assert!(Statistics::from_bytes(&good[..good.len() / 2]).is_none(), "truncated");
+        assert!(
+            Statistics::from_bytes(&wrong_version).is_none(),
+            "another version"
+        );
+        assert!(
+            Statistics::from_bytes(&good[..good.len() / 2]).is_none(),
+            "truncated"
+        );
         let mut trailing = good.clone();
         trailing.push(0);
-        assert!(Statistics::from_bytes(&trailing).is_none(), "trailing bytes");
-        assert!(Statistics::from_bytes(&good).is_some(), "and the real one still decodes");
+        assert!(
+            Statistics::from_bytes(&trailing).is_none(),
+            "trailing bytes"
+        );
+        assert!(
+            Statistics::from_bytes(&good).is_some(),
+            "and the real one still decodes"
+        );
     }
 
     /// The whole point: a snapshot is used while the store is unchanged and rebuilt the
@@ -809,12 +839,17 @@ mod tests {
     fn a_snapshot_is_used_until_a_write_and_not_after() {
         let mut store = store();
         assert!(
-            Statistics::load_cached(&store, GraphFilter::Default).unwrap().is_none(),
+            Statistics::load_cached(&store, GraphFilter::Default)
+                .unwrap()
+                .is_none(),
             "nothing kept yet"
         );
 
         let first = Statistics::cached(&mut store, GraphFilter::Default).unwrap();
-        assert!(store.load_statistics().unwrap().is_some(), "cached() kept a snapshot");
+        assert!(
+            store.load_statistics().unwrap().is_some(),
+            "cached() kept a snapshot"
+        );
         let loaded = Statistics::load_cached(&store, GraphFilter::Default)
             .unwrap()
             .expect("the store is unchanged, so the snapshot is current");
@@ -834,17 +869,28 @@ mod tests {
             )
             .unwrap();
         assert!(
-            Statistics::load_cached(&store, GraphFilter::Default).unwrap().is_none(),
+            Statistics::load_cached(&store, GraphFilter::Default)
+                .unwrap()
+                .is_none(),
             "a write moved the generation, so the snapshot must be refused"
         );
 
         // A stale snapshot is not saved either: `save` re-checks.
-        assert!(!first.save(&mut store).unwrap(), "stale statistics are not kept");
+        assert!(
+            !first.save(&mut store).unwrap(),
+            "stale statistics are not kept"
+        );
 
         let second = Statistics::cached(&mut store, GraphFilter::Default).unwrap();
-        assert_eq!(second.total_triples, first.total_triples + 1, "rebuilt from the store");
+        assert_eq!(
+            second.total_triples,
+            first.total_triples + 1,
+            "rebuilt from the store"
+        );
         assert!(
-            Statistics::load_cached(&store, GraphFilter::Default).unwrap().is_some(),
+            Statistics::load_cached(&store, GraphFilter::Default)
+                .unwrap()
+                .is_some(),
             "and kept again"
         );
     }

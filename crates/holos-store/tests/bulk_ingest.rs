@@ -369,7 +369,11 @@ fn the_range_walk_matches_point_lookups() -> Result<()> {
                 walked, looked_up,
                 "{tag:?} over {from}..{to}: the range walk and point lookups disagree"
             );
-            assert_eq!(walked.len(), to - from, "{tag:?}: every id in range was issued");
+            assert_eq!(
+                walked.len(),
+                to - from,
+                "{tag:?}: every id in range was issued"
+            );
         }
     }
 
@@ -443,11 +447,16 @@ fn a_load_into_a_populated_store_does_not_use_the_filter() -> Result<()> {
     let mut store = opened(&dir)?;
     load(&mut store, first_half, true)?;
     let after_first = store.bulk_resolves();
-    assert!(after_first.skipped > 0, "the first load began empty and should have used it");
+    assert!(
+        after_first.skipped > 0,
+        "the first load began empty and should have used it"
+    );
 
     // A term the first load interned, and its id.
     let shared = first_half[0].predicate.as_ref();
-    let id_before = store.lookup_term(shared.into())?.expect("interned by the first load");
+    let id_before = store
+        .lookup_term(shared.into())?
+        .expect("interned by the first load");
 
     let mut storage_dir_store = store;
     storage_dir_store.begin_bulk_load()?;
@@ -465,8 +474,13 @@ fn a_load_into_a_populated_store_does_not_use_the_filter() -> Result<()> {
         "a load into a populated store must look every term up: {after_second:?}"
     );
 
-    let id_after = storage_dir_store.lookup_term(shared.into())?.expect("still there");
-    assert_eq!(id_before, id_after, "the second load must find the first load's id");
+    let id_after = storage_dir_store
+        .lookup_term(shared.into())?
+        .expect("still there");
+    assert_eq!(
+        id_before, id_after,
+        "the second load must find the first load's id"
+    );
 
     // And the whole thing equals a plain load of everything.
     let plain_dir = tempfile::tempdir().expect("temp dir");

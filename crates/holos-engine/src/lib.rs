@@ -740,10 +740,9 @@ fn load_parsed<R: Read + Send>(
     mut each: impl FnMut(oxrdf::Quad) -> Result<bool, EngineError>,
 ) -> Result<usize, EngineError> {
     std::thread::scope(|scope| {
-        let (tx, rx) =
-            std::sync::mpsc::sync_channel::<Result<Vec<oxrdf::Quad>, oxrdfio::RdfParseError>>(
-                PARSE_QUEUE,
-            );
+        let (tx, rx) = std::sync::mpsc::sync_channel::<
+            Result<Vec<oxrdf::Quad>, oxrdfio::RdfParseError>,
+        >(PARSE_QUEUE);
         scope.spawn(move || {
             let mut batch = Vec::with_capacity(PARSE_BATCH);
             for quad in parser.for_reader(reader) {
@@ -751,7 +750,8 @@ fn load_parsed<R: Read + Send>(
                     Ok(quad) => {
                         batch.push(quad);
                         if batch.len() == PARSE_BATCH {
-                            let full = std::mem::replace(&mut batch, Vec::with_capacity(PARSE_BATCH));
+                            let full =
+                                std::mem::replace(&mut batch, Vec::with_capacity(PARSE_BATCH));
                             if tx.send(Ok(full)).is_err() {
                                 return;
                             }

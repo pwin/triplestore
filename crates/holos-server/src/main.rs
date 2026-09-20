@@ -262,8 +262,9 @@ impl State {
             let graph = holos_store::GraphFilter::Default;
             match holos_stats::Statistics::load_cached(engine.store(), graph) {
                 Ok(Some(stats)) => Ok((stats, false)),
-                Ok(None) => holos_stats::Statistics::build(engine.store(), graph)
-                    .map(|stats| (stats, true)),
+                Ok(None) => {
+                    holos_stats::Statistics::build(engine.store(), graph).map(|stats| (stats, true))
+                }
                 Err(e) => Err(e),
             }
         };
@@ -397,7 +398,11 @@ surprise, check that this is the directory the load wrote to."
         let built = state.refresh_statistics();
         eprintln!(
             "  reorder  statistics {} in {:.2}s",
-            if built { "built and kept with the store" } else { "loaded from the store" },
+            if built {
+                "built and kept with the store"
+            } else {
+                "loaded from the store"
+            },
             started.elapsed().as_secs_f64()
         );
     }

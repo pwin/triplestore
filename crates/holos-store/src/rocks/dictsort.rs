@@ -128,9 +128,12 @@ impl DictRuns {
         }
         self.buffer.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let path = self
-            .dir
-            .join(format!("{}.{}.{}.dictrun", self.family, self.window, self.paths.len()));
+        let path = self.dir.join(format!(
+            "{}.{}.{}.dictrun",
+            self.family,
+            self.window,
+            self.paths.len()
+        ));
         let mut out = BufWriter::new(File::create(&path).map_err(StorageError::Io)?);
         for (key, value) in &self.buffer {
             write_row(&mut out, key, value)?;

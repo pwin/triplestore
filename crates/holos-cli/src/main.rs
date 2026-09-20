@@ -993,8 +993,7 @@ impl Options {
             Some(0) => {}
             Some(rows) => options = options.with_blocking_budget(rows),
             None => {
-                options =
-                    options.with_blocking_budget(holos_engine::admit::DEFAULT_BLOCKING_ROWS);
+                options = options.with_blocking_budget(holos_engine::admit::DEFAULT_BLOCKING_ROWS);
             }
         }
         if let Some(seconds) = self.timeout {

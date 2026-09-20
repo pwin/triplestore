@@ -206,7 +206,9 @@ mod tests {
     #[test]
     #[ignore = "measurement harness, not an assertion"]
     fn measure() {
-        for n in [1u64, 2, 5, 10, 50, 100, 500, 1000, 10_000, 100_000, 1_000_000, 5_000_000] {
+        for n in [
+            1u64, 2, 5, 10, 50, 100, 500, 1000, 10_000, 100_000, 1_000_000, 5_000_000,
+        ] {
             let mut sketch = DistinctCount::default();
             for i in 0..n {
                 sketch.add(id(i));

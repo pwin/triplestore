@@ -46,14 +46,22 @@ fn an_insert_and_a_delete_each_move_it_and_a_no_op_does_not() -> Result<()> {
 
         // The same quad again is not a change. `insert` says so and the generation agrees.
         assert!(!store.insert(q.as_ref())?);
-        assert_eq!(store.generation(), g1, "{name}: re-inserting a present quad is not a change");
+        assert_eq!(
+            store.generation(),
+            g1,
+            "{name}: re-inserting a present quad is not a change"
+        );
 
         assert!(store.remove(q.as_ref())?);
         let g2 = store.generation();
         assert!(g2 > g1, "{name}: a delete must move the generation");
 
         assert!(!store.remove(q.as_ref())?);
-        assert_eq!(store.generation(), g2, "{name}: removing an absent quad is not a change");
+        assert_eq!(
+            store.generation(),
+            g2,
+            "{name}: removing an absent quad is not a change"
+        );
     }
     Ok(())
 }
@@ -69,8 +77,16 @@ fn a_swap_that_keeps_the_count_still_moves_it() -> Result<()> {
         store.remove(quad("a", "p", "b").as_ref())?;
         store.insert(quad("a", "p", "c").as_ref())?;
 
-        assert_eq!(store.len(), count, "{name}: the count is unchanged by construction");
-        assert_ne!(store.generation(), g, "{name}: the data changed and the generation must say so");
+        assert_eq!(
+            store.len(),
+            count,
+            "{name}: the count is unchanged by construction"
+        );
+        assert_ne!(
+            store.generation(),
+            g,
+            "{name}: the data changed and the generation must say so"
+        );
     }
     Ok(())
 }
@@ -98,7 +114,10 @@ fn a_rolled_back_scope_puts_it_back_and_a_committed_one_does_not() -> Result<()>
         store.begin()?;
         store.insert(quad("x", "p", "y").as_ref())?;
         store.commit()?;
-        assert!(store.generation() > before, "{name}: a committed scope is a change");
+        assert!(
+            store.generation() > before,
+            "{name}: a committed scope is a change"
+        );
     }
     Ok(())
 }
@@ -113,9 +132,14 @@ fn a_bulk_load_moves_it() -> Result<()> {
         store.insert(quad("a", "p", "b").as_ref())?;
         store.insert(quad("c", "p", "d").as_ref())?;
         store.end_bulk_load()?;
-        assert!(store.generation() > g0, "{name}: a bulk load must move the generation");
+        assert!(
+            store.generation() > g0,
+            "{name}: a bulk load must move the generation"
+        );
         assert_eq!(
-            store.quads_for_pattern(None, None, None, GraphFilter::Default).count(),
+            store
+                .quads_for_pattern(None, None, None, GraphFilter::Default)
+                .count(),
             2
         );
     }
@@ -153,7 +177,11 @@ fn the_snapshot_slot_is_kept_and_is_not_a_change() -> Result<()> {
         assert_eq!(store.load_statistics()?, None, "{name}: nothing saved yet");
         let g = store.generation();
         store.save_statistics(b"anything")?;
-        assert_eq!(store.generation(), g, "{name}: saving a snapshot is not a write to the quads");
+        assert_eq!(
+            store.generation(),
+            g,
+            "{name}: saving a snapshot is not a write to the quads"
+        );
         assert_eq!(store.load_statistics()?.as_deref(), Some(&b"anything"[..]));
 
         store.insert(quad("a", "p", "b").as_ref())?;

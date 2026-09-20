@@ -123,7 +123,6 @@ impl Seen {
             self.words[(bit / 64) as usize] & (1 << (bit % 64)) != 0
         })
     }
-
 }
 
 impl std::fmt::Debug for Seen {
@@ -146,12 +145,17 @@ mod tests {
     #[test]
     fn everything_inserted_is_reported_present() {
         let mut seen = Seen::with_bytes(1 << 20);
-        let keys: Vec<Vec<u8>> = (0..100_000u32).map(|i| format!("term-{i}").into_bytes()).collect();
+        let keys: Vec<Vec<u8>> = (0..100_000u32)
+            .map(|i| format!("term-{i}").into_bytes())
+            .collect();
         for key in &keys {
             seen.insert(key);
         }
         for key in &keys {
-            assert!(seen.may_contain(key), "{key:?} was inserted and must be found");
+            assert!(
+                seen.may_contain(key),
+                "{key:?} was inserted and must be found"
+            );
         }
         assert_eq!(seen.inserted, 100_000);
     }
@@ -204,7 +208,15 @@ mod tests {
     /// A request is honoured to the word, and a tiny one still yields a working filter.
     #[test]
     fn sizes_are_honoured_and_never_zero() {
-        for (bytes, words) in [(0usize, 1usize), (1, 1), (7, 1), (8, 1), (9, 1), (100, 12), (250_000, 31_250)] {
+        for (bytes, words) in [
+            (0usize, 1usize),
+            (1, 1),
+            (7, 1),
+            (8, 1),
+            (9, 1),
+            (100, 12),
+            (250_000, 31_250),
+        ] {
             let seen = Seen::with_bytes(bytes);
             assert_eq!(seen.words.len(), words, "{bytes} bytes");
             assert_eq!(seen.bits, words as u64 * 64);

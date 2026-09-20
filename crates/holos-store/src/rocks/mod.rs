@@ -344,7 +344,11 @@ impl Cached {
     const NOT_USED: u32 = u32::MAX;
 
     fn new(id: TermId, at: u32) -> Self {
-        Self { id, first: at, last: at }
+        Self {
+            id,
+            first: at,
+            last: at,
+        }
     }
 
     fn touch(&mut self, at: u32) {
@@ -709,7 +713,9 @@ impl RocksStorage {
         let quads = std::mem::take(&mut state.quads);
         // The buffer's capacity went with it; the next one grows back to the limit as it
         // fills, which costs a few reallocations per spill and nothing worth reserving for.
-        let worker = state.spilled.get_or_insert_with(|| SpillWorker::start(&dir));
+        let worker = state
+            .spilled
+            .get_or_insert_with(|| SpillWorker::start(&dir));
         if worker.send(quads).is_err() {
             // The worker stops early only on a write that failed. Joining it yields that
             // error, which is the one worth reporting; a worker that somehow stopped clean
@@ -859,7 +865,9 @@ impl RocksStorage {
             handle,
         } = state.dict_flush.take().expect("checked above");
         let files = handle.join().map_err(|_| {
-            StorageError::Io(std::io::Error::other("the dictionary flush thread panicked"))
+            StorageError::Io(std::io::Error::other(
+                "the dictionary flush thread panicked",
+            ))
         })??;
         for (family, path) in files {
             self.ingest_dict_sst(family, path)?;
@@ -918,7 +926,11 @@ impl RocksStorage {
                 "  flush {sequence}: {} terms; reads {hits} hits + {misses} misses at {:.1} us \
 [<10us {} | <50 {} | <200 {} | 200+ {}]; {} kept hot",
                 state.seen.as_ref().map_or(0, seen::Seen::inserted),
-                if reads == 0 { 0.0 } else { nanos as f64 / 1e3 / reads as f64 },
+                if reads == 0 {
+                    0.0
+                } else {
+                    nanos as f64 / 1e3 / reads as f64
+                },
                 b[0],
                 b[1],
                 b[2],
@@ -2242,7 +2254,11 @@ fn write_dict_sst(
     let path = dir.join(format!("{family}.{sequence}.dict.sst"));
     // The family's own options, so the file is written with the comparator and
     // compression the column family will read it back with.
-    let opts = if family == STR2ID { str2id_opts() } else { value_opts() };
+    let opts = if family == STR2ID {
+        str2id_opts()
+    } else {
+        value_opts()
+    };
     let mut writer = rocksdb::SstFileWriter::create(&opts);
     writer.open(&path).map_err(rocks_err)?;
 
