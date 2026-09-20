@@ -28,16 +28,14 @@ fn quad(n: usize) -> Quad {
     }
 }
 
-/// A directory that does not exist yet, inside one that does.
-fn destination(label: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "holos-checkpoint-{label}-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
-    // Deliberately not created: RocksDB requires the destination to be absent.
-    dir
+/// A directory that does not exist yet, inside one that does — and that goes away with it.
+///
+/// Deliberately not created: RocksDB requires the destination to be absent. The parent is
+/// a `tempfile` directory so that everything written under it is removed when the test
+/// ends; the first version of this named directories straight under the system temp
+/// directory and left two thousand of them behind over a sprint's worth of test runs.
+fn destination(scratch: &tempfile::TempDir, label: &str) -> std::path::PathBuf {
+    scratch.path().join(label)
 }
 
 fn store_at(path: &std::path::Path) -> Store {
@@ -46,8 +44,9 @@ fn store_at(path: &std::path::Path) -> Store {
 
 #[test]
 fn a_checkpoint_of_an_open_store_holds_everything_written() {
-    let live = destination("live");
-    let snapshot = destination("snap");
+    let scratch = tempfile::tempdir().expect("temp dir");
+    let live = destination(&scratch, "live");
+    let snapshot = destination(&scratch, "snap");
 
     let mut store = store_at(&live);
     for n in 0..100 {
@@ -78,10 +77,11 @@ fn a_checkpoint_of_an_open_store_holds_everything_written() {
 
 #[test]
 fn a_checkpoint_is_not_disturbed_by_later_writes() {
+    let scratch = tempfile::tempdir().expect("temp dir");
     // The point of a *consistent* snapshot: what happens after it is taken cannot leak into
     // it, even though the two share their files through hard links.
-    let live = destination("live2");
-    let snapshot = destination("snap2");
+    let live = destination(&scratch, "live2");
+    let snapshot = destination(&scratch, "snap2");
 
     let mut store = store_at(&live);
     for n in 0..50 {
@@ -104,10 +104,11 @@ fn a_checkpoint_is_not_disturbed_by_later_writes() {
 
 #[test]
 fn a_destination_that_already_exists_is_refused() {
+    let scratch = tempfile::tempdir().expect("temp dir");
     // RocksDB will not write into an existing directory, which is what makes timestamped
     // destinations the right pattern rather than a fixed path.
-    let live = destination("live3");
-    let snapshot = destination("snap3");
+    let live = destination(&scratch, "live3");
+    let snapshot = destination(&scratch, "snap3");
     std::fs::create_dir_all(&snapshot).expect("creating the destination");
 
     let mut store = store_at(&live);
@@ -120,11 +121,12 @@ fn a_destination_that_already_exists_is_refused() {
 
 #[test]
 fn a_checkpoint_during_a_bulk_load_is_refused() {
+    let scratch = tempfile::tempdir().expect("temp dir");
     // Bulk-load writes are buffered in this process rather than in RocksDB, so a checkpoint
     // taken now would be internally consistent and missing data — which is worse than a
     // failure, because it looks like a good backup.
-    let live = destination("live4");
-    let snapshot = destination("snap4");
+    let live = destination(&scratch, "live4");
+    let snapshot = destination(&scratch, "snap4");
 
     let mut store = store_at(&live);
     store.begin_bulk_load().expect("begin a bulk load");
@@ -143,11 +145,12 @@ fn a_checkpoint_during_a_bulk_load_is_refused() {
 
 #[test]
 fn an_in_memory_store_says_it_cannot() {
+    let scratch = tempfile::tempdir().expect("temp dir");
     // Not a silent no-op and not a copy of nothing: a backend that cannot produce a
     // consistent snapshot has to say so, or a backup script will believe it succeeded.
     let store = Store::new();
     let error = store
-        .checkpoint(&destination("mem"))
+        .checkpoint(&destination(&scratch, "mem"))
         .expect_err("an in-memory store has no files to snapshot");
     assert!(
         matches!(error, StorageError::Unsupported(_)),

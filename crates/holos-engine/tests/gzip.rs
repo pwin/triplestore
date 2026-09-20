@@ -19,17 +19,17 @@ fn write_gz(dir: &std::path::Path, name: &str, contents: &[u8]) -> std::path::Pa
     path
 }
 
-fn temp_dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("holos-gzip-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("mkdir");
-    dir
+/// A directory for one test's files, removed when the test ends. Named directories under
+/// the system temp directory were left behind, a thousand of them over a sprint.
+fn temp_dir(_tag: &str) -> tempfile::TempDir {
+    tempfile::tempdir().expect("temp dir")
 }
 
 #[test]
 fn a_gzipped_ntriples_file_loads() {
     let dir = temp_dir("nt");
     let path = write_gz(
-        &dir,
+        dir.path(),
         "data.nt.gz",
         b"<http://e/a> <http://e/p> <http://e/o> .\n<http://e/b> <http://e/p> <http://e/o> .\n",
     );
@@ -49,7 +49,7 @@ fn a_gzipped_nquads_file_keeps_its_graphs() {
     // would happen if the format were inferred as N-Triples from the `.gz` extension.
     let dir = temp_dir("nq");
     let path = write_gz(
-        &dir,
+        dir.path(),
         "data.nq.gz",
         b"<http://e/a> <http://e/p> <http://e/o> <http://e/g1> .\n\
           <http://e/b> <http://e/p> <http://e/o> <http://e/g2> .\n",
@@ -74,7 +74,7 @@ fn concatenated_members_all_load() {
     // decoder reads the first and stops, reporting success — so this test is the one that
     // would catch a regression to `GzDecoder`.
     let dir = temp_dir("multi");
-    let path = dir.join("multi.nt.gz");
+    let path = dir.path().join("multi.nt.gz");
     let mut bytes = Vec::new();
     for i in 0..5 {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -99,9 +99,9 @@ fn a_compressed_and_a_plain_file_give_the_same_store() {
 <http://e/b> <http://e/q> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .
 ";
 
-    let plain = dir.join("plain.nt");
+    let plain = dir.path().join("plain.nt");
     std::fs::write(&plain, triples).expect("write");
-    let compressed = write_gz(&dir, "same.nt.gz", triples);
+    let compressed = write_gz(dir.path(), "same.nt.gz", triples);
 
     let load = |path: &std::path::Path| {
         let (format, reader) = source::open(path).expect("open");
@@ -123,7 +123,7 @@ fn a_compressed_and_a_plain_file_give_the_same_store() {
 #[test]
 fn an_unknown_extension_is_refused_with_a_useful_message() {
     let dir = temp_dir("unknown");
-    let path = write_gz(&dir, "mystery.gz", b"nothing useful");
+    let path = write_gz(dir.path(), "mystery.gz", b"nothing useful");
     // `expect_err` would need Debug on the Ok side, and a boxed reader has none.
     let message = match source::open(&path) {
         Err(e) => e.to_string(),
@@ -139,7 +139,7 @@ fn an_unknown_extension_is_refused_with_a_useful_message() {
 fn a_truncated_gzip_file_errors_rather_than_loading_nothing() {
     // Silently loading zero quads from a corrupt file would look like an empty dataset.
     let dir = temp_dir("truncated");
-    let path = dir.join("bad.nt.gz");
+    let path = dir.path().join("bad.nt.gz");
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder
         .write_all(b"<http://e/a> <http://e/p> <http://e/o> .\n")
