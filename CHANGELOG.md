@@ -5,10 +5,10 @@ them are in `BENCHMARKS.md` and are runnable.
 
 ## 0.10.0 — unreleased
 
-The release that made a bulk load **3.5× faster**: the 653.8-million-triple file that took
-3 h 43 m at 0.9.1 takes **64 minutes**, producing a byte-for-byte identical store. Four
-changes, each measured on that file, in the order they were found — because each one's
-measurement is what found the next.
+The release that made a bulk load **4× faster**: the 653.8-million-triple file that took
+3 h 43 m at 0.9.1 takes **56 minutes**, producing a store with the same counts and the
+same answers. Six changes, each measured on that file, in the order they were found —
+because each one's measurement is what found the next.
 
 | | time | quads/s | peak memory |
 |---|---|---|---|
@@ -16,7 +16,9 @@ measurement is what found the next.
 | + the seen filter and a hot set | 5,241 s | 124,752 | 3,915 MiB |
 | + parsing on its own thread | 4,479 s | 145,990 | 4,012 MiB |
 | + hot set by spread, not hits | 4,417 s | 148,011 | — |
-| + a whole bloom filter on `str2id` | **3,870 s** | **168,939** | 4,059 MiB |
+| + a whole bloom filter on `str2id` | 3,870 s | 168,939 | 4,059 MiB |
+| + index runs sorted and written on a thread | 3,597 s | 181,793 | 4,208 MiB |
+| + dictionary windows written on a thread | **3,360 s** | **194,574** | 3,855 MiB |
 
 ### A bulk load stops asking the disk whether a term is new
 
@@ -108,6 +110,56 @@ What remains of the read cost is one block read per hit, which is the floor on t
 without holding data blocks in memory. Below that means batching hits into a `MultiGet`, or a
 dictionary that lives elsewhere than RocksDB. The loading thread is at 100% of a core with
 six idle, and the parse thread at 40% of another; the next factor is more threads.
+
+### Two more threads: the index runs, and the dictionary windows
+
+The loading thread was stopping to do two things that touch neither the dictionary nor the
+id sequence. Every four million quads it sorted the buffer nine ways and wrote nine runs;
+every 256 MB of dictionary rows it merged the window's runs and wrote a compressed, filtered
+SST per family. Both now happen on their own threads while the loading thread goes on
+interning. Ids are still issued in file order by one thread, and the backend-parity test
+still holds.
+
+**The index runs** go to a worker over a channel of capacity one: the loading thread hands
+the buffer over and fills the next, and a loading thread that outruns the sorter blocks
+rather than stacking buffers up. One buffer more in memory, at most. 3,870 → **3,597 s**,
+all of it off the streaming phase, 2,950 → 2,700 s, the process at 172% CPU where it had
+been 140%. The first measurement of this
+change came back at 3,878 s — no gain — and a minute-by-minute curve showed why: the run led
+by 6–9% except during the twenty minutes when builds and small-scale benchmarks were
+running on the same disk. Measured again with nothing else running.
+
+**The dictionary windows** are the more delicate one, because of what a flush is for. A
+term may only be forgotten once both of its rows are readable on disk, and a term looked up
+while its rows are still being written must be found in the cache, or it is allocated a
+second id. So the merge and the write go to a thread, and the ingest and the trim stay on
+the loading thread and happen when the files are in — polled at one atomic load per write,
+forced before the next flush. The first version trimmed everything at that point, including
+the terms interned since the flush, whose rows were in the *next* window and nowhere on
+disk; the repeated-flush test showed it as 32 disk misses where there had been 0, each one
+a term about to be allocated twice. A term is told apart by its id now — ids are issued
+densely per tag, so one at or past the counter as it stood at the flush is one the flush
+did not see — which is exact rather than timing-dependent. 3,597 → **3,360 s**, streaming
+2,700 → 2,462 s. Memory during streaming is flat across all three runs, 3.4–3.5 GB
+sampled: the window's rows are already on disk as a run when it is handed over, so the
+thread holds readers, not rows, and the cache holds one window plus a few seconds of the
+next. The peaks in the table are from the final merge, where committed memory cycles
+between 2.9 and 4.2 GB each minute and a once-a-minute sampler catches a different point
+of the cycle each run.
+
+Dictionary reads cost 707 s and then 729 s against 677 — the threads' writes contend a
+little with the loading thread's random reads — and 361,000 fewer of them hit the disk,
+because the later trim keeps terms a little longer. The final merge, which neither change
+touches, took 14 minutes in both runs against 12 in the reference; it is disk-bound, the
+reference ran overnight and these ran with the machine in use, and that is noted rather
+than explained. Both stores match the previous one on quad and term counts and on every
+subject checked.
+
+What is left on the loading thread is parsing's hand-off, interning, and the dictionary
+reads; the process runs at about 200% CPU on eight cores. Interning is one thread by
+design — it is what keeps ids in file order — so the next factor is not another thread
+here but the read cost itself, or the final merge, which runs its nine orders one after
+another and could run three at once.
 
 ## 0.9.1 — 2026-09-19
 
