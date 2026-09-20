@@ -49,6 +49,7 @@ $listenAddr = if ($Listen) { $Listen } else { Cfg HOLOS_LISTEN '127.0.0.1:7878' 
 
 $a = @("--listen `"$listenAddr`"", "--threads $(Cfg HOLOS_THREADS '8')", "--store `"$storeDir`"")
 if ((Cfg HOLOS_UI 'on') -eq 'off')               { $a += '--no-ui' }
+if (Cfg HOLOS_UI_TILES)                          { $a += "--ui-tiles `"$(Cfg HOLOS_UI_TILES)`"" }
 if ((Cfg HOLOS_TRUST_FORWARDED 'off') -eq 'on')  { $a += '--trust-forwarded-identity' }
 if ((Cfg HOLOS_DENY_ALL 'off') -eq 'on')         { $a += '--deny-all' }
 if ((Cfg HOLOS_FAIL_CLOSED 'off') -eq 'on')      { $a += '--fail-closed' }

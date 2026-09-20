@@ -176,8 +176,11 @@ the instance down; set the memory ceiling to a third of what you can spare, at m
 ([OPERATIONS.md](../OPERATIONS.md#configuration) says why). `Caddyfile` and `nginx.conf` are
 the two front doors, with the header handling already in them.
 
-For a machine-to-machine endpoint add `HOLOS_UI=off`; the process then needs no outbound
-network access at all.
+The console can only talk to this server — its security policy names this origin, the
+script CDN and the basemap's tile host, and nothing else. The tiles are the one disclosure
+left: which ones a map fetches says where the user is looking. `HOLOS_UI_TILES=none` draws
+geometries over a blank background instead. For a machine-to-machine endpoint add
+`HOLOS_UI=off`; the process then needs no outbound network access at all.
 
 ## 7. Locked down
 

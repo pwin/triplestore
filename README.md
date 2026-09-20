@@ -31,7 +31,7 @@ The full argument, the layer design, the roadmap and the risks are in **[DESIGN.
 | **L4** SHACL | ◐ Two validators behind one trait: [SHACL_Engine](https://github.com/pwin/SHACL_Engine) adapted for coverage, and a native evaluator for **incremental revalidation at 161× a full pass** |
 | **GeoSPARQL** | ✅ 45 functions — 43 via `spargeo`, plus `geof:buffer` and `geof:boundary` implemented here — reading **CRS84, EPSG:4326, EPSG:27700 and EPSG:3857**, so British National Grid data queries against GPS data. Composes with policy and the term encoding — see [DESIGN.md §17](DESIGN.md#17-geospatial) |
 | **L5** Holon layer | ◐ Walking skeleton: scene, boundary enforced on the write path, event log with per-triple RDF 1.2 provenance, **165 validated commits/s at 41× a full pass**, boundary rules fired per tick, each tick one atomic commit. Owes isolation, maintained projections, time travel |
-| **L6** Protocol server | ◐ SPARQL 1.2 Protocol over HTTP (**34/34** W3C protocol tests) + **Graph Store Protocol** (**13/13**) + YASGUI console, **`POST /update`**, and **Python bindings** on PyPI as [`holosdb`](https://pypi.org/project/holosdb/) — five abi3 wheels plus an sdist, `pip install holosdb`. Owes WASM |
+| **L6** Protocol server | ◐ SPARQL 1.2 Protocol over HTTP (**34/34** W3C protocol tests) + **Graph Store Protocol** (**13/13**) + a SPARQL console (MatGUI), **`POST /update`**, and **Python bindings** on PyPI as [`holosdb`](https://pypi.org/project/holosdb/) — five abi3 wheels plus an sdist, `pip install holosdb`. Owes WASM |
 
 866 unit and property tests pass (`cargo test --workspace`), plus the W3C suites below.
 
@@ -228,7 +228,7 @@ extra, and how to cut a release.
 holos-server --data examples/hr.trig --listen 127.0.0.1:7878
 ```
 
-Then open <http://127.0.0.1:7878/> for a YASGUI console, or query the endpoint directly:
+Then open <http://127.0.0.1:7878/> for the console, or query the endpoint directly:
 
 ```sh
 curl -H "Accept: text/csv" --data-urlencode \
@@ -379,7 +379,7 @@ formally; `policy_survives_every_operator_that_defeats_query_rewriting` in
 | [crates/holos-shacl](crates/holos-shacl) | Store bridge, incremental planner, native evaluator, `Validate` trait |
 | [crates/holos-shacl-engine](crates/holos-shacl-engine) | [SHACL_Engine](https://github.com/pwin/SHACL_Engine), adapted — see its [PROVENANCE.md](crates/holos-shacl-engine/PROVENANCE.md) |
 | [crates/holos-holon](crates/holos-holon) | Holons: scene, boundary, event log, the tick |
-| [crates/holos-server](crates/holos-server) | SPARQL 1.2 Protocol over HTTP, YASGUI console |
+| [crates/holos-server](crates/holos-server) | SPARQL 1.2 Protocol over HTTP, the console |
 | [crates/holos-cli](crates/holos-cli) | The `holos` binary |
 | [crates/holos-conformance](crates/holos-conformance) | W3C test-suite harness, with the oracle differential |
 
@@ -393,5 +393,5 @@ Reuses Oxigraph crates (`oxrdf`, `oxttl`, `oxrdfio`, `spargebra`, `spareval`, `s
 [crates/holos-shacl-engine/PROVENANCE.md](crates/holos-shacl-engine/PROVENANCE.md) for the
 commit it was taken from and every change made to it.
 
-YASGUI is loaded from a CDN by the console page and is not committed to this tree; it carries its own
-licence.
+The console (MatGUI, a fork of YASGUI) is loaded from a CDN by the console page and is not committed
+to this tree; it carries its own licence, and [THIRD-PARTY.md](THIRD-PARTY.md) lists what it bundles.

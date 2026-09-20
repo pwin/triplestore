@@ -1,367 +1,257 @@
-//! The YASGUI console.
+//! The SPARQL console.
 //!
-//! Served at `/`, pointed at this server's own `/query` endpoint. YASGUI itself is loaded
-//! from a CDN rather than adapted: it is a large JavaScript bundle with its own licence
-//! and release cadence, and checking a minified copy into an RDF engine's source tree
-//! makes that tree harder to audit, not easier.
+//! Served at `/`, pointed at this server's own `/query` endpoint. The console is
+//! [MatGUI](https://github.com/Matdata-eu/MatGUI), the maintained MIT fork of YASGUI, loaded
+//! from a CDN rather than adapted: it is a large JavaScript bundle with its own licence and
+//! release cadence, and checking a minified copy into an RDF engine's source tree makes that
+//! tree harder to audit, not easier.
 //!
-//! The consequence is worth stating rather than hiding: **the console needs network access
-//! to a CDN.** The SPARQL endpoints do not — they are the actual interface, and they work
-//! offline. `--no-ui` turns the console off entirely for a deployment that should not be
-//! reaching out to anything.
+//! # What the console may talk to, and how that is enforced
 //!
-//! # The map plugin
+//! A console is the one part of this server that runs on someone else's machine, and a
+//! query console handles the two things an operator least wants leaving the building: the
+//! queries and their answers. So the page is built to make leaving impossible rather than
+//! merely unintended, and the guarantee is the browser's, not the bundle's:
 //!
-//! YASR ships four result plugins — table, response, boolean, error. The map and chart
-//! views on Triply\'s hosted YASGUI are not among them: they are not MIT licensed and
-//! cannot be included programmatically, and neither the upstream repository nor the
-//! Zazuko fork contains them.
+//! * **A Content-Security-Policy** ([`csp`]) names every origin the page may reach. Scripts
+//!   come from this server and the CDN and nowhere else; `connect-src 'self'` means the
+//!   console can query the server that served it and *no other endpoint* — typing another
+//!   URL into the endpoint box gets a refused request, not a leak. Images are this origin,
+//!   the CDN, and the one tile host the operator chose. Nothing else is listed, so
+//!   nothing else is reachable, whatever any plugin might try.
+//! * **Pinned versions with subresource integrity.** Each CDN file is named by exact
+//!   version and carries the SHA-384 of the bytes that were reviewed; the browser refuses
+//!   to run a file that differs. A CDN that served something else would break the console
+//!   visibly rather than run unreviewed code against the endpoint.
+//! * **No referrer.** The CDN and the tile host learn nothing about the page that asked,
+//!   and a link a user follows out of a result carries nothing back to its target.
+//! * **No inline script.** The page's configuration is served as `/ui/console.js` from this
+//!   origin, so the policy needs no nonce, no hash, and no `'unsafe-inline'` for scripts.
 //!
-//! So this adds one. [`MAP_PLUGIN`] is a YASR plugin written against the documented
-//! `Yasr.registerPlugin` interface, drawing `geo:wktLiteral` and `geo:geoJSONLiteral`
-//! bindings on a Leaflet map. It shares nothing with Triply\'s implementation beyond the
-//! plugin interface itself.
+//! What the policy cannot close is the basemap: a map draws tiles, and which tiles it asks
+//! for says where the user is looking. The default tile host is OpenStreetMap, as it always
+//! was; `--ui-tiles none` draws geometries over a blank background and the page then reaches
+//! the CDN and this server, nothing more. `--no-ui` remains the airtight option — the
+//! endpoints need no network at all.
 //!
-//! Two details that are easy to get wrong and produce a map that looks plausible:
+//! # What the bundle brings, and what it does not
 //!
-//! * **Coordinate order.** WKT is `(x y)`, and under CRS84 that is `(longitude latitude)`.
-//!   Leaflet takes `[latitude, longitude]`. Every pair has to be reversed, and a map with
-//!   them the wrong way round still renders — somewhere in the sea off Somalia, usually.
-//! * **The CRS prefix.** A GeoSPARQL WKT literal may begin with a CRS URI in angle
-//!   brackets. It has to be stripped before parsing, and if it names anything other than
-//!   CRS84 the coordinates are not lon/lat degrees and the geometry is skipped rather than
-//!   drawn in the wrong place.
+//! MatGUI ships four result views beyond YASGUI's: a table with virtual scrolling, a map,
+//! a node-edge graph for `CONSTRUCT` and `DESCRIBE`, and the raw response. The map plugin
+//! (MIT) replaced the one this module used to carry: it reads WKT, GeoJSON, GML and GeoHash,
+//! gets the EPSG:4326 axis order right, reprojects other SRIDs it knows, and turns a drawn
+//! rectangle into a `geof:sfWithin` filter. An SRID it does not know it would look up at
+//! `epsg.io`; the policy blocks that, and the geometry is skipped with a console warning.
+//! The graph and table plugins are Apache-2.0 and are loaded, not copied — the same footing
+//! as the Apache-2.0 crates in `THIRD-PARTY.md`.
+//!
+//! One gap is shared by every YASGUI fork, measured against this server: a `SELECT` binding
+//! of an RDF 1.2 triple term (`"type": "triple"` in the JSON results) and a `CONSTRUCT`
+//! that serialises `<<( … )>>` both land on the error tab. The protocol endpoints answer
+//! them correctly; the console's parsers predate the syntax.
 
-/// Media types of the two geometry serialisations the map plugin understands.
-const WKT_DATATYPE: &str = "http://www.opengis.net/ont/geosparql#wktLiteral";
-const GEOJSON_DATATYPE: &str = "http://www.opengis.net/ont/geosparql#geoJSONLiteral";
+/// The console bundle, pinned. Bumping the version means recomputing the hashes: fetch the
+/// two files, `openssl dgst -sha384 -binary | openssl base64 -A`, and review what changed.
+const YASGUI_JS: (&str, &str) = (
+    "https://unpkg.com/@matdata/yasgui@6.1.0/build/yasgui.min.js",
+    "sha384-YA1K8IKkhKUAAlSv/YBH3p4JnBrhVum6nNVI9AEil/+aTH2u9fWtzEfXz1iwqUiX",
+);
+const YASGUI_CSS: (&str, &str) = (
+    "https://unpkg.com/@matdata/yasgui@6.1.0/build/yasgui.min.css",
+    "sha384-4yQyR1GtYcpKPLzfFQTtQigHr7DJOc/9s/QLzlD3c5YqsB5JQGY8fxY9KJDIiV9R",
+);
+/// Leaflet, which the map plugin expects on the page as `window.L`.
+const LEAFLET_JS: (&str, &str) = (
+    "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
+    "sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH",
+);
+const LEAFLET_CSS: (&str, &str) = (
+    "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css",
+    "sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H",
+);
 
-/// A YASR result plugin that draws GeoSPARQL geometries on a Leaflet map.
+/// The origin every pinned file above comes from; the policy names it once.
+const CDN: &str = "https://unpkg.com";
+
+/// The default basemap: the tile template Leaflet's own examples use.
+pub const DEFAULT_TILES: &str = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+
+/// A one-pixel transparent GIF, the "basemap" behind `--ui-tiles none`. The map plugin
+/// needs a basemap to draw at all, so the sealed console gets one that never leaves the
+/// page.
+const BLANK_TILE: &str =
+    "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+
+/// Where the page's script is served from. Same origin, so the policy allows it as
+/// `'self'` and the page carries no inline script at all.
+pub const SCRIPT_PATH: &str = "/ui/console.js";
+
+/// The console page.
 ///
-/// Written against the plugin interface YASR documents: a class taking the `yasr` instance,
-/// with `priority`, `label`, `canHandleResults()`, `draw()` and `getIcon()`. Registered
-/// through `Yasr.registerPlugin`.
-///
-/// Geometry support is the OGC simple-feature set: `POINT`, `LINESTRING`, `POLYGON`,
-/// their `MULTI` forms and `GEOMETRYCOLLECTION`, plus any GeoJSON that Leaflet accepts.
-/// Anything else is counted and reported rather than silently dropped, because a map that
-/// quietly omits rows is worse than one that says it did.
-const MAP_PLUGIN: &str = r#"
-(function () {
-  const WKT_DT = "__WKT_DATATYPE__";
-  const GEOJSON_DT = "__GEOJSON_DATATYPE__";
-  // GeoSPARQL's default CRS. Anything else is not lon/lat degrees, so it is not drawn.
-  const CRS84 = /^<http:\/\/www\.opengis\.net\/def\/crs\/OGC\/1\.3\/CRS84>\s*/;
-  const ANY_CRS = /^<[^>]*>\s*/;
-
-  // --- WKT ---------------------------------------------------------------
-  // A coordinate list: "1 2, 3 4" -> [[1,2],[3,4]]. WKT is (x y) = (lon lat) under CRS84,
-  // and Leaflet wants [lat, lng], so each pair is reversed here and nowhere else.
-  function coords(text) {
-    const out = [];
-    for (const pair of text.split(",")) {
-      const n = pair.trim().split(/\s+/).map(Number);
-      if (n.length < 2 || !isFinite(n[0]) || !isFinite(n[1])) return null;
-      out.push([n[1], n[0]]);
-    }
-    return out.length ? out : null;
-  }
-
-  // Splits "(...), (...)" at depth 1 into its parenthesised groups.
-  function groups(body) {
-    const out = [];
-    let depth = 0, start = -1;
-    for (let i = 0; i < body.length; i++) {
-      const c = body[i];
-      if (c === "(") { if (depth === 0) start = i + 1; depth++; }
-      else if (c === ")") { depth--; if (depth === 0) out.push(body.slice(start, i)); }
-    }
-    return out;
-  }
-
-  function wktToLayers(literal) {
-    let text = literal.trim();
-    if (/^</.test(text)) {
-      if (!CRS84.test(text)) return { layers: [], unsupported: 1 };
-      text = text.replace(ANY_CRS, "");
-    }
-    const m = /^([A-Za-z]+)\s*(?:Z|M|ZM)?\s*\(([\s\S]*)\)\s*$/.exec(text.trim());
-    if (!m) return { layers: [], unsupported: 1 };
-    const kind = m[1].toUpperCase();
-    const body = m[2];
-
-    switch (kind) {
-      case "POINT": {
-        const c = coords(body);
-        return c ? { layers: [L.circleMarker(c[0], { radius: 6 })], unsupported: 0 }
-                 : { layers: [], unsupported: 1 };
-      }
-      case "LINESTRING": {
-        const c = coords(body);
-        return c ? { layers: [L.polyline(c)], unsupported: 0 }
-                 : { layers: [], unsupported: 1 };
-      }
-      case "POLYGON": {
-        // First ring is the exterior, the rest are holes — which is exactly the array
-        // shape Leaflet expects, so they pass through together.
-        const rings = groups(body).map(coords);
-        return rings.every(Boolean) && rings.length
-          ? { layers: [L.polygon(rings)], unsupported: 0 }
-          : { layers: [], unsupported: 1 };
-      }
-      case "MULTIPOINT": {
-        // Both "((1 2),(3 4))" and the bare "(1 2, 3 4)" spelling are legal.
-        const inner = groups(body);
-        const pts = inner.length ? inner.map(coords).flat() : coords(body);
-        return pts && pts.every(Boolean)
-          ? { layers: pts.map((c) => L.circleMarker(c, { radius: 6 })), unsupported: 0 }
-          : { layers: [], unsupported: 1 };
-      }
-      case "MULTILINESTRING": {
-        const lines = groups(body).map(coords);
-        return lines.every(Boolean) && lines.length
-          ? { layers: [L.polyline(lines)], unsupported: 0 }
-          : { layers: [], unsupported: 1 };
-      }
-      case "MULTIPOLYGON": {
-        const polys = groups(body).map((p) => groups(p).map(coords));
-        const ok = polys.length && polys.every((r) => r.length && r.every(Boolean));
-        return ok ? { layers: [L.polygon(polys)], unsupported: 0 }
-                  : { layers: [], unsupported: 1 };
-      }
-      case "GEOMETRYCOLLECTION": {
-        // Members are themselves WKT, so recurse and merge the counts.
-        let layers = [], unsupported = 0, depth = 0, start = 0;
-        for (let i = 0; i <= body.length; i++) {
-          const c = body[i];
-          if (c === "(") depth++;
-          else if (c === ")") depth--;
-          if ((c === "," && depth === 0) || i === body.length) {
-            const r = wktToLayers(body.slice(start, i));
-            layers = layers.concat(r.layers);
-            unsupported += r.unsupported;
-            start = i + 1;
-          }
-        }
-        return { layers: layers, unsupported: unsupported };
-      }
-      default:
-        return { layers: [], unsupported: 1 };
-    }
-  }
-
-  function geoJsonToLayers(literal) {
-    try {
-      return { layers: [L.geoJSON(JSON.parse(literal))], unsupported: 0 };
-    } catch (e) {
-      return { layers: [], unsupported: 1 };
-    }
-  }
-
-  function isGeometry(binding) {
-    return binding && (binding.datatype === WKT_DT || binding.datatype === GEOJSON_DT);
-  }
-
-  // --- the plugin --------------------------------------------------------
-  class HolosMap {
-    constructor(yasr) {
-      this.yasr = yasr;
-      this.priority = 5;
-      this.label = "Map";
-      this.map = null;
-    }
-
-    // Offered only when a geometry is actually present, so the tab does not appear on
-    // results it could do nothing with.
-    canHandleResults() {
-      const rows = this.yasr.results && this.yasr.results.getBindings();
-      if (!rows || !rows.length) return false;
-      return rows.some((row) => Object.keys(row).some((v) => isGeometry(row[v])));
-    }
-
-    getIcon() {
-      const span = document.createElement("span");
-      span.innerHTML =
-        '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"' +
-        ' fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"' +
-        ' stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/>' +
-        '<line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>';
-      return span;
-    }
-
-    // Leaflet keeps internal state tied to the container; dropping the container without
-    // telling it leaves listeners attached and the next draw misplaces the map.
-    destroy() {
-      if (this.map) { this.map.remove(); this.map = null; }
-    }
-
-    draw() {
-      this.destroy();
-      const rows = this.yasr.results.getBindings() || [];
-      const vars = this.yasr.results.getVariables() || [];
-
-      const container = document.createElement("div");
-      container.style.height = "60vh";
-      container.style.minHeight = "320px";
-      this.yasr.resultsEl.appendChild(container);
-
-      const note = document.createElement("div");
-      note.style.cssText = "font:12px ui-monospace,monospace;color:#5c646e;padding:6px 2px";
-      this.yasr.resultsEl.appendChild(note);
-
-      this.map = L.map(container);
-      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 19,
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-      }).addTo(this.map);
-
-      const drawn = L.featureGroup().addTo(this.map);
-      let shapes = 0, skipped = 0;
-
-      for (const row of rows) {
-        for (const v of vars) {
-          const binding = row[v];
-          if (!isGeometry(binding)) continue;
-          const parsed =
-            binding.datatype === WKT_DT
-              ? wktToLayers(binding.value)
-              : geoJsonToLayers(binding.value);
-          skipped += parsed.unsupported;
-          if (!parsed.layers.length) continue;
-
-          // The rest of the row is the popup, which is what makes the map a result view
-          // rather than a picture: every shape still carries its bindings.
-          const dl = document.createElement("dl");
-          dl.style.cssText = "margin:0;font:12px ui-sans-serif,system-ui,sans-serif";
-          for (const other of vars) {
-            if (!row[other] || other === v) continue;
-            const dt = document.createElement("dt");
-            dt.textContent = other;
-            dt.style.cssText = "font-weight:600;margin-top:4px";
-            const dd = document.createElement("dd");
-            dd.textContent = row[other].value;
-            dd.style.cssText = "margin:0 0 0 8px;word-break:break-all";
-            dl.appendChild(dt);
-            dl.appendChild(dd);
-          }
-          for (const layer of parsed.layers) {
-            if (dl.childNodes.length) layer.bindPopup(dl.cloneNode(true));
-            drawn.addLayer(layer);
-            shapes++;
-          }
-        }
-      }
-
-      if (shapes) {
-        this.map.fitBounds(drawn.getBounds(), { padding: [24, 24], maxZoom: 16 });
-      } else {
-        this.map.setView([20, 0], 2);
-      }
-      note.textContent =
-        shapes + " geometr" + (shapes === 1 ? "y" : "ies") + " drawn" +
-        (skipped ? ", " + skipped + " not understood (unsupported type, or a CRS other than CRS84)" : "");
-
-      // Leaflet measures the container on creation, and YASR may still have been laying
-      // the tab out at that point; without this the tiles render into a zero-height box.
-      setTimeout(() => this.map && this.map.invalidateSize(), 0);
-    }
-  }
-
-  Yasgui.Yasr.registerPlugin("Map", HolosMap);
-})();
-"#;
-
-/// The plugin source with the geometry datatypes filled in.
-///
-/// The JavaScript cannot share a constant with Rust, so the IRIs are substituted rather
-/// than written twice. Placeholders rather than `format!` because the plugin is full of
-/// braces and escaping every one of them would make it unreadable.
-fn map_plugin() -> String {
-    MAP_PLUGIN
-        .replace("__WKT_DATATYPE__", WKT_DATATYPE)
-        .replace("__GEOJSON_DATATYPE__", GEOJSON_DATATYPE)
-}
-
-/// The console page, with the endpoint baked in.
+/// Everything executable is a `<script src>` naming this origin or a pinned CDN file; the
+/// configuration lives in [`script`], served at [`SCRIPT_PATH`].
 #[must_use]
-pub fn console(endpoint: &str, title: &str) -> String {
+pub fn page(title: &str) -> String {
     format!(
         r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
 <title>{title_html}</title>
-<link href="https://unpkg.com/@zazuko/yasgui@4/build/yasgui.min.css" rel="stylesheet" type="text/css">
-<link href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" rel="stylesheet" type="text/css">
-<style>
-  :root {{ color-scheme: light dark; }}
-  body {{
-    margin: 0;
-    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-    background: #f4f5f7;
-    color: #15181c;
-  }}
-  @media (prefers-color-scheme: dark) {{
-    body {{ background: #0f1215; color: #e3e7eb; }}
-    header {{ border-color: #2b323a !important; }}
-    .meta {{ color: #8b949e !important; }}
-  }}
-  header {{
-    padding: 14px 20px;
-    border-bottom: 1px solid #d5d9de;
-    display: flex;
-    gap: 16px;
-    align-items: baseline;
-    flex-wrap: wrap;
-  }}
-  h1 {{ font-size: 16px; margin: 0; letter-spacing: -0.01em; }}
-  .meta {{
-    font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: #5c646e;
-  }}
-  #yasgui {{ margin: 0; }}
-</style>
+<link href="{yasgui_css}" integrity="{yasgui_css_sri}" crossorigin="anonymous" rel="stylesheet" type="text/css">
+<link href="{leaflet_css}" integrity="{leaflet_css_sri}" crossorigin="anonymous" rel="stylesheet" type="text/css">
+<link href="/ui/console.css" rel="stylesheet" type="text/css">
 </head>
 <body>
 <header>
   <h1>{title_html}</h1>
-  <span class="meta">endpoint <code>{endpoint_html}</code></span>
-  <span class="meta">SPARQL 1.2 &middot; RDF 1.2 triple terms &middot; GeoSPARQL &middot; map view</span>
+  <span class="meta">endpoint <code>/query</code></span>
+  <span class="meta">SPARQL 1.2 &middot; RDF 1.2 triple terms &middot; GeoSPARQL &middot; map and graph views</span>
 </header>
 <div id="yasgui"></div>
-<script src="https://unpkg.com/@zazuko/yasgui@4/build/yasgui.min.js"></script>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script>{map_plugin}</script>
-<script>
-  // The console is a convenience over the protocol endpoint, so it is configured with the
-  // same defaults a command-line client would use: this server, POST, JSON results.
-  const yasgui = new Yasgui(document.getElementById("yasgui"), {{
+<script src="{leaflet_js}" integrity="{leaflet_js_sri}" crossorigin="anonymous"></script>
+<script src="{yasgui_js}" integrity="{yasgui_js_sri}" crossorigin="anonymous"></script>
+<script src="{script_path}"></script>
+</body>
+</html>
+"#,
+        title_html = html_escape(title),
+        yasgui_css = YASGUI_CSS.0,
+        yasgui_css_sri = YASGUI_CSS.1,
+        leaflet_css = LEAFLET_CSS.0,
+        leaflet_css_sri = LEAFLET_CSS.1,
+        leaflet_js = LEAFLET_JS.0,
+        leaflet_js_sri = LEAFLET_JS.1,
+        yasgui_js = YASGUI_JS.0,
+        yasgui_js_sri = YASGUI_JS.1,
+        script_path = SCRIPT_PATH,
+    )
+}
+
+/// The page's own stylesheet, served at `/ui/console.css` so the policy can say
+/// `style-src 'self'` and the CDN — nothing inline of ours.
+#[must_use]
+pub fn stylesheet() -> &'static str {
+    r"
+:root { color-scheme: light dark; }
+body {
+  margin: 0;
+  font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  background: #f4f5f7;
+  color: #15181c;
+}
+@media (prefers-color-scheme: dark) {
+  body { background: #0f1215; color: #e3e7eb; }
+  header { border-color: #2b323a; }
+  .meta { color: #8b949e; }
+}
+header {
+  padding: 14px 20px;
+  border-bottom: 1px solid #d5d9de;
+  display: flex;
+  gap: 16px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+h1 { font-size: 16px; margin: 0; letter-spacing: -0.01em; }
+.meta { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #5c646e; }
+#yasgui { margin: 0; }
+"
+}
+
+/// The console's configuration, as the script served at [`SCRIPT_PATH`].
+///
+/// `endpoint` is where queries go — `/query` on this server. `tiles` is the basemap's
+/// tile template, or `None` for a blank one. The map plugin reads its options from
+/// `Yasr.defaults.plugins.geo`, set before the console is constructed; the per-instance
+/// `yasr.plugins` option a standalone YASR would take is not what a Yasgui tab passes on.
+#[must_use]
+pub fn script(endpoint: &str, tiles: Option<&str>) -> String {
+    let (name, template, attribution) = match tiles {
+        Some(t) => ("OpenStreetMap", t, "&copy; OpenStreetMap contributors"),
+        None => ("None", BLANK_TILE, ""),
+    };
+    format!(
+        r#"// Served by the same server as the page, so the page carries no inline script and its
+// Content-Security-Policy names two script sources: this origin and the CDN.
+(function () {{
+  Yasgui.Yasr.defaults.plugins.geo = {{
+    basemaps: {{ {name}: L.tileLayer({template}, {{ attribution: {attribution} }}) }},
+    defaultBasemap: {name_json}
+  }};
+  new Yasgui(document.getElementById("yasgui"), {{
+    // The console is a convenience over the protocol endpoint, so it is configured with
+    // the same defaults a command-line client would use: this server, POST, JSON results.
     requestConfig: {{
-      endpoint: {endpoint_json},
+      endpoint: {endpoint},
       method: "POST",
       // Sent on every request so a reverse proxy in front of this server can attach or
       // strip credentials without the console needing to know how (DESIGN.md §14.5).
       withCredentials: true
     }},
-    copyEndpointOnNewTab: true
+    copyEndpointOnNewTab: true,
+    // The endpoint box would otherwise suggest public endpoints; the policy refuses every
+    // one of them, so the suggestion is withdrawn rather than offered and then refused.
+    endpointCatalogueOptions: {{ getData: function () {{ return []; }}, keys: [] }}
   }});
-</script>
-</body>
-</html>
+}})();
 "#,
-        map_plugin = map_plugin(),
-        title_html = html_escape(title),
-        endpoint_html = html_escape(endpoint),
-        endpoint_json = json_string(endpoint),
+        name = name,
+        name_json = json_string(name),
+        template = json_string(template),
+        attribution = json_string(attribution),
+        endpoint = json_string(endpoint),
     )
 }
 
-/// Escapes a string for embedding in HTML text or an element.
+/// The `Content-Security-Policy` for the page: every origin it may reach, and no other.
 ///
-/// The endpoint appears twice on this page — once inside the script and once in the
-/// header — and escaping only the script copy is exactly the hole this closes. It is the
-/// kind of thing a test finds and a reading does not.
+/// `tiles` is the basemap template; its host becomes the one image origin beyond this
+/// server and the CDN. `'unsafe-inline'` is granted to *styles* only — the editor injects
+/// its stylesheets at runtime — and an inline style cannot carry data anywhere the
+/// `img-src` and `font-src` lists do not already permit.
+#[must_use]
+pub fn csp(tiles: Option<&str>) -> String {
+    let mut img = format!("'self' data: blob: {CDN}");
+    if let Some(host) = tiles.and_then(tile_origin) {
+        img.push(' ');
+        img.push_str(&host);
+    }
+    format!(
+        "default-src 'none'; \
+         script-src 'self' {CDN}; \
+         style-src 'self' 'unsafe-inline' {CDN}; \
+         img-src {img}; \
+         font-src {CDN} data:; \
+         connect-src 'self'; \
+         worker-src blob:; \
+         base-uri 'none'; \
+         form-action 'self'; \
+         frame-ancestors 'none'"
+    )
+}
+
+/// The origin a tile template reaches, in the form a policy takes.
+///
+/// Leaflet's `{s}` subdomain placeholder becomes a wildcard label: a template on
+/// `{s}.tile.openstreetmap.org` allows `*.tile.openstreetmap.org`. Anything that is not an
+/// `https://` or `http://` URL gets no origin, and the map then has nowhere to load tiles
+/// from — which is the safe failure.
+fn tile_origin(template: &str) -> Option<String> {
+    let (scheme, rest) = template.split_once("://")?;
+    if scheme != "https" && scheme != "http" {
+        return None;
+    }
+    let host = rest.split('/').next()?.replace("{s}", "*");
+    if host.is_empty() || host.contains('{') {
+        return None;
+    }
+    Some(format!("{scheme}://{host}"))
+}
+
+/// Escapes a string for embedding in HTML text or an element.
 fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -387,8 +277,8 @@ pub(crate) fn json_string(s: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
-            // `<` is escaped because this lands inside a <script> element, where `</` would
-            // otherwise be able to close it early.
+            // `<` is escaped because this may land inside a <script> element, where `</`
+            // would otherwise be able to close it early.
             '<' => out.push_str("\\u003c"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
@@ -403,65 +293,101 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_map_plugin_is_registered_and_leaflet_is_loaded() {
-        let page = console("/query", "HOLOS");
-        assert!(page.contains(r#"Yasgui.Yasr.registerPlugin("Map", HolosMap)"#));
-        assert!(
-            page.contains("leaflet@1.9.4/dist/leaflet.js"),
-            "the script is missing"
-        );
-        assert!(
-            page.contains("leaflet@1.9.4/dist/leaflet.css"),
-            "the stylesheet is missing"
-        );
+    fn the_page_carries_no_inline_script() {
+        let page = page("HOLOS");
+        // Every <script> names a source; none has a body.
+        for piece in page.split("<script").skip(1) {
+            let tag = piece.split('>').next().unwrap_or("");
+            assert!(tag.contains("src="), "an inline script: <script{tag}>");
+        }
+        assert!(page.contains(r#"<script src="/ui/console.js">"#));
+        assert!(page.contains(r#"<meta name="referrer" content="no-referrer">"#));
     }
 
     #[test]
-    fn the_plugin_looks_for_the_datatypes_the_engine_emits() {
-        // The IRIs are substituted into the JavaScript from the Rust constants, so this
-        // checks the substitution happened rather than that two copies agree.
-        let page = console("/query", "HOLOS");
-        for datatype in [WKT_DATATYPE, GEOJSON_DATATYPE] {
+    fn every_cdn_file_is_pinned_and_integrity_checked() {
+        let page = page("HOLOS");
+        for (url, sri) in [YASGUI_JS, YASGUI_CSS, LEAFLET_JS, LEAFLET_CSS] {
             assert!(
-                page.contains(datatype),
-                "the plugin does not mention {datatype}"
+                url.starts_with(CDN),
+                "{url} is not on the CDN the policy allows"
+            );
+            assert!(
+                url.contains("@6.1.0/") || url.contains("@1.9.4/"),
+                "{url} floats rather than pinning a version"
+            );
+            assert!(sri.starts_with("sha384-"), "{url} has no integrity hash");
+            assert!(
+                page.contains(&format!(
+                    r#""{url}" integrity="{sri}" crossorigin="anonymous""#
+                )),
+                "{url} is not loaded with its hash"
             );
         }
-        assert!(
-            !page.contains("__WKT_DATATYPE__") && !page.contains("__GEOJSON_DATATYPE__"),
-            "a placeholder survived into the page"
-        );
     }
 
     #[test]
-    fn the_plugin_reverses_coordinates_for_leaflet() {
-        // WKT is (x y), which under CRS84 is (longitude latitude); Leaflet takes
-        // [latitude, longitude]. Getting this backwards still renders a map, which is why
-        // it is worth pinning: the failure is a plausible-looking picture of the wrong
-        // place rather than an error.
-        let page = console("/query", "HOLOS");
-        assert!(
-            page.contains("out.push([n[1], n[0]])"),
-            "the coordinate pair is no longer being reversed"
-        );
+    fn the_policy_lets_the_console_reach_this_server_and_the_cdn_only() {
+        let policy = csp(Some(DEFAULT_TILES));
+        assert!(policy.contains("default-src 'none'"));
+        assert!(policy.contains("connect-src 'self';"));
+        assert!(policy.contains(&format!("script-src 'self' {CDN};")));
+        assert!(policy.contains(
+            "img-src 'self' data: blob: https://unpkg.com https://*.tile.openstreetmap.org;"
+        ));
+        assert!(policy.contains("frame-ancestors 'none'"));
+        assert!(!policy.contains("unsafe-eval"));
+        // Inline styles are the one allowance, and only for styles.
+        assert!(policy.contains("style-src 'self' 'unsafe-inline'"));
+        assert!(!policy.contains("script-src 'self' 'unsafe-inline'"));
     }
 
     #[test]
-    fn the_endpoint_is_embedded() {
-        let page = console("/query", "HOLOS");
-        assert!(page.contains(r#"endpoint: "/query""#));
-        assert!(page.contains("<title>HOLOS</title>"));
+    fn a_sealed_console_names_no_tile_host_at_all() {
+        let policy = csp(None);
+        assert!(policy.contains("img-src 'self' data: blob: https://unpkg.com;"));
+        let script = script("/query", None);
+        assert!(script.contains(BLANK_TILE));
+        assert!(!script.contains("openstreetmap"));
+    }
+
+    #[test]
+    fn a_tile_template_becomes_one_origin() {
+        assert_eq!(
+            tile_origin(DEFAULT_TILES).as_deref(),
+            Some("https://*.tile.openstreetmap.org")
+        );
+        assert_eq!(
+            tile_origin("https://tiles.example.org/osm/{z}/{x}/{y}.png").as_deref(),
+            Some("https://tiles.example.org")
+        );
+        assert_eq!(tile_origin("ftp://tiles.example.org/{z}"), None);
+        assert_eq!(tile_origin("not a url"), None);
+        assert_eq!(tile_origin("https://{a}.example.org/{z}"), None);
+    }
+
+    #[test]
+    fn the_endpoint_is_embedded_in_the_script() {
+        let script = script("/query", Some(DEFAULT_TILES));
+        assert!(script.contains(r#"endpoint: "/query""#));
+        assert!(script.contains("Yasgui.Yasr.defaults.plugins.geo"));
+        assert!(
+            script.contains(r#"L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png""#)
+        );
+        assert!(page("HOLOS").contains("<title>HOLOS</title>"));
     }
 
     #[test]
     fn a_hostile_endpoint_cannot_break_out_of_the_script() {
         // The endpoint is operator-supplied, but an operator pasting something odd should
         // get a broken console rather than an injected page.
-        let page = console("</script><script>alert(1)</script>", "HOLOS");
+        let script = script("</script><script>alert(1)</script>", Some(DEFAULT_TILES));
         assert!(
-            !page.contains("</script><script>alert(1)"),
+            !script.contains("</script><script>alert(1)"),
             "the script element was closed early"
         );
-        assert!(page.contains("\\u003c/script"));
+        assert!(script.contains("\\u003c/script"));
+        let page = page("<img src=x onerror=alert(1)>");
+        assert!(!page.contains("<img src=x"));
     }
 }

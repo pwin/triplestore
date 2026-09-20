@@ -23,6 +23,7 @@ ARGS+=(--threads "${HOLOS_THREADS:-8}")
 
 [ -n "${HOLOS_STORE:-}" ] && { mkdir -p "$HOLOS_STORE"; ARGS+=(--store "$HOLOS_STORE"); }
 [ "${HOLOS_UI:-on}" = "off" ] && ARGS+=(--no-ui)
+[ -n "${HOLOS_UI_TILES:-}" ] && ARGS+=(--ui-tiles "$HOLOS_UI_TILES")
 
 for f in ${HOLOS_DATA:-}; do ARGS+=(--data "$f"); done
 

@@ -40,6 +40,29 @@ implementations here were written for this project.
 
 ---
 
+## Loaded by the browser, not shipped
+
+The console at `/` is a page that tells the user's browser to fetch these from a CDN. None
+of their code is in this tree or in any binary this project ships; each is named by exact
+version and subresource-integrity hash in
+[`crates/holos-server/src/ui.rs`](crates/holos-server/src/ui.rs), so what runs is what was
+reviewed. That puts the Apache-2.0 entries on the same footing as the Apache-2.0 crates
+below — a dependency, not copied source — and this project's own licence is unaffected.
+
+| Component | Version | Licence | What it is |
+|---|---|---|---|
+| [`@matdata/yasgui`](https://github.com/Matdata-eu/MatGUI) | 6.1.0 | MIT | The console: the YASGUI editor and result viewer, maintained as MatGUI. Bundles the three plugins below |
+| [`yasgui-geo-plugin`](https://github.com/Matdata-eu/yasgui-geo-plugin) | bundled | MIT | The map tab: Leaflet, `betterknown` (WKT), `proj4`, `leaflet-draw`, `leaflet.markercluster`, `leaflet.heat`, turf |
+| [`yasgui-graph-plugin`](https://github.com/Matdata-eu/yasgui-graph-plugin) | bundled | Apache-2.0 | The node-edge view for `CONSTRUCT` and `DESCRIBE` |
+| [`yasgui-table-plugin`](https://github.com/Matdata-eu/yasgui-table-plugin) | bundled | Apache-2.0 | The table with virtual scrolling |
+| [Leaflet](https://leafletjs.com/) | 1.9.4 | BSD-2-Clause | The map library the geo plugin expects on the page |
+| [OpenStreetMap tiles](https://operations.osmfoundation.org/policies/tiles/) | — | ODbL data; the tile usage policy applies | The default basemap. `--ui-tiles` names another host or `none` |
+
+The geo plugin would look an unknown SRID up at `epsg.io`; the console's policy blocks that
+request, and the geometry is skipped. Before 0.11.0 the console was the Zazuko fork of YASGUI
+(MIT) with a map plugin written for this project; that plugin was retired when the measured
+comparison in `ui.rs` favoured the fork above.
+
 ## Dependency licences
 
 183 third-party crates in the full dependency graph.

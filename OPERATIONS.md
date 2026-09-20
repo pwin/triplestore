@@ -24,16 +24,23 @@ deploy\run.ps1
 deploy\smoke.ps1
 ```
 
-Then open `http://127.0.0.1:7878/` for the YASGUI console.
+Then open `http://127.0.0.1:7878/` for the console.
 
-The console has a **Map** tab alongside Table. It appears when a result carries a
-`geo:wktLiteral` or `geo:geoJSONLiteral` binding, draws the geometries on an OpenStreetMap
-base layer, and puts the rest of each row in the shape's popup — so a map is a result view
-rather than a picture. It reads CRS84 only, which is GeoSPARQL's default; a geometry in any
-other CRS is counted and reported under the map rather than drawn somewhere wrong.
+The console is [MatGUI](https://github.com/Matdata-eu/MatGUI), the maintained MIT fork of
+YASGUI. Beside the table it has a **Geo** tab, which appears when a result carries WKT,
+GeoJSON, GML or GeoHash literals or `?lat`/`?lon` columns, draws them on a basemap, and can
+turn a rectangle you draw into a `geof:sfWithin` filter; and a **Graph** tab for `CONSTRUCT`
+and `DESCRIBE` results. One thing it cannot show: a result binding an RDF 1.2 triple term
+lands on the error tab, in every YASGUI fork — the endpoint answers correctly, the console's
+parser does not read the syntax yet.
 
-YASR's own map and chart plugins are not open source. This one was written for HOLOS and
-lives in `crates/holos-server/src/ui.rs`.
+**The console cannot send anything anywhere but this server.** Its Content-Security-Policy
+names this server, the script CDN (`unpkg.com`, every file pinned by version and integrity
+hash) and the basemap's tile host, and nothing else — so the endpoint box will not query
+another endpoint, and no plugin can reach out. The one thing that does leave is which map
+tiles it asks for, which says where the user is looking: `HOLOS_UI_TILES=none` draws over a
+blank background instead, and `HOLOS_UI=off` removes the console, after which the process
+needs no network at all. `crates/holos-server/src/ui.rs` is the whole of it.
 
 ### Prerequisites
 

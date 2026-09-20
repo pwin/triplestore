@@ -3,6 +3,53 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.11.0 — unreleased
+
+### The console: MatGUI, and a policy that keeps it at home
+
+The console is now [MatGUI](https://github.com/Matdata-eu/MatGUI) 6.1.0, the maintained MIT
+fork of YASGUI, in place of the Zazuko fork. The swap was made on a measurement, not a
+feature list: both consoles were driven headless against this server's own answers, under
+the security policy below. MatGUI rendered the same tables, drew the ten WKT geometries of
+the GeoSPARQL example on its map, and drew a `CONSTRUCT` as a node-edge graph; the Zazuko
+fork has no graph view and the map it had was one written for this project, which read CRS84
+only. The gains: a **Graph** tab for `CONSTRUCT` and `DESCRIBE`; a **Geo** tab (MIT) that
+reads WKT, GeoJSON, GML and GeoHash, gets EPSG:4326's axis order right, reprojects the SRIDs
+it knows, clusters, exports, and turns a drawn rectangle into a `geof:sfWithin` filter; a
+table that scrolls rather than pages; a dark theme; a CodeMirror 6 editor. The costs, stated:
+a 3.4 MB bundle where the old one was 1.0 MB, and a major version twelve days old. What did
+not change: **neither fork parses an RDF 1.2 triple term in a result** — a `SELECT` binding
+of `"type": "triple"` and a `CONSTRUCT` of `<<( … )>>` both land on the error tab, in both,
+measured. The endpoints answer them correctly; the console's parsers are behind the syntax.
+
+The graph and table plugins are Apache-2.0. They are loaded by the browser from the CDN and
+copied nowhere, which is the footing the Apache-2.0 crates already stand on;
+[THIRD-PARTY.md](THIRD-PARTY.md) lists them.
+
+**The console can no longer send anything anywhere but this server**, and that is the
+browser's guarantee rather than the bundle's:
+
+- A **Content-Security-Policy** names this server, the script CDN and one tile host, and
+  nothing else. `connect-src 'self'`: the endpoint box will not query another endpoint,
+  and no plugin can reach out — the geo plugin's lookup of unknown SRIDs at `epsg.io` is
+  refused and the geometry skipped.
+- Every CDN file is **pinned by exact version and SHA-384 integrity hash**; a CDN serving
+  different bytes breaks the console visibly rather than running unreviewed code.
+- **No referrer** leaves the page, and the page carries **no inline script**: its
+  configuration and stylesheet are served from this origin at `/ui/console.js` and
+  `/ui/console.css`.
+- **`--ui-tiles`** (`HOLOS_UI_TILES`) names the basemap's tile template, or `none`. Tiles are
+  the one disclosure a policy cannot close — which ones a map fetches says where its user is
+  looking — and `none` draws geometries over a blank background. `--no-ui` remains the
+  airtight option.
+
+The served page was loaded in a headless browser under the header policy: every plugin
+rendered, no refusal, no integrity failure. `DESIGN.md` §10's console section now also
+lists the views the console owes the thesis — named graphs with their Graph Store verbs,
+"your view" (who the server took you for and what that opens), holons with their versions,
+tick timelines and per-statement provenance, and a boundary as a tree — each resting on
+`/query` and `/graph` so that it shows a principal exactly what the scan lets them see.
+
 ## 0.10.0 — 2026-09-20
 
 The release that made a bulk load **4× faster**: the 653.8-million-triple file that took

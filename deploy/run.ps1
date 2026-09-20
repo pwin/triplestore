@@ -31,6 +31,7 @@ if ($storeDir) {
     $a += @('--store', $storeDir)
 }
 if ($NoUi -or (Cfg HOLOS_UI 'on') -eq 'off') { $a += '--no-ui' }
+if (Cfg HOLOS_UI_TILES) { $a += @('--ui-tiles', (Cfg HOLOS_UI_TILES)) }
 
 foreach ($f in Words (Cfg HOLOS_DATA)) { $a += @('--data', $f) }
 

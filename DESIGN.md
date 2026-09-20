@@ -646,10 +646,41 @@ pointer in that type would have made the whole store un-shareable.
 
 ### The console
 
-YASGUI is loaded from a CDN rather than adapted: it is a large JavaScript bundle with its
-own licence and release cadence, and a minified copy in an RDF engine's tree makes that tree
-harder to audit. The consequence is stated rather than hidden — **the console needs network
-access; the endpoints do not**, and `--no-ui` removes it entirely.
+The console is [MatGUI](https://github.com/Matdata-eu/MatGUI), the maintained MIT fork of
+YASGUI, loaded from a CDN rather than adapted: it is a large JavaScript bundle with its own
+licence and release cadence, and a minified copy in an RDF engine's tree makes that tree
+harder to audit. It replaced the Zazuko fork in 0.11.0 after a measured comparison against
+this server's own output (`crates/holos-server/src/ui.rs` records what was measured): the
+gains were a node-edge view for `CONSTRUCT` and `DESCRIBE`, a map plugin that reads more
+geometry formats, handles axis order and reprojection, and turns a drawn rectangle into a
+`geof:sfWithin` filter, a table that scrolls rather than pages, and a dark theme. Neither
+fork parses an RDF 1.2 triple term in a result; both were measured to fail there alike.
+
+**What the console may reach is enforced, not assumed.** The page carries a
+Content-Security-Policy naming this server, the script CDN and one tile host, and nothing
+else; `connect-src 'self'` means it can query the server that served it and no other
+endpoint. Every CDN file is pinned by exact version and subresource-integrity hash, so a
+CDN serving different bytes breaks the console rather than running unreviewed code against
+the endpoint. No referrer leaves the page. The one disclosure the policy cannot close is the
+basemap — which tiles a map fetches says where its user is looking — so `--ui-tiles none`
+draws over a blank background, and `--no-ui` removes the console entirely: **the endpoints
+need no network at all.**
+
+**Views the console owes the thesis.** Everything below reads through `/query` and
+`/graph`, which is what makes it conformant with §14: a principal sees exactly what the scan
+lets them see, and nothing about what it does not. `/stats` is the counter-example — its
+counts are global and §14.6 says so — and it stays operator-only, never a console panel.
+None of these is built; they are listed in the order they would pay.
+
+| View | Rests on | What is missing |
+|---|---|---|
+| **Graphs.** The named graphs this principal can read, each with its size, whether it is a holon's scene, boundary or event log (by name), and the Graph Store verbs — view, download as Turtle, replace, delete — each refused by policy or `--read-only` exactly as the protocol refuses them | `SELECT ?g WHERE { GRAPH ?g {} }` enumerates from the catalogue through `visible_named_graphs`, cheap and policy-scoped; the verbs are `/graph?graph=` | Nothing server-side. A panel in `console.js`, a few hundred lines |
+| **Your view.** Who the server took this request to be — principal, roles, clearance, filter or fail-closed — and which graphs that opens. The answer to "why is this result smaller than I expected", which §14.4 says a filtered answer will not volunteer | The graph list above | A `/whoami` endpoint returning the derived principal and the policy mode: the decision's inputs, nothing about data |
+| **Holons.** Every holon in the store by its three graphs, with its version, ticks admitted and refused, the last tick, and its shape count; a tick timeline per holon with refused ticks marked; for any statement in a scene, the tick that added it and whether it was admitted — provenance as a click rather than a query | The event log is RDF in a named graph (HOLONS.md §7): `holos:version`, `holos:admitted`, `holos:violations`, `rdf:reifies` | Nothing for reading. Writing — a tick from the console — waits on P5's HTTP surface (HOLONS.md §10). The provenance lookup returns triple terms, which the panel must render itself since no YASGUI fork parses them; and a refused tick records a violation *count*, so the panel can say a tick was refused but not yet why, until the log keeps the report |
+| **Boundary.** A holon's shapes as a tree — node shape, target, property shapes, constraints, rules — rather than the generic node-edge view, which draws a shapes graph as a hairball | `GRAPH <holon/boundary>` | Nothing; a renderer |
+
+The graph and holon panels are plain JavaScript served from this origin under the same
+policy as the rest of the console, and depend on no fork's plugin interface.
 
 Optional module: text and vector indexes exposed as SPARQL service or property functions, for
 hybrid retrieval. This is the concrete reason an LLM-agent system would choose this store over an

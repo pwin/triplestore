@@ -124,6 +124,13 @@ SERVER
                              an update. Measured 14x on a badly ordered join (BENCHMARKS.md).
     --no-ui                  Do not serve the console. The endpoints still work, and the
                              server then needs no network access of any kind.
+    --ui-tiles <TEMPLATE>    The console map's basemap, as a Leaflet tile template. Default
+                             https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png. The
+                             console's Content-Security-Policy lets it reach this server,
+                             the script CDN and this one tile host, and nothing else; but
+                             which tiles a map asks for says where its user is looking, so
+                             `none` draws geometries over a blank background and the page
+                             then reaches nothing beyond the CDN and this server.
 
 MAINTENANCE
     --backup-dir <DIR>       Parent directory for `POST /backup` checkpoints. The endpoint
@@ -175,6 +182,8 @@ struct Config {
     purge_role: Option<String>,
     threads: usize,
     ui: bool,
+    /// The console map's tile template; `None` draws over a blank background. See `ui`.
+    ui_tiles: Option<String>,
     trust_forwarded: bool,
     roles: Vec<String>,
     clearance: Option<u16>,
@@ -214,6 +223,7 @@ impl Default for Config {
             purge_role: None,
             threads: 8,
             ui: true,
+            ui_tiles: Some(ui::DEFAULT_TILES.to_owned()),
             trust_forwarded: false,
             roles: Vec::new(),
             clearance: None,
@@ -472,10 +482,38 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
 
     match (request.method().as_str(), path.as_str()) {
         ("GET", "/health") => respond(request, 200, "text/plain", b"ok".to_vec()),
+        // The console: a page whose policy names every origin it may reach, its script
+        // and stylesheet served from here so the policy needs nothing inline. See `ui`.
         ("GET", "/") if state.config.ui => {
-            let page = ui::console("/query", "HOLOS");
-            respond(request, 200, "text/html; charset=utf-8", page.into_bytes())
+            let policy = ui::csp(state.config.ui_tiles.as_deref());
+            respond_with(
+                request,
+                200,
+                "text/html; charset=utf-8",
+                ui::page("HOLOS").into_bytes(),
+                &[
+                    ("Content-Security-Policy", policy.as_str()),
+                    ("Referrer-Policy", "no-referrer"),
+                    ("X-Content-Type-Options", "nosniff"),
+                ],
+            )
         }
+        ("GET", ui::SCRIPT_PATH) if state.config.ui => {
+            let script = ui::script("/query", state.config.ui_tiles.as_deref());
+            respond_with(
+                request,
+                200,
+                "text/javascript; charset=utf-8",
+                script.into_bytes(),
+                &[("X-Content-Type-Options", "nosniff")],
+            )
+        }
+        ("GET", "/ui/console.css") if state.config.ui => respond(
+            request,
+            200,
+            "text/css; charset=utf-8",
+            ui::stylesheet().as_bytes().to_vec(),
+        ),
         ("GET", "/stats") => {
             let body = stats(state);
             respond(request, 200, "application/json", body.into_bytes())
@@ -1558,6 +1596,10 @@ fn parse_args(args: &[String]) -> Result<Config> {
             "--gsp-base" => c.gsp_base = Some(value(&mut i)?),
             "--gsp-path" => c.gsp_path = value(&mut i)?,
             "--no-ui" => c.ui = false,
+            "--ui-tiles" => {
+                let template = value(&mut i)?;
+                c.ui_tiles = (template != "none").then_some(template);
+            }
             "--trust-forwarded-identity" => c.trust_forwarded = true,
             "--role" => c.roles.push(value(&mut i)?),
             "--clearance" => c.clearance = Some(value(&mut i)?.parse()?),

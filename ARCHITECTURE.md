@@ -176,7 +176,7 @@ The entry point is `Engine::query_with` in
 | `holos-shacl` | L4 | Validation over the store's own indexes: a native validator and a bridge to the adapted engine | [`lib.rs`](crates/holos-shacl/src/lib.rs) |
 | `holos-shacl-engine` | L4 | The adapted [SHACL_Engine](https://github.com/pwin/SHACL_Engine): full SHACL, node expressions, rules | [`lib.rs`](crates/holos-shacl-engine/src/lib.rs) |
 | `holos-holon` | L5 | Holons: a scene, a boundary enforced on write, an event log, branching via checkpoints | [`lib.rs`](crates/holos-holon/src/lib.rs), and `HOLONS.md` |
-| `holos-server` | L6 | SPARQL 1.2 Protocol and Graph Store Protocol over HTTP, the YASGUI console, the counting allocator | [`main.rs`](crates/holos-server/src/main.rs) |
+| `holos-server` | L6 | SPARQL 1.2 Protocol and Graph Store Protocol over HTTP, the console (MatGUI, fenced by a Content-Security-Policy), the counting allocator | [`main.rs`](crates/holos-server/src/main.rs) |
 | `holos-cli` | — | `holos`: load, query, update, stats, backup, compact, validate, entail | [`main.rs`](crates/holos-cli/src/main.rs) |
 | `holos-python` | — | The `holosdb` package on PyPI | [`lib.rs`](crates/holos-python/src/lib.rs) |
 | `holos-conformance` | — | The W3C RDF 1.2, SPARQL 1.2, protocol and SHACL suites, as tests | [`lib.rs`](crates/holos-conformance/src/lib.rs) |
