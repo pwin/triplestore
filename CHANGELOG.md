@@ -3,12 +3,14 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## 0.10.0 — unreleased
+## 0.10.0 — 2026-09-20
 
 The release that made a bulk load **4× faster**: the 653.8-million-triple file that took
 3 h 43 m at 0.9.1 takes **55 minutes**, producing a store with the same counts and the
 same answers. Seven changes, each measured on that file, in the order they were found —
-because each one's measurement is what found the next.
+because each one's measurement is what found the next. This release also carries 0.9.1,
+below, which was cut on the 19th and never tagged: statistics kept with the store, and a
+withdrawn claim.
 
 | | time | quads/s | peak memory |
 |---|---|---|---|
@@ -224,7 +226,7 @@ needed a key at all. That is the same order of cost as the saving, spent restruc
 one piece of the load that keeps ids in file order. The lookup stays, as an API and a
 number; the load does not use it.
 
-## 0.9.1 — 2026-09-19
+## 0.9.1 — 2026-09-19, shipped in 0.10.0
 
 Two things learned by using 0.9.0 against the 653.8-million-triple store for a week: the
 flag every protection depends on was too expensive to set from the command line, and one
