@@ -79,9 +79,89 @@ pub enum EngineError {
     /// them apart keeps the message accurate about which one happened.
     #[error("{0}")]
     BadRequest(String),
+    /// The query was refused before it ran: well-formed, but estimated to cost more than
+    /// the deployment allows. The message says which operator, how many rows, and what
+    /// would change the answer.
+    #[error("{0}")]
+    Refused(String),
     /// The policy refused a write.
     #[error("access denied by policy")]
     AccessDenied,
+}
+
+impl EngineError {
+    /// What kind of failure this is, for a client that acts on it rather than reads it.
+    ///
+    /// A short, stable name and the HTTP status the SPARQL Protocol assigns: 400 for a
+    /// request that is wrong as sent (`MalformedQuery`), 500 for one the service will not
+    /// or cannot answer (`QueryRequestRefused`), 403 for one the policy refuses. The name is
+    /// the tail of the `type` URI in the RFC 9457 problem document the server answers with;
+    /// `OPERATIONS.md` lists them and what each asks the caller to do.
+    ///
+    /// The cancellations the evaluator reports as one variant are told apart here: a timeout
+    /// is `Cancelled`, and the memory ceiling arrives boxed inside `Dataset`, since that is
+    /// how the scan hands a refusal up. Both are the deployment's limits, not the query's
+    /// mistake, and both are 500.
+    #[must_use]
+    pub fn kind(&self) -> (&'static str, u16) {
+        use spareval::QueryEvaluationError as E;
+        match self {
+            Self::Syntax(_) => ("syntax", 400),
+            Self::Parse(_) => ("rdf-parse", 400),
+            Self::BadRequest(_) => ("bad-request", 400),
+            Self::Refused(_) => ("refused", 500),
+            Self::AccessDenied | Self::View(ViewError::AccessDenied) => ("policy", 403),
+            Self::View(ViewError::OverMemoryCeiling { .. }) => ("memory-ceiling", 500),
+            Self::Evaluation(E::Cancelled) => ("timeout", 500),
+            Self::Evaluation(
+                E::UnsupportedCustomFunction(_) | E::UnsupportedCustomFunctionArity { .. },
+            ) => ("unknown-function", 400),
+            Self::Evaluation(
+                E::UnboundService | E::InvalidServiceName(_) | E::UnsupportedService(_),
+            ) => ("service", 400),
+            Self::Evaluation(E::Dataset(inner)) => {
+                if inner.is::<crate::memory::LimitExceeded>() {
+                    ("memory-ceiling", 500)
+                } else {
+                    match inner.downcast_ref::<ViewError>() {
+                        Some(ViewError::AccessDenied) => ("policy", 403),
+                        Some(ViewError::OverMemoryCeiling { .. }) => ("memory-ceiling", 500),
+                        _ => ("internal", 500),
+                    }
+                }
+            }
+            Self::Evaluation(_) => ("evaluation", 500),
+            Self::Io(_) | Self::Storage(_) | Self::View(_) => ("internal", 500),
+        }
+    }
+
+    /// The failure in one line, without the kind's own prefix — what a problem document's
+    /// `detail` carries. `Display` keeps the prefix, since a log line wants it.
+    #[must_use]
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Syntax(e) => e.to_string(),
+            Self::Evaluation(e) => e.to_string(),
+            Self::Parse(e) => e.to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    /// Where a syntax error is, as `(line, column)`, both counted from one.
+    ///
+    /// The parser reports its position in the message and nowhere else, so it is read back
+    /// from there; a message in another shape simply has no position.
+    #[must_use]
+    pub fn position(&self) -> Option<(u32, u32)> {
+        let Self::Syntax(e) = self else {
+            return None;
+        };
+        let text = e.to_string();
+        let rest = text.split("error at ").nth(1)?;
+        let (line, rest) = rest.split_once(':')?;
+        let column: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        Some((line.trim().parse().ok()?, column.parse().ok()?))
+    }
 }
 
 /// A store with a SPARQL engine over it.
@@ -390,7 +470,7 @@ impl Engine {
                         return Ok((results, None));
                     }
                 }
-                return Err(EngineError::BadRequest(format!(
+                return Err(EngineError::Refused(format!(
                     "refusing {blocking}, over the {budget}-row budget. {} Raise it with --max-blocking-rows, or make the pattern more selective.",
                     if blocking.operator == "ORDER BY" {
                         "A LIMIT will not help: the rows must all be sorted before the smallest is known."

@@ -21,6 +21,7 @@
 mod alloc;
 mod gsp;
 mod http;
+mod problem;
 mod ui;
 
 /// The counting allocator, so a query's appetite can be seen before it kills the process.
@@ -520,24 +521,23 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
         }
         ("GET", "/query") => {
             if let Some(why) = repeated(&query_string, "query") {
-                return respond(request, 400, "text/plain", why.into_bytes());
+                return problem::bad_request(request, &why, accept.as_deref());
             }
             let Some(query) = params.get("query") else {
-                return respond(
+                return problem::bad_request(
                     request,
-                    400,
-                    "text/plain",
-                    b"missing the 'query' parameter".to_vec(),
+                    "missing the 'query' parameter",
+                    accept.as_deref(),
                 );
             };
             answer(state, request, &query.clone(), accept.as_deref(), &params)
         }
         ("POST", "/query") => {
             if let Some(why) = repeated(&query_string, "query") {
-                return respond(request, 400, "text/plain", why.into_bytes());
+                return problem::bad_request(request, &why, accept.as_deref());
             }
             if let Some(why) = unusable_body(content_type.as_deref()) {
-                return respond(request, 400, "text/plain", why.into_bytes());
+                return problem::bad_request(request, &why, accept.as_deref());
             }
             let mut body = String::new();
             request.as_reader().read_to_string(&mut body)?;
@@ -549,17 +549,16 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
                 body
             } else {
                 if let Some(why) = repeated(&body, "query") {
-                    return respond(request, 400, "text/plain", why.into_bytes());
+                    return problem::bad_request(request, &why, accept.as_deref());
                 }
                 let form = http::parse_form(&body);
                 match form.get("query") {
                     Some(q) => q.clone(),
                     None => {
-                        return respond(
+                        return problem::bad_request(
                             request,
-                            400,
-                            "text/plain",
-                            b"missing the 'query' parameter".to_vec(),
+                            "missing the 'query' parameter",
+                            accept.as_deref(),
                         )
                     }
                 }
@@ -568,18 +567,21 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
         }
         ("POST", "/update") => {
             if state.config.read_only {
-                return respond(
+                return problem::send(
                     request,
+                    "read-only",
                     403,
-                    "text/plain",
-                    b"this endpoint is read-only".to_vec(),
+                    "this endpoint is read-only: /update and the writing Graph Store verbs \
+                     answer 403 while --read-only is set",
+                    &[],
+                    accept.as_deref(),
                 );
             }
             if let Some(why) = repeated(&query_string, "update") {
-                return respond(request, 400, "text/plain", why.into_bytes());
+                return problem::bad_request(request, &why, accept.as_deref());
             }
             if let Some(why) = unusable_body(content_type.as_deref()) {
-                return respond(request, 400, "text/plain", why.into_bytes());
+                return problem::bad_request(request, &why, accept.as_deref());
             }
             let mut body = String::new();
             request.as_reader().read_to_string(&mut body)?;
@@ -590,17 +592,16 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
                 (body, std::collections::HashMap::new())
             } else {
                 if let Some(why) = repeated(&body, "update") {
-                    return respond(request, 400, "text/plain", why.into_bytes());
+                    return problem::bad_request(request, &why, accept.as_deref());
                 }
                 let form = http::parse_form(&body);
                 match form.get("update") {
                     Some(u) => (u.clone(), form),
                     None => {
-                        return respond(
+                        return problem::bad_request(
                             request,
-                            400,
-                            "text/plain",
-                            b"missing the 'update' parameter".to_vec(),
+                            "missing the 'update' parameter",
+                            accept.as_deref(),
                         )
                     }
                 }
@@ -611,7 +612,7 @@ fn dispatch(state: &State, mut request: Request) -> Result<()> {
             for (k, v) in form {
                 merged.entry(k).or_insert(v);
             }
-            apply_update(state, request, &update, &merged)
+            apply_update(state, request, &update, &merged, accept.as_deref())
         }
         ("POST", "/backup") => backup(state, request),
         ("POST", "/maintenance/purge") => purge(state, request),
@@ -642,11 +643,13 @@ fn answer(
     let session = match Session::open(guard.store(), principal, state.policy.clone()) {
         Ok(s) => s,
         Err(e) => {
-            return respond(
+            return problem::send(
                 request,
+                "internal",
                 500,
-                "text/plain",
-                format!("opening a session: {e}").into_bytes(),
+                &format!("opening a session: {e}"),
+                &[],
+                accept,
             )
         }
     };
@@ -655,20 +658,13 @@ fn answer(
     let options = match query_options(state, params) {
         // A query may hold relative IRIs, which resolve against the endpoint.
         Ok(options) => options.with_base_iri(base_iri(&request, "/query")),
-        Err(e) => return respond(request, 400, "text/plain", e.into_bytes()),
+        Err(e) => return problem::bad_request(request, &e, accept),
     };
     let explain = options.explain;
 
     let (results, explanation) = match Engine::query_with(&view, query, &options) {
         Ok(pair) => pair,
-        Err(e) => {
-            let status = if matches!(e, holos_engine::EngineError::Syntax(_)) {
-                400
-            } else {
-                500
-            };
-            return respond(request, status, "text/plain", e.to_string().into_bytes());
-        }
+        Err(e) => return problem::failed(request, &e, accept),
     };
 
     // `?explain` returns the plan instead of the answers. The results still have to be
@@ -1280,6 +1276,7 @@ fn apply_update(
     request: Request,
     update: &str,
     params: &std::collections::HashMap<String, String>,
+    accept: Option<&str>,
 ) -> Result<()> {
     // Read before the request is consumed by a response, and before the lock is taken.
     let base = base_iri(&request, "/update");
@@ -1291,11 +1288,13 @@ fn apply_update(
     let mut session = match Session::open(guard.store(), principal, state.policy.clone()) {
         Ok(s) => s,
         Err(e) => {
-            return respond(
+            return problem::send(
                 request,
+                "internal",
                 500,
-                "text/plain",
-                format!("opening a session: {e}").into_bytes(),
+                &format!("opening a session: {e}"),
+                &[],
+                accept,
             )
         }
     };
@@ -1323,49 +1322,62 @@ fn apply_update(
             );
             respond(request, 200, "application/json", body.into_bytes())
         }
-        Err(e) => {
-            let status = match &e {
-                // Both mean the client sent something unanswerable, which is a 400
-                // whether the SPARQL failed to parse or the request contradicted itself.
-                holos_engine::EngineError::Syntax(_) | holos_engine::EngineError::BadRequest(_) => {
-                    400
-                }
-                holos_engine::EngineError::AccessDenied => 403,
-                _ => 500,
-            };
-            respond(request, status, "text/plain", e.to_string().into_bytes())
-        }
+        Err(e) => problem::failed(request, &e, accept),
     }
 }
 
 /// Writes results in the negotiated format.
+///
+/// The rows are produced while they are written, so this is where a timeout, the memory
+/// ceiling or a scan failure actually arrives. It used to propagate out of the handler,
+/// which answered the client with an empty 500 and the operator with a log line; now it is
+/// a problem document like any other failure, which is the one place a client learns why
+/// a query that started well did not finish.
 fn serialise(request: Request, results: QueryResults<'_>, accept: Option<&str>) -> Result<()> {
+    match render(results, accept) {
+        Ok((media_type, body)) => respond(request, 200, media_type, body),
+        Err(e) => problem::failed(request, &e, accept),
+    }
+}
+
+/// The whole answer, in the negotiated format, or the failure that stopped it.
+fn render(
+    results: QueryResults<'_>,
+    accept: Option<&str>,
+) -> std::result::Result<(&'static str, Vec<u8>), holos_engine::EngineError> {
+    use holos_engine::EngineError;
     match results {
         QueryResults::Graph(triples) => {
             let format = http::negotiate_rdf(accept);
             let mut writer = RdfSerializer::from_format(format).for_writer(Vec::new());
             for triple in triples {
-                writer.serialize_triple(triple?.as_ref())?;
+                let triple = triple.map_err(EngineError::Evaluation)?;
+                writer
+                    .serialize_triple(triple.as_ref())
+                    .map_err(EngineError::Io)?;
             }
-            let body = writer.finish()?;
-            respond(request, 200, format.media_type(), body)
+            let body = writer.finish().map_err(EngineError::Io)?;
+            Ok((format.media_type(), body))
         }
         QueryResults::Boolean(value) => {
             let format = http::negotiate_results(accept);
             let body = QueryResultsSerializer::from_format(format)
-                .serialize_boolean_to_writer(Vec::new(), value)?;
-            respond(request, 200, http::results_media_type(format), body)
+                .serialize_boolean_to_writer(Vec::new(), value)
+                .map_err(EngineError::Io)?;
+            Ok((http::results_media_type(format), body))
         }
         QueryResults::Solutions(solutions) => {
             let format = http::negotiate_results(accept);
             let variables = solutions.variables().to_vec();
             let mut writer = QueryResultsSerializer::from_format(format)
-                .serialize_solutions_to_writer(Vec::new(), variables)?;
+                .serialize_solutions_to_writer(Vec::new(), variables)
+                .map_err(EngineError::Io)?;
             for solution in solutions {
-                writer.serialize(&solution?)?;
+                let solution = solution.map_err(EngineError::Evaluation)?;
+                writer.serialize(&solution).map_err(EngineError::Io)?;
             }
-            let body = writer.finish()?;
-            respond(request, 200, http::results_media_type(format), body)
+            let body = writer.finish().map_err(EngineError::Io)?;
+            Ok((http::results_media_type(format), body))
         }
     }
 }

@@ -619,6 +619,52 @@ dictionary is append-only and compaction is the only thing that shrinks it.
 
 ---
 
+## Errors
+
+A query or update that fails is answered the way the SPARQL Protocol requires — 400 for a
+request that is wrong as sent, 500 for one the service will not or cannot answer, 403 for
+one the policy refuses — with a body in the HTTP-wide standard for explaining a failure to a
+program as well as a person: an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem
+document, `application/problem+json`.
+
+```json
+{"type":"https://holos.dev/problems/syntax",
+ "title":"The query does not parse",
+ "status":400,
+ "detail":"error at 1:26: expected one of LATERAL, SERVICE, [_]",
+ "line":1,"column":26}
+```
+
+`type` is what a client matches on; `detail` is what a person reads; a syntax error adds
+`line` and `column`. A client whose `Accept` names `text/plain` and nothing else gets the
+one-line text the server always sent. The kinds, by the tail of `type`:
+
+| Kind | Status | Means | What to do |
+|---|---|---|---|
+| `syntax` | 400 | The SPARQL did not parse; `line` and `column` say where | Fix the query |
+| `bad-request` | 400 | The request contradicted itself or the protocol: a parameter given twice, a body of the wrong type, a dataset the update also names | Fix the request |
+| `unknown-function` | 400 | The query names a function this server does not have, or with the wrong number of arguments | [SPARQL-SURFACE.md](SPARQL-SURFACE.md) lists what it has |
+| `service` | 400 | A `SERVICE` the query names cannot be reached from here | The console's policy allows this server only; from a script, check the IRI |
+| `rdf-parse` | 400 | RDF sent with a request did not parse | Fix the data |
+| `policy` | 403 | The policy refused the write, or under `--fail-closed` the read | The principal lacks the right; see [ACCESS-CONTROL.md](ACCESS-CONTROL.md) |
+| `read-only` | 403 | `/update` and the writing Graph Store verbs, while `--read-only` is set | Load with the CLI, or start without the flag |
+| `refused` | 500 | The query was estimated to buffer more rows than `--max-blocking-rows` allows; the detail says which operator and whether a `LIMIT` would help | Make the pattern more selective, add the `LIMIT`, or raise the budget |
+| `timeout` | 500 | The query ran past `--timeout` | Narrow it, or raise the limit |
+| `memory-ceiling` | 500 | The process grew past `--max-query-memory` while answering; the detail carries the numbers | Narrow it, or size the ceiling — a third of what you can spare |
+| `evaluation` | 500 | The evaluator failed for another reason; the detail says which | Report it with the query |
+| `internal` | 500 | The store or the server failed | The log has the same message; report it |
+
+A failure that arrives while the answer is being written — a timeout or the ceiling reached
+mid-scan — is answered the same way. Before 0.12.0 it reached the client as an empty 500.
+
+What is **not** an error, by specification: an expression that fails inside a query. SPARQL
+makes that a value, not a failure — a `BIND` of a function that could not answer leaves its
+variable unbound, and a `FILTER` that errors drops the row — and nothing in the result says
+why. A function this server lacks is the exception: the evaluator refuses the query rather
+than answering it with holes.
+
+---
+
 ## Monitoring
 
 | Endpoint | Use |
