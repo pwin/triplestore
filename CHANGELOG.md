@@ -3,7 +3,36 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## 0.11.1 — unreleased
+## 0.12.0 — 2026-09-20
+
+### A failed query explains itself to a program, not only to a person
+
+A query or update that fails is now answered with an
+[RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem document —
+`application/problem+json` with `type`, `title`, `status` and `detail`, and for a syntax
+error the `line` and `column` — under the status the SPARQL Protocol requires. The Protocol
+fixes the status and says the body should explain; the RFC is the HTTP-wide standard for
+the explanation's shape, and it is what a script can match on where before it could only
+display a line of text. The `type` is a URI under `https://holos.dev/problems/` whose last
+segment is the kind: `syntax`, `bad-request`, `unknown-function`, `service`, `rdf-parse`,
+`policy`, `read-only`, `refused`, `timeout`, `memory-ceiling`, `evaluation`, `internal`.
+[OPERATIONS.md](OPERATIONS.md#errors) says what each means and what to do. A client whose
+`Accept` names `text/plain` and nothing else still gets the line of text.
+
+Two things were wrong before and are fixed by the same change. A failure that arrived while
+the answer was being written — a timeout, or the memory ceiling reached mid-scan — escaped
+the handler and reached the client as an empty 500 with the explanation in the server log
+only; it is a problem document now. And a query refused from its estimate was classified as
+a bad request, which it is not — it is well-formed and the deployment declined it — so it
+has its own kind and the 500 the Protocol assigns.
+
+Checked over a real socket: a syntax error at 1:26 answered with its type, line and column;
+an unknown function named in `detail`; the plain-text form on request; a protocol mistake
+and the read-only refusal as problems of their own kinds.
+
+What the specification keeps silent stays silent: an expression that fails inside a query is
+a value, not a failure, and a `BIND` that could not answer leaves its variable unbound with
+no explanation. That would need a HOLOS extension, and is not claimed.
 
 ### The map's tiles were refused: OpenStreetMap wants a referrer
 

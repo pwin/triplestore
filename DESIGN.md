@@ -616,7 +616,7 @@ becomes a per-holon retention policy rather than a schema decision.
 
 ## 10. L6 — Interfaces
 
-> **Partly built.** `holos-server` serves the SPARQL 1.2 Protocol over HTTP with a YASGUI
+> **Partly built.** `holos-server` serves the SPARQL 1.2 Protocol over HTTP with a MatGUI
 > console at `/`, the Graph Store Protocol at `/graph`, and SPARQL 1.1 Update at `/update`.
 > Both W3C protocol suites pass in full (34/34 and 13/13). PyO3 bindings are built and
 > packaged as `holosdb`. **WASM is not built.**
