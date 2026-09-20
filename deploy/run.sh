@@ -7,8 +7,13 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# The environment wins over the files, as it does for the PowerShell scripts, so a service
+# manager or a container can override any one setting without editing anything on disk.
+# Sourcing would clobber it, so whatever was set beforehand is put back afterwards.
+HOLOS_SET_BEFORE="$(env | grep '^HOLOS_' || true)"
 [ -f deploy/holos.env ] && . deploy/holos.env
 [ -f deploy/holos.env.local ] && . deploy/holos.env.local
+while IFS= read -r kv; do [ -n "$kv" ] && export "$kv"; done <<< "$HOLOS_SET_BEFORE"
 
 BIN=./target/release/holos-server
 [ -x "$BIN" ] || { echo "$BIN not built — run deploy/setup.sh" >&2; exit 1; }
@@ -48,5 +53,17 @@ done
 for g in ${HOLOS_ALLOW_GRAPHS:-};     do ARGS+=(--allow-graph "$g");     done
 for p in ${HOLOS_DENY_PREDICATES:-};  do ARGS+=(--deny-predicate "$p");  done
 for l in ${HOLOS_LABEL_GRAPHS:-};     do ARGS+=(--label-graph "$l");     done
+
+# Serving.
+[ "${HOLOS_READ_ONLY:-off}" = "on" ] && ARGS+=(--read-only)
+[ "${HOLOS_REORDER:-off}" = "on" ]   && ARGS+=(--reorder)
+[ -n "${HOLOS_TIMEOUT:-}" ]          && ARGS+=(--timeout "$HOLOS_TIMEOUT")
+[ -n "${HOLOS_MAX_QUERY_MEMORY:-}" ] && ARGS+=(--max-query-memory "$HOLOS_MAX_QUERY_MEMORY")
+[ -n "${HOLOS_BACKUP_DIR:-}" ]       && { mkdir -p "$HOLOS_BACKUP_DIR"; ARGS+=(--backup-dir "$HOLOS_BACKUP_DIR"); }
+[ -n "${HOLOS_BACKUP_ROLE:-}" ]      && ARGS+=(--backup-role "$HOLOS_BACKUP_ROLE")
+
+# Anything else the server accepts, verbatim. `holos-server --help` is the list.
+# shellcheck disable=SC2206
+[ -n "${HOLOS_EXTRA_ARGS:-}" ] && ARGS+=(${HOLOS_EXTRA_ARGS})
 
 exec "$BIN" "${ARGS[@]}"

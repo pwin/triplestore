@@ -61,4 +61,18 @@ foreach ($g in Words (Cfg HOLOS_ALLOW_GRAPHS))    { $a += @('--allow-graph', $g)
 foreach ($p in Words (Cfg HOLOS_DENY_PREDICATES)) { $a += @('--deny-predicate', $p) }
 foreach ($l in Words (Cfg HOLOS_LABEL_GRAPHS))    { $a += @('--label-graph', $l) }
 
+# Serving.
+if ((Cfg HOLOS_READ_ONLY 'off') -eq 'on') { $a += '--read-only' }
+if ((Cfg HOLOS_REORDER 'off') -eq 'on')   { $a += '--reorder' }
+if (Cfg HOLOS_TIMEOUT)          { $a += @('--timeout', (Cfg HOLOS_TIMEOUT)) }
+if (Cfg HOLOS_MAX_QUERY_MEMORY) { $a += @('--max-query-memory', (Cfg HOLOS_MAX_QUERY_MEMORY)) }
+if (Cfg HOLOS_BACKUP_DIR) {
+    New-Item -ItemType Directory -Force -Path (Cfg HOLOS_BACKUP_DIR) | Out-Null
+    $a += @('--backup-dir', (Cfg HOLOS_BACKUP_DIR))
+}
+if (Cfg HOLOS_BACKUP_ROLE) { $a += @('--backup-role', (Cfg HOLOS_BACKUP_ROLE)) }
+
+# Anything else the server accepts, verbatim. holos-server --help is the list.
+$a += Words (Cfg HOLOS_EXTRA_ARGS)
+
 & $bin @a

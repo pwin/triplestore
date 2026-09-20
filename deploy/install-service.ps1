@@ -55,6 +55,17 @@ if ((Cfg HOLOS_FAIL_CLOSED 'off') -eq 'on')      { $a += '--fail-closed' }
 foreach ($g in Words (Cfg HOLOS_ALLOW_GRAPHS))    { $a += "--allow-graph `"$g`"" }
 foreach ($p in Words (Cfg HOLOS_DENY_PREDICATES)) { $a += "--deny-predicate `"$p`"" }
 foreach ($l in Words (Cfg HOLOS_LABEL_GRAPHS))    { $a += "--label-graph `"$l`"" }
+if ((Cfg HOLOS_READ_ONLY 'off') -eq 'on')        { $a += '--read-only' }
+if ((Cfg HOLOS_REORDER 'off') -eq 'on')          { $a += '--reorder' }
+if (Cfg HOLOS_TIMEOUT)                           { $a += "--timeout $(Cfg HOLOS_TIMEOUT)" }
+if (Cfg HOLOS_MAX_QUERY_MEMORY)                  { $a += "--max-query-memory $(Cfg HOLOS_MAX_QUERY_MEMORY)" }
+if (Cfg HOLOS_BACKUP_DIR) {
+    $backupDir = [IO.Path]::GetFullPath((Cfg HOLOS_BACKUP_DIR))
+    New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+    $a += "--backup-dir `"$backupDir`""
+}
+if (Cfg HOLOS_BACKUP_ROLE)                       { $a += "--backup-role $(Cfg HOLOS_BACKUP_ROLE)" }
+foreach ($x in Words (Cfg HOLOS_EXTRA_ARGS))      { $a += $x }
 
 $binPath = "`"$exe`" " + ($a -join ' ')
 

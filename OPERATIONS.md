@@ -87,6 +87,11 @@ That is what makes `--trust-forwarded-identity` safe to turn on there.
 
 ## Configuration
 
+> The configurations people actually run — first run, the store on another disk, a big
+> load, replacing data without a gap, a read-only endpoint behind a front door, locked
+> down, development, service, backups — are in [deploy/README.md](deploy/README.md), each
+> as a `holos.env.local` to copy.
+
 Every setting lives in [deploy/holos.env](deploy/holos.env), which documents each one
 inline. The summary:
 

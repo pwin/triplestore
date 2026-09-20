@@ -189,6 +189,21 @@ all three threads, against a peak that used to arrive there. A test cuts the fix
 37-row files and counts them. 3,277 s all told, the merge phase 11 minutes, and the
 same counts and rows as every store before it.
 
+### The startup scripts: patterns, the rest of the flags, and the environment winning
+
+[deploy/README.md](deploy/README.md) is new: the configurations people actually run, each
+as a `holos.env.local` to copy with the commands that go with it — first run, the store on
+another disk, a big load and what to have ready for it, replacing data without a gap, a
+read-only endpoint behind a front door, locked down, development, service, backups, and
+the container. `deploy/holos.env` gains keys for the serving flags the scripts could not
+set before — `HOLOS_READ_ONLY`, `HOLOS_REORDER`, `HOLOS_TIMEOUT`, `HOLOS_MAX_QUERY_MEMORY`,
+`HOLOS_BACKUP_DIR` and `HOLOS_BACKUP_ROLE` — and `HOLOS_EXTRA_ARGS` for anything else the
+server accepts, verbatim. `run.sh`, `run.ps1` and `install-service.ps1` all translate them.
+
+The shell scripts also let the environment win over the files now, as the PowerShell ones
+always did. `HOLOS_STORE=/mnt/big deploy/load.sh dump.nq` was the documented usage and did
+not work: sourcing `holos.env` put `./var/store` back.
+
 ### `MultiGet` on the dictionary: measured, not built
 
 What is left of the dictionary reads is 43 million terms that recur across windows at

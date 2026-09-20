@@ -8,8 +8,13 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# The environment wins over the files, as it does for the PowerShell scripts, so a service
+# manager or a container can override any one setting without editing anything on disk.
+# Sourcing would clobber it, so whatever was set beforehand is put back afterwards.
+HOLOS_SET_BEFORE="$(env | grep '^HOLOS_' || true)"
 [ -f deploy/holos.env ] && . deploy/holos.env
 [ -f deploy/holos.env.local ] && . deploy/holos.env.local
+while IFS= read -r kv; do [ -n "$kv" ] && export "$kv"; done <<< "$HOLOS_SET_BEFORE"
 
 STORE="${HOLOS_STORE:-./var/store}"
 BIN=./target/release/holos
