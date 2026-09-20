@@ -3,7 +3,7 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## 0.11.0 — unreleased
+## 0.11.0 — 2026-09-20
 
 ### The console: MatGUI, and a policy that keeps it at home
 
