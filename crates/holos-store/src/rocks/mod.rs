@@ -223,11 +223,11 @@ struct DictBuffers {
 }
 
 impl DictBuffers {
-    fn new(dir: &std::path::Path, budget: usize) -> Self {
+    fn new(dir: &std::path::Path, budget: usize, flushes: usize) -> Self {
         Self {
-            str2id: dictsort::DictRuns::new(dir, STR2ID, budget),
-            id2str: dictsort::DictRuns::new(dir, ID2STR, budget),
-            flushes: 0,
+            str2id: dictsort::DictRuns::new(dir, STR2ID, budget).in_window(flushes),
+            id2str: dictsort::DictRuns::new(dir, ID2STR, budget).in_window(flushes),
+            flushes,
         }
     }
 
@@ -287,6 +287,8 @@ struct BulkState {
     /// and most of that is these rows going through a `WriteBatch`. `None` when the load is
     /// not using the sorted path, in which case they go back to `pending`.
     dict: Option<DictBuffers>,
+    /// The previous dictionary window, while a thread is writing it out. See `DictFlush`.
+    dict_flush: Option<DictFlush>,
     /// See [`crate::storage::BulkResolves`].
     resolves: crate::storage::BulkResolves,
     /// Encodes since the last flush: the clock `Cached` positions are read from.
@@ -374,6 +376,31 @@ const HOT_SPREAD: u32 = 8_192;
 /// The bound, in case a dataset is nothing but spread-out terms — which would be unusual,
 /// and forty megabytes is the price of not having to know that in advance.
 const HOT_CAPACITY: usize = 200_000;
+
+/// A dictionary window being written out on its own thread.
+///
+/// A flush used to happen in line: merge the window's runs, write an SST per family,
+/// ingest both, trim the term cache, resume. The merge and the write are the cost — a run
+/// read back from disk and a compressed, filtered SST written — and neither touches the
+/// database, so they run here while the load goes on. What stays on the loading thread is
+/// the ingest, which needs the database, and the trim, which needs the ingest: a term may
+/// only be forgotten once both of its rows are readable on disk, and a term looked up while
+/// its rows are still being written must be found in the cache, or it would be allocated a
+/// second id. So the cache is not trimmed at the flush but at `settle_dictionary`, when the
+/// files are in — a few seconds later, during which the cache holds one window and a
+/// fraction of the next.
+///
+/// One in flight at a time. The next flush waits for this one: the window's rows are on
+/// disk as a run by the time it is handed over, so what the wait bounds is not memory but
+/// the number of files a load has out at once.
+struct DictFlush {
+    sequence: usize,
+    /// The id counters when the window was handed over. A cached term whose id is at or
+    /// past its tag's counter was allocated into the *next* window, whose rows are not on
+    /// disk when this one settles, and the trim leaves it alone.
+    next: FxHashMap<Tag, u64>,
+    handle: std::thread::JoinHandle<Result<Vec<(&'static str, std::path::PathBuf)>>>,
+}
 
 /// The thread that sorts and writes index runs, and the channel that feeds it.
 ///
@@ -608,7 +635,7 @@ impl RocksStorage {
             .then(|| seen::Seen::with_bytes(self.seen_bytes));
         self.bulk = Some(BulkState {
             sst: true,
-            dict: Some(DictBuffers::new(&dir, self.dict_spill_bytes)),
+            dict: Some(DictBuffers::new(&dir, self.dict_spill_bytes, 0)),
             seen,
             ..BulkState::default()
         });
@@ -634,6 +661,7 @@ impl RocksStorage {
 
     /// Ends a bulk load, writing what is buffered and rebuilding the counters.
     fn finish_bulk(&mut self) -> Result<()> {
+        self.settle_dictionary(true)?;
         if let Some(state) = self.bulk.take() {
             let BulkState {
                 pending,
@@ -651,11 +679,8 @@ impl RocksStorage {
             if let Some(dict) = dict {
                 let sequence = dict.flushes;
                 let dir = self.ingest_dir()?;
-                for (family, runs) in [(STR2ID, dict.str2id), (ID2STR, dict.id2str)] {
-                    if runs.is_empty() {
-                        continue;
-                    }
-                    self.write_and_ingest_dict(&dir, family, sequence, runs.merge()?)?;
+                for (family, path) in write_dict_ssts(&dir, sequence, dict)? {
+                    self.ingest_dict_sst(family, path)?;
                 }
             }
             self.write_pending(pending, true)?;
@@ -764,7 +789,8 @@ impl RocksStorage {
         outcome
     }
 
-    /// Writes both dictionary families out as ingested files and forgets the terms.
+    /// Hands both dictionary families to a thread to be written out; the terms are
+    /// forgotten when it has, at `settle_dictionary`.
     ///
     /// # Why this happens during the load and not only at the end
     ///
@@ -785,6 +811,12 @@ impl RocksStorage {
     /// under which a bloom filter on `str2id` might finally pay, and which the measurement
     /// that rejected one did not have.
     fn flush_dictionary(&mut self) -> Result<()> {
+        // The flush before this one first, however far it has got: one window in flight is
+        // the bound, and its trim has to happen before this window's terms join the cache's
+        // count of what is worth keeping.
+        self.settle_dictionary(true)?;
+        let budget = self.dict_spill_bytes;
+        let dir = self.ingest_dir()?;
         let Some(state) = self.bulk.as_mut() else {
             return Ok(());
         };
@@ -792,24 +824,79 @@ impl RocksStorage {
             return Ok(());
         };
         let sequence = dict.flushes;
-        let budget = self.dict_spill_bytes;
-        let dir = self.ingest_dir()?;
 
-        for (family, runs) in [(STR2ID, dict.str2id), (ID2STR, dict.id2str)] {
-            if runs.is_empty() {
-                continue;
-            }
-            self.write_and_ingest_dict(&dir, family, sequence, runs.merge()?)?;
+        let handle = {
+            let dir = dir.clone();
+            std::thread::spawn(move || write_dict_ssts(&dir, sequence, dict))
+        };
+        state.dict_flush = Some(DictFlush {
+            sequence,
+            next: self.next.clone(),
+            handle,
+        });
+        state.dict = Some(DictBuffers::new(&dir, budget, sequence + 1));
+        Ok(())
+    }
+
+    /// Takes in the dictionary window being written, once its files are there.
+    ///
+    /// Polled from the write path with `wait` off, where it costs one atomic load per call
+    /// until the thread is done; called with `wait` on before the next flush and at the end
+    /// of the load, where it has to be done.
+    fn settle_dictionary(&mut self, wait: bool) -> Result<()> {
+        let Some(state) = self.bulk.as_mut() else {
+            return Ok(());
+        };
+        let Some(flush) = state.dict_flush.as_ref() else {
+            return Ok(());
+        };
+        if !wait && !flush.handle.is_finished() {
+            return Ok(());
+        }
+        let DictFlush {
+            sequence,
+            next: next_at_flush,
+            handle,
+        } = state.dict_flush.take().expect("checked above");
+        let files = handle.join().map_err(|_| {
+            StorageError::Io(std::io::Error::other("the dictionary flush thread panicked"))
+        })??;
+        for (family, path) in files {
+            self.ingest_dict_sst(family, path)?;
         }
 
         // Only now: a term is safe to forget once *both* of its rows are readable. The
         // ones worth remembering anyway are the ones hit often enough that forgetting them
         // means looking them up again next window: keep the most-hit, up to a cap, and
         // start their counts over.
+        //
+        // An entry allocated since the flush is not up for forgetting at all. It was
+        // interned into the window still being filled, its rows are in that window's runs
+        // and nowhere on disk, and a lookup that missed it would allocate the term again.
+        // Told apart by its id: ids are issued densely per tag, so one at or past the
+        // counter as it stood at the flush is one the flush did not see. It is evaluated
+        // like any other at the next settle, by which time its rows are in.
         if let Some(state) = self.bulk.as_mut() {
-            let threshold = hot_threshold(state.terms.values().map(Cached::spread));
+            let since_flush = |cached: &Cached| {
+                let issued = next_at_flush.get(&cached.id.tag()).copied().unwrap_or(0);
+                cached.id.payload() >= issued
+            };
+            let threshold = hot_threshold(
+                state
+                    .terms
+                    .values()
+                    .filter(|cached| !since_flush(cached))
+                    .map(Cached::spread),
+            );
+            let mut kept_hot = 0u64;
             state.terms.retain(|_, cached| {
-                let keep = cached.spread() >= threshold;
+                let keep = if since_flush(cached) {
+                    true
+                } else {
+                    let hot = cached.spread() >= threshold;
+                    kept_hot += u64::from(hot);
+                    hot
+                };
                 // Unused until touched again; an entry that stays unused for a whole window
                 // has spread zero at the next flush and is dropped then.
                 cached.first = Cached::NOT_USED;
@@ -817,7 +904,7 @@ impl RocksStorage {
             });
             state.terms.shrink_to_fit();
             state.position = 0;
-            state.resolves.retained += state.terms.len() as u64;
+            state.resolves.retained += kept_hot;
 
             // One line per flush on stderr: the shape of the read cost across a load is what
             // separates "a filter would help" from "the disk is saturated" from "nothing is
@@ -836,52 +923,15 @@ impl RocksStorage {
                 b[1],
                 b[2],
                 b[3],
-                state.terms.len(),
+                kept_hot,
             );
             state.resolves_at_last_flush = r;
-            let mut fresh = DictBuffers::new(&dir, budget);
-            fresh.flushes = sequence + 1;
-            state.dict = Some(fresh);
         }
         Ok(())
     }
 
-    /// Writes one sorted dictionary family as an SST and ingests it.
-    ///
-    /// The index counterpart below writes keys with empty values; these carry a value, and
-    /// the merge has already combined any that share a key, so the stream is strictly
-    /// increasing — which is what `SstFileWriter` requires and will not check for you.
-    fn write_and_ingest_dict(
-        &self,
-        dir: &std::path::Path,
-        family: &'static str,
-        sequence: usize,
-        mut merged: dictsort::Merged,
-    ) -> Result<()> {
-        // Numbered: a load flushes more than once now, and the ingest moves the file away,
-        // but a failure between writing and ingesting would otherwise leave one behind for
-        // the next flush to trip over.
-        let path = dir.join(format!("{family}.{sequence}.dict.sst"));
-        // The family's own options, so the file is written with the comparator and
-        // compression the column family will read it back with.
-        let opts = if family == STR2ID { str2id_opts() } else { value_opts() };
-        let mut writer = rocksdb::SstFileWriter::create(&opts);
-        writer.open(&path).map_err(rocks_err)?;
-
-        let mut wrote = false;
-        while let Some((key, value)) = merged.next()? {
-            writer.put(&key, &value).map_err(rocks_err)?;
-            wrote = true;
-        }
-        if !wrote {
-            // An empty file is not ingestable, and a load that interned nothing new — every
-            // term already in the dictionary — is ordinary.
-            drop(writer);
-            let _ = std::fs::remove_file(&path);
-            return Ok(());
-        }
-        writer.finish().map_err(rocks_err)?;
-
+    /// Ingests one dictionary SST that `write_dict_sst` wrote.
+    fn ingest_dict_sst(&self, family: &'static str, path: std::path::PathBuf) -> Result<()> {
         let mut opts = rocksdb::IngestExternalFileOptions::default();
         opts.set_move_files(true);
         self.db
@@ -1040,6 +1090,9 @@ impl RocksStorage {
                 let pending = std::mem::take(&mut state.pending);
                 self.write_pending(pending, true)?;
             }
+            // The previous window's files, if its thread has finished them; the cache is
+            // trimmed here rather than at the flush, once they are readable.
+            self.settle_dictionary(false)?;
             if full {
                 self.flush_dictionary()?;
             }
@@ -2148,6 +2201,65 @@ impl Spilled {
             named: QUAD_PERMS.map(|(family, _)| sort::Runs::new(dir, family)),
         }
     }
+}
+
+/// Merges one dictionary window into an SST per family, ready to ingest.
+///
+/// Free of the store on purpose: it runs on its own thread while the load goes on, and
+/// nothing here touches the database. The ingest, which does, is the caller's.
+fn write_dict_ssts(
+    dir: &std::path::Path,
+    sequence: usize,
+    dict: DictBuffers,
+) -> Result<Vec<(&'static str, std::path::PathBuf)>> {
+    let mut files = Vec::new();
+    for (family, runs) in [(STR2ID, dict.str2id), (ID2STR, dict.id2str)] {
+        if runs.is_empty() {
+            continue;
+        }
+        if let Some(path) = write_dict_sst(dir, family, sequence, runs.merge()?)? {
+            files.push((family, path));
+        }
+    }
+    Ok(files)
+}
+
+/// Writes one sorted dictionary family as an SST, returning its path — or `None` when the
+/// family had nothing to write, since an empty file is not ingestable.
+///
+/// The index counterpart writes keys with empty values; these carry a value, and the merge
+/// has already combined any that share a key, so the stream is strictly increasing — which
+/// is what `SstFileWriter` requires and will not check for you.
+fn write_dict_sst(
+    dir: &std::path::Path,
+    family: &'static str,
+    sequence: usize,
+    mut merged: dictsort::Merged,
+) -> Result<Option<std::path::PathBuf>> {
+    // Numbered: a load flushes more than once now, and the ingest moves the file away,
+    // but a failure between writing and ingesting would otherwise leave one behind for
+    // the next flush to trip over.
+    let path = dir.join(format!("{family}.{sequence}.dict.sst"));
+    // The family's own options, so the file is written with the comparator and
+    // compression the column family will read it back with.
+    let opts = if family == STR2ID { str2id_opts() } else { value_opts() };
+    let mut writer = rocksdb::SstFileWriter::create(&opts);
+    writer.open(&path).map_err(rocks_err)?;
+
+    let mut wrote = false;
+    while let Some((key, value)) = merged.next()? {
+        writer.put(&key, &value).map_err(rocks_err)?;
+        wrote = true;
+    }
+    if !wrote {
+        // A load that interned nothing new — every term already in the dictionary — is
+        // ordinary.
+        drop(writer);
+        let _ = std::fs::remove_file(&path);
+        return Ok(None);
+    }
+    writer.finish().map_err(rocks_err)?;
+    Ok(Some(path))
 }
 
 /// Splits quads into the two key shapes the index uses.

@@ -67,6 +67,10 @@ pub(super) const SPILL_BYTES: usize = 256 << 20;
 pub(super) struct DictRuns {
     dir: PathBuf,
     family: &'static str,
+    /// Which flush of the load these belong to, in every run's name. Two windows are alive
+    /// at once while one is being written out on its own thread, in the same directory,
+    /// and a run named only by its family and number would be created twice.
+    window: usize,
     paths: Vec<PathBuf>,
     buffer: Vec<Row>,
     bytes: usize,
@@ -78,11 +82,18 @@ impl DictRuns {
         Self {
             dir: dir.to_path_buf(),
             family,
+            window: 0,
             paths: Vec::new(),
             buffer: Vec::new(),
             bytes: 0,
             budget,
         }
+    }
+
+    /// Names these runs after the flush they belong to.
+    pub(super) fn in_window(mut self, window: usize) -> Self {
+        self.window = window;
+        self
     }
 
     /// Adds a row, spilling first if this one would take the buffer past its budget.
@@ -119,7 +130,7 @@ impl DictRuns {
 
         let path = self
             .dir
-            .join(format!("{}.{}.dictrun", self.family, self.paths.len()));
+            .join(format!("{}.{}.{}.dictrun", self.family, self.window, self.paths.len()));
         let mut out = BufWriter::new(File::create(&path).map_err(StorageError::Io)?);
         for (key, value) in &self.buffer {
             write_row(&mut out, key, value)?;
