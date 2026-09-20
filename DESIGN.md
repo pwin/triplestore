@@ -661,10 +661,12 @@ Content-Security-Policy naming this server, the script CDN and one tile host, an
 else; `connect-src 'self'` means it can query the server that served it and no other
 endpoint. Every CDN file is pinned by exact version and subresource-integrity hash, so a
 CDN serving different bytes breaks the console rather than running unreviewed code against
-the endpoint. No referrer leaves the page. The one disclosure the policy cannot close is the
-basemap — which tiles a map fetches says where its user is looking — so `--ui-tiles none`
-draws over a blank background, and `--no-ui` removes the console entirely: **the endpoints
-need no network at all.**
+the endpoint. No referrer leaves the page, except that a tile request carries the page's
+origin — OpenStreetMap's policy requires a `Referer` and returns 403 without one, and the
+origin says which server asked, which the request's address says already. The disclosure
+the policy cannot close is the basemap itself — which tiles a map fetches says where its
+user is looking — so `--ui-tiles none` draws over a blank background, and `--no-ui` removes
+the console entirely: **the endpoints need no network at all.**
 
 **Views the console owes the thesis.** Everything below reads through `/query` and
 `/graph`, which is what makes it conformant with §14: a principal sees exactly what the scan

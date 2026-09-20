@@ -3,6 +3,22 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.11.1 — unreleased
+
+### The map's tiles were refused: OpenStreetMap wants a referrer
+
+0.11.0 sent no referrer from the console at all, and OpenStreetMap's tile servers answered
+403 — their [tile policy](https://wiki.openstreetmap.org/wiki/Blocked_tiles) requires a
+`Referer`, and a page that withholds one is treated as hiding. Tile requests now carry the
+page's *origin* and nothing more — scheme, host and port, never a path or a query — set on
+the tile layer alone, so the page's own policy stays `no-referrer` for the CDN and for any
+link a user follows out of a result. The origin says which server asked, which the request's
+address said already. Measured with the served console script in a headless browser: twelve
+tiles requested, twelve loaded, every one carrying `referrerpolicy="strict-origin"`.
+`--ui-tiles none` still sends neither tiles nor referrer.
+
+The console object is now `window.holosConsole`, so a script or a test can reach it.
+
 ## 0.11.0 — 2026-09-20
 
 ### The console: MatGUI, and a policy that keeps it at home

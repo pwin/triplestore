@@ -37,10 +37,12 @@ parser does not read the syntax yet.
 **The console cannot send anything anywhere but this server.** Its Content-Security-Policy
 names this server, the script CDN (`unpkg.com`, every file pinned by version and integrity
 hash) and the basemap's tile host, and nothing else — so the endpoint box will not query
-another endpoint, and no plugin can reach out. The one thing that does leave is which map
-tiles it asks for, which says where the user is looking: `HOLOS_UI_TILES=none` draws over a
-blank background instead, and `HOLOS_UI=off` removes the console, after which the process
-needs no network at all. `crates/holos-server/src/ui.rs` is the whole of it.
+another endpoint, and no plugin can reach out. What does leave: which map tiles it asks
+for, which says where the user is looking, and with each tile the console's *origin* —
+scheme, host and port, never a path or a query — because OpenStreetMap's tile policy
+requires a `Referer` and answers 403 without one. `HOLOS_UI_TILES=none` draws over a blank
+background and sends neither, and `HOLOS_UI=off` removes the console, after which the
+process needs no network at all. `crates/holos-server/src/ui.rs` is the whole of it.
 
 ### Prerequisites
 

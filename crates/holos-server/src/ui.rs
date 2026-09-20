@@ -23,8 +23,12 @@
 //!   version and carries the SHA-384 of the bytes that were reviewed; the browser refuses
 //!   to run a file that differs. A CDN that served something else would break the console
 //!   visibly rather than run unreviewed code against the endpoint.
-//! * **No referrer.** The CDN and the tile host learn nothing about the page that asked,
-//!   and a link a user follows out of a result carries nothing back to its target.
+//! * **No referrer**, with one measured exception. The CDN learns nothing about the page
+//!   that asked, and a link a user follows out of a result carries nothing back to its
+//!   target. Tile requests carry the page's *origin* and nothing more — scheme, host and
+//!   port, never a path or a query — because OpenStreetMap's tile policy requires a
+//!   `Referer` and its servers answer 403 without one. The origin says which server asked,
+//!   which the request's own address says already.
 //! * **No inline script.** The page's configuration is served as `/ui/console.js` from this
 //!   origin, so the policy needs no nonce, no hash, and no `'unsafe-inline'` for scripts.
 //!
@@ -178,10 +182,19 @@ pub fn script(endpoint: &str, tiles: Option<&str>) -> String {
 // Content-Security-Policy names two script sources: this origin and the CDN.
 (function () {{
   Yasgui.Yasr.defaults.plugins.geo = {{
-    basemaps: {{ {name}: L.tileLayer({template}, {{ attribution: {attribution} }}) }},
+    basemaps: {{
+      {name}: L.tileLayer({template}, {{
+        attribution: {attribution},
+        // The page sends no referrer; tile requests send the origin alone. OpenStreetMap's
+        // tile policy requires a Referer and its servers answer 403 to a request without
+        // one, and the origin discloses nothing the request's address does not.
+        referrerPolicy: "strict-origin"
+      }})
+    }},
     defaultBasemap: {name_json}
   }};
-  new Yasgui(document.getElementById("yasgui"), {{
+  // On the window so a script or a test can reach the console; nothing else needs it.
+  window.holosConsole = new Yasgui(document.getElementById("yasgui"), {{
     // The console is a convenience over the protocol endpoint, so it is configured with
     // the same defaults a command-line client would use: this server, POST, JSON results.
     requestConfig: {{
@@ -374,6 +387,9 @@ mod tests {
         assert!(
             script.contains(r#"L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png""#)
         );
+        // OpenStreetMap answers 403 to a tile request with no Referer, so the tiles — and
+        // only the tiles — carry the page's origin.
+        assert!(script.contains(r#"referrerPolicy: "strict-origin""#));
         assert!(page("HOLOS").contains("<title>HOLOS</title>"));
     }
 
