@@ -243,9 +243,9 @@ A yes means *this build evaluates it*, not that every edge case of the specifica
 | `geof:union` | GeoSPARQL | ✅ yes |  |
 | `geof:asGeoJSON` | GeoSPARQL | ✅ yes |  |
 | `geof:getSRID` | GeoSPARQL | ✅ yes | **replaced**: reports the declared system, not CRS84 |
-| `reference systems` | GeoSPARQL | ✅ yes | **added by HOLOS**: EPSG:4326, 27700 and 3857, not CRS84 alone |
+| `reference systems` | GeoSPARQL | ✅ yes | **added by HOLOS**: EPSG:4326, 27700, 3857, and every UTM zone — 326zz, 327zz, 258zz — not CRS84 alone. **Axis order is the CRS's own:** `EPSG:4326` is latitude first, CRS84 longitude first, and a literal with the axes the other way round is read as it is written |
 | `holos:transform` | HOLOS | ✅ yes | **added by HOLOS**: GeoSPARQL has no transform |
-| `spatialF:transformSRS` | Jena | ✅ yes | `holos:transform` under Jena's name, argument for argument; the systems above, not any EPSG code |
+| `spatialF:transformSRS` | Jena | ✅ yes | `holos:transform` under Jena's name, argument for argument; the system may be an IRI, an `xsd:anyURI` or a plain string; the systems above, not any EPSG code |
 | `spatialF:transformDatatype` | Jena | ✅ yes | WKT ↔ GeoJSON, keeping the system; GeoJSON only for CRS84; GML refused |
 | `spatialF:transform` | Jena | ✅ yes | both, in Jena's order: geometry, datatype, system |
 

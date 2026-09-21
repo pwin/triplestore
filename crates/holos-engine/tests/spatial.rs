@@ -408,14 +408,19 @@ fn disjointness_emits_no_restriction() {
 // ------------------------------------------------------------------- incremental
 
 /// A store holding `n` points on a diagonal, plus some non-geometry noise.
+///
+/// A point `i` sits at `(i/100, i/100)`: a bare `geo:wktLiteral` is CRS84, and since 0.13.0
+/// a coordinate off the planet is refused rather than read, so the diagonal has to stay
+/// within ninety degrees of the equator. The hundredth keeps every offset below in range.
 fn points(n: usize, offset: usize) -> String {
     let mut turtle = String::from(
         "@prefix ex:  <http://example.com/> .\n\
          @prefix geo: <http://www.opengis.net/ont/geosparql#> .\n",
     );
     for i in offset..offset + n {
+        let at = i as f64 / 100.0;
         turtle.push_str(&format!(
-            "ex:p{i} geo:asWKT \"POINT({i} {i})\"^^geo:wktLiteral .\n"
+            "ex:p{i} geo:asWKT \"POINT({at} {at})\"^^geo:wktLiteral .\n"
         ));
         turtle.push_str(&format!("ex:p{i} ex:label \"not a geometry {i}\" .\n"));
     }
@@ -469,7 +474,7 @@ fn a_refresh_produces_what_a_rebuild_would() {
             index.is_current_for(engine.store()),
             "round {round}: a refreshed index must not still look stale, or nothing will use it"
         );
-        for (lo, hi) in [(-10.0, 10.0), (0.0, 250.0), (999.0, 1105.0), (-1e6, 1e6)] {
+        for (lo, hi) in [(-10.0, 10.0), (0.0, 2.5), (9.99, 11.05), (-1e6, 1e6)] {
             let rect = geo::Rect::new((lo, lo), (hi, hi));
             assert!(
                 agree(&index, &rebuilt, &rect),
@@ -502,7 +507,7 @@ fn a_geometry_added_after_the_build_is_found() {
         .expect("load");
     let index = SpatialIndex::build(engine.store()).expect("build");
 
-    let far = geo::Rect::new((4995.0, 4995.0), (5005.0, 5005.0));
+    let far = geo::Rect::new((49.95, 49.95), (50.05, 50.05));
     assert!(
         index.candidates_in(&far).is_empty(),
         "nothing is out there yet"

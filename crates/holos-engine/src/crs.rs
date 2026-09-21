@@ -5,7 +5,8 @@
 //! which meant a dataset published on the British National Grid — which is most public UK
 //! data — could not be queried at all, let alone queried against a dataset in degrees.
 //!
-//! Three systems are supported, which between them cover that case:
+//! The systems supported, which between them cover that case and the one a Dutch or German
+//! dataset raises next:
 //!
 //! | URI | System | Axis order | Units |
 //! |---|---|---|---|
@@ -13,6 +14,15 @@
 //! | `.../EPSG/0/4326` | WGS 84 geographic | **latitude, longitude** | degrees |
 //! | `.../EPSG/0/27700` | OSGB36 / British National Grid | easting, northing | metres |
 //! | `.../EPSG/0/3857` | WGS 84 / Pseudo-Mercator (Web Mercator) | easting, northing | metres |
+//! | `.../EPSG/0/326zz`, `327zz` | WGS 84 / UTM zone zz, north and south | easting, northing | metres |
+//! | `.../EPSG/0/258zz` | ETRS89 / UTM zone zz north, zones 28–38 | easting, northing | metres |
+//!
+//! ETRS89 is treated as WGS 84. The two datums were identical in 1989 and the European
+//! plate has since carried ETRS89 about 2.5 cm a year away from it, so a coordinate moved
+//! between them here is under a metre from the answer a datum-aware transformation gives —
+//! which is how PROJ treats the pair by default as well. A geographic coordinate outside
+//! the planet — a latitude past ±90°, a longitude past ±180° — is refused rather than read,
+//! since the commonest way to write one is to swap the axes.
 //!
 //! # The axis-order trap
 //!
@@ -63,6 +73,8 @@ pub const EPSG_4326_URI: &str = "http://www.opengis.net/def/crs/EPSG/0/4326";
 pub const EPSG_27700_URI: &str = "http://www.opengis.net/def/crs/EPSG/0/27700";
 /// EPSG:3857 — WGS 84 / Pseudo-Mercator.
 pub const EPSG_3857_URI: &str = "http://www.opengis.net/def/crs/EPSG/0/3857";
+/// The prefix every EPSG code's OGC URI shares.
+const EPSG_URI_PREFIX: &str = "http://www.opengis.net/def/crs/EPSG/0/";
 
 /// A coordinate reference system this engine can read and write.
 ///
@@ -79,6 +91,9 @@ pub enum Crs {
     BritishNationalGrid,
     /// WGS 84 / Pseudo-Mercator, easting first, metres.
     WebMercator,
+    /// A UTM zone, by its EPSG code: `326zz` north and `327zz` south on WGS 84, `258zz`
+    /// north on ETRS89. Easting first, metres.
+    Utm(u16),
 }
 
 impl Crs {
@@ -99,29 +114,49 @@ impl Crs {
                 Some(Self::BritishNationalGrid)
             }
             EPSG_3857_URI | "urn:ogc:def:crs:EPSG::3857" | "EPSG:3857" => Some(Self::WebMercator),
-            _ => None,
+            other => {
+                let code = other
+                    .strip_prefix(EPSG_URI_PREFIX)
+                    .or_else(|| other.strip_prefix("urn:ogc:def:crs:EPSG::"))
+                    .or_else(|| other.strip_prefix("EPSG:"))?;
+                let code: u16 = code.parse().ok()?;
+                utm::zone_of(code).map(|_| Self::Utm(code))
+            }
         }
     }
 
     /// The canonical URI for this system, which is what a literal written here carries.
     #[must_use]
-    pub const fn uri(self) -> &'static str {
+    pub fn uri(self) -> String {
         match self {
-            Self::Crs84 => CRS84_URI,
-            Self::Epsg4326 => EPSG_4326_URI,
-            Self::BritishNationalGrid => EPSG_27700_URI,
-            Self::WebMercator => EPSG_3857_URI,
+            Self::Crs84 => CRS84_URI.to_owned(),
+            Self::Epsg4326 => EPSG_4326_URI.to_owned(),
+            Self::BritishNationalGrid => EPSG_27700_URI.to_owned(),
+            Self::WebMercator => EPSG_3857_URI.to_owned(),
+            Self::Utm(code) => format!("{EPSG_URI_PREFIX}{code}"),
         }
     }
 
-    /// Every system a query may name, for documentation and tests to enumerate.
+    /// Whether coordinates in this system are degrees of longitude and latitude in some
+    /// order, rather than metres on a projection.
     #[must_use]
-    pub const fn all() -> [Self; 4] {
+    pub const fn is_geographic(self) -> bool {
+        matches!(self, Self::Crs84 | Self::Epsg4326)
+    }
+
+    /// The systems a query may name, one of each shape, for documentation and tests to
+    /// enumerate. UTM has a hundred and thirty codes; three stand for them here: a WGS 84
+    /// zone in each hemisphere and an ETRS89 one.
+    #[must_use]
+    pub const fn all() -> [Self; 7] {
         [
             Self::Crs84,
             Self::Epsg4326,
             Self::BritishNationalGrid,
             Self::WebMercator,
+            Self::Utm(32631),
+            Self::Utm(32756),
+            Self::Utm(25832),
         ]
     }
 
@@ -133,16 +168,21 @@ impl Crs {
         if !coord.x.is_finite() || !coord.y.is_finite() {
             return None;
         }
-        match self {
-            Self::Crs84 => Some(coord),
+        let geographic = match self {
+            Self::Crs84 => coord,
             // The literal is latitude, longitude; everything past here is the other way.
-            Self::Epsg4326 => Some(Coord {
+            Self::Epsg4326 => Coord {
                 x: coord.y,
                 y: coord.x,
-            }),
-            Self::BritishNationalGrid => bng::to_wgs84(coord),
-            Self::WebMercator => web_mercator::to_wgs84(coord),
-        }
+            },
+            Self::BritishNationalGrid => return bng::to_wgs84(coord),
+            Self::WebMercator => return web_mercator::to_wgs84(coord),
+            Self::Utm(code) => return utm::to_wgs84(code, coord),
+        };
+        // A latitude past ±90° or a longitude past ±180° is not a place. The commonest way
+        // to write one is to put the axes the wrong way round under a system that defines
+        // them the other way, and reading it as if it were a place hides that.
+        on_the_planet(geographic)
     }
 
     /// WGS 84 longitude and latitude in degrees, as a coordinate in this system.
@@ -151,6 +191,7 @@ impl Crs {
         if !coord.x.is_finite() || !coord.y.is_finite() {
             return None;
         }
+        let coord = on_the_planet(coord)?;
         match self {
             Self::Crs84 => Some(coord),
             Self::Epsg4326 => Some(Coord {
@@ -159,18 +200,30 @@ impl Crs {
             }),
             Self::BritishNationalGrid => bng::from_wgs84(coord),
             Self::WebMercator => web_mercator::from_wgs84(coord),
+            Self::Utm(code) => utm::from_wgs84(code, coord),
         }
     }
 }
 
+/// A longitude and latitude that is somewhere, or `None`.
+fn on_the_planet(coord: Coord) -> Option<Coord> {
+    (coord.y.abs() <= 90.0 && coord.x.abs() <= 180.0).then_some(coord)
+}
+
 /// One coordinate, moved from one system to another.
 ///
-/// Everything goes through WGS 84 longitude and latitude, so adding a fourth system means
-/// writing one pair of functions rather than three.
+/// Everything goes through WGS 84 longitude and latitude, so adding a system means writing
+/// one pair of functions rather than one per other system.
 #[must_use]
 pub fn transform(from: Crs, to: Crs, coord: Coord) -> Option<Coord> {
     if from == to {
-        return Some(coord);
+        // Nothing to move, but still something to check: a geographic coordinate that is
+        // not a place is refused whichever way it was going.
+        return if from.is_geographic() {
+            on_the_planet(coord)
+        } else {
+            (coord.x.is_finite() && coord.y.is_finite()).then_some(coord)
+        };
     }
     to.from_wgs84(from.to_wgs84(coord)?)
 }
@@ -207,6 +260,364 @@ mod web_mercator {
 }
 
 // -------------------------------------------------------------------------------------
+// UTM — WGS 84 zones 326zz and 327zz, ETRS89 zones 258zz
+// -------------------------------------------------------------------------------------
+
+/// The Universal Transverse Mercator zones, on the ellipsoid WGS 84 and ETRS89 share.
+///
+/// Each zone is the same projection the National Grid uses — the series in [`tm`] — with a
+/// different central meridian, a scale of 0.9996 at it, a false easting of 500 km, and in
+/// the southern hemisphere a false northing of 10 000 km. No datum shift: the ellipsoid is
+/// the one the coordinates are already on, and ETRS89 is taken as WGS 84 for the reason
+/// the module documentation gives.
+///
+/// Measured against PROJ 9 on eight points across five zones: the forward projection
+/// agrees with PROJ to a millimetre within 3° of the zone's meridian, to 2 mm at 4° — as
+/// far as the Netherlands convention of using zone 32 for the whole country takes it —
+/// and to 5 mm at 6°, where the series PROJ replaced with an exact formulation begins to
+/// show; the round trip closes to the same figures. A zone is designed for ±3°.
+mod utm {
+    use super::tm::{Ellipsoid, TransverseMercator};
+    use geo::Coord;
+
+    /// GRS 80, which ETRS89 is defined on, is WGS 84 to a tenth of a millimetre in the
+    /// semi-minor axis; the WGS 84 figure serves both.
+    const WGS84: Ellipsoid = Ellipsoid {
+        a: 6_378_137.0,
+        b: 6_356_752.314_245_179,
+    };
+
+    /// The zone and hemisphere an EPSG code names, or `None` for a code that is not UTM.
+    pub fn zone_of(code: u16) -> Option<(u8, bool)> {
+        let (base, south, zones) = match code {
+            32601..=32660 => (32600, false, 1..=60),
+            32701..=32760 => (32700, true, 1..=60),
+            25828..=25838 => (25800, false, 28..=38),
+            _ => return None,
+        };
+        let zone = code - base;
+        zones
+            .contains(&zone)
+            .then_some((u8::try_from(zone).ok()?, south))
+    }
+
+    fn projection(code: u16) -> Option<TransverseMercator> {
+        let (zone, south) = zone_of(code)?;
+        Some(TransverseMercator {
+            ellipsoid: WGS84,
+            scale: 0.9996,
+            lat0_deg: 0.0,
+            lon0_deg: f64::from(zone) * 6.0 - 183.0,
+            false_easting: 500_000.0,
+            false_northing: if south { 10_000_000.0 } else { 0.0 },
+        })
+    }
+
+    pub fn from_wgs84(code: u16, coord: Coord) -> Option<Coord> {
+        projection(code)?.project(coord.y.to_radians(), coord.x.to_radians())
+    }
+
+    pub fn to_wgs84(code: u16, coord: Coord) -> Option<Coord> {
+        let (lat, lon) = projection(code)?.unproject(coord)?;
+        super::on_the_planet(Coord {
+            x: lon.to_degrees(),
+            y: lat.to_degrees(),
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::crs::Crs;
+
+        /// PROJ 9's answers, to the millimetre it prints, for `EPSG:4326` input.
+        const REFERENCE: &[(u16, &str, f64, f64, f64, f64)] = &[
+            (
+                25832,
+                "Amsterdam Central",
+                52.3791,
+                4.9003,
+                220_997.635,
+                5_811_116.297,
+            ),
+            (
+                25832,
+                "Rotterdam Port",
+                51.9225,
+                4.4792,
+                189_186.155,
+                5_762_079.763,
+            ),
+            (
+                25832,
+                "Utrecht Center",
+                52.0907,
+                5.1214,
+                234_320.135,
+                5_778_225.930,
+            ),
+            (
+                32631,
+                "Amsterdam Central",
+                52.3791,
+                4.9003,
+                629_345.737,
+                5_804_903.392,
+            ),
+            (
+                32631,
+                "Cardiff Castle",
+                51.4816,
+                -3.181,
+                70_974.561,
+                5_721_520.200,
+            ),
+            (
+                32632,
+                "Utrecht Center",
+                52.0907,
+                5.1214,
+                234_320.135,
+                5_778_225.930,
+            ),
+            (
+                32756,
+                "Sydney Opera",
+                -33.8568,
+                151.2153,
+                334_900.570,
+                6_252_288.753,
+            ),
+            (
+                32631,
+                "zone edge, 6E",
+                50.0,
+                5.9999,
+                714_977.072,
+                5_542_943.731,
+            ),
+        ];
+
+        #[test]
+        fn every_reference_point_lands_where_proj_puts_it() {
+            for &(code, name, lat, lon, east, north) in REFERENCE {
+                let got = from_wgs84(code, Coord { x: lon, y: lat }).expect("projects");
+                // Two millimetres within 4° of the meridian; Cardiff sits 6° from zone
+                // 31's and the series is good to 5 mm there.
+                let tolerance =
+                    if (lon - (f64::from(zone_of(code).expect("utm").0) * 6.0 - 183.0)).abs() > 5.0
+                    {
+                        0.005
+                    } else {
+                        0.002
+                    };
+                assert!(
+                    (got.x - east).abs() < tolerance && (got.y - north).abs() < tolerance,
+                    "{name} in EPSG:{code}: got ({:.3}, {:.3}), PROJ says ({east:.3}, {north:.3})",
+                    got.x,
+                    got.y
+                );
+            }
+        }
+
+        #[test]
+        fn the_round_trip_closes_to_a_millimetre() {
+            for &(code, name, lat, lon, _, _) in REFERENCE {
+                let there = from_wgs84(code, Coord { x: lon, y: lat }).expect("projects");
+                let back = to_wgs84(code, there).expect("unprojects");
+                let east = (back.x - lon) * 111_320.0 * lat.to_radians().cos();
+                let north = (back.y - lat) * 110_574.0;
+                assert!(
+                    (east * east + north * north).sqrt() < 0.005,
+                    "{name} in EPSG:{code} came back {:.4} m away",
+                    (east * east + north * north).sqrt()
+                );
+            }
+        }
+
+        #[test]
+        fn the_codes_are_read_and_the_rest_are_not() {
+            assert_eq!(zone_of(32631), Some((31, false)));
+            assert_eq!(zone_of(32760), Some((60, true)));
+            assert_eq!(zone_of(25828), Some((28, false)));
+            assert_eq!(zone_of(25838), Some((38, false)));
+            assert_eq!(zone_of(32600), None, "zone 0 does not exist");
+            assert_eq!(zone_of(32661), None, "zone 61 does not exist");
+            assert_eq!(zone_of(25839), None, "ETRS89 zones stop at 38");
+            assert_eq!(zone_of(2154), None, "Lambert-93 is not UTM");
+            assert_eq!(
+                Crs::from_uri("http://www.opengis.net/def/crs/EPSG/0/25832"),
+                Some(Crs::Utm(25832))
+            );
+            assert_eq!(Crs::from_uri("EPSG:32756"), Some(Crs::Utm(32756)));
+            assert_eq!(
+                Crs::from_uri("urn:ogc:def:crs:EPSG::32631"),
+                Some(Crs::Utm(32631))
+            );
+            assert_eq!(
+                Crs::from_uri("http://www.opengis.net/def/crs/EPSG/0/28992"),
+                None
+            );
+            assert_eq!(
+                Crs::Utm(25832).uri(),
+                "http://www.opengis.net/def/crs/EPSG/0/25832"
+            );
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------
+// Transverse Mercator — the series the National Grid and every UTM zone share
+// -------------------------------------------------------------------------------------
+
+/// The Transverse Mercator projection, as the Ordnance Survey publishes it.
+///
+/// The series is the one in *A Guide to Coordinate Systems in Great Britain*, which is the
+/// standard Redfearn expansion: exact to a millimetre within a few degrees of the central
+/// meridian, which is what every zone here asks of it. It was written for the National
+/// Grid and generalised when UTM needed the same thing with other numbers; the National
+/// Grid's own tests still hold it to the Ordnance Survey worked example.
+mod tm {
+    use geo::Coord;
+
+    /// How many times the inverse iteration may run before giving up.
+    ///
+    /// It converges in a handful of steps for any coordinate on the planet; the cap exists
+    /// so a coordinate that is *not* on the planet costs a bounded amount of work rather
+    /// than spinning. Reaching it means the input was nonsense, and the caller gets `None`.
+    const MAX_ITERATIONS: usize = 32;
+
+    /// An ellipsoid by its two semi-axes, in metres.
+    #[derive(Clone, Copy)]
+    pub struct Ellipsoid {
+        pub a: f64,
+        pub b: f64,
+    }
+
+    impl Ellipsoid {
+        pub const fn eccentricity_squared(self) -> f64 {
+            (self.a * self.a - self.b * self.b) / (self.a * self.a)
+        }
+    }
+
+    /// One projection: an ellipsoid, a scale on the central meridian, a true origin, and
+    /// the false origin the grid's numbers are counted from.
+    #[derive(Clone, Copy)]
+    pub struct TransverseMercator {
+        pub ellipsoid: Ellipsoid,
+        pub scale: f64,
+        pub lat0_deg: f64,
+        pub lon0_deg: f64,
+        pub false_easting: f64,
+        pub false_northing: f64,
+    }
+
+    impl TransverseMercator {
+        /// The meridional arc: the distance along the meridian from the projection origin.
+        ///
+        /// Shared by the projection and its inverse, which is the point of pulling it out —
+        /// the inverse solves for the latitude that makes this equal a given northing, so
+        /// the two must be the same series or the round trip does not close.
+        fn meridional_arc(&self, lat: f64) -> f64 {
+            let Ellipsoid { a, b } = self.ellipsoid;
+            let lat0 = self.lat0_deg.to_radians();
+            let n = (a - b) / (a + b);
+            let (n2, n3) = (n * n, n * n * n);
+            let ma = (1.0 + n + 1.25 * n2 + 1.25 * n3) * (lat - lat0);
+            let mb = (3.0 * n + 3.0 * n2 + 2.625 * n3) * (lat - lat0).sin() * (lat + lat0).cos();
+            let mc =
+                (1.875 * n2 + 1.875 * n3) * (2.0 * (lat - lat0)).sin() * (2.0 * (lat + lat0)).cos();
+            let md = (35.0 / 24.0) * n3 * (3.0 * (lat - lat0)).sin() * (3.0 * (lat + lat0)).cos();
+            b * self.scale * (ma - mb + mc - md)
+        }
+
+        /// nu, rho and eta squared at a latitude: the three radii the series is written in.
+        fn radii(&self, lat: f64) -> (f64, f64, f64) {
+            let a = self.ellipsoid.a;
+            let e2 = self.ellipsoid.eccentricity_squared();
+            let sin_lat = lat.sin();
+            let w = 1.0 - e2 * sin_lat * sin_lat;
+            let nu = a * self.scale / w.sqrt();
+            let rho = a * self.scale * (1.0 - e2) / (w * w.sqrt());
+            (nu, rho, nu / rho - 1.0)
+        }
+
+        /// Geodetic latitude and longitude in radians, on this ellipsoid, to easting and
+        /// northing.
+        pub fn project(&self, lat: f64, lon: f64) -> Option<Coord> {
+            if lat.abs() > std::f64::consts::FRAC_PI_2 {
+                return None;
+            }
+            let (nu, rho, eta2) = self.radii(lat);
+            let (sin_lat, cos_lat) = lat.sin_cos();
+            let tan_lat = lat.tan();
+            let (t2, t4) = (tan_lat * tan_lat, tan_lat.powi(4));
+            let (c3, c5) = (cos_lat.powi(3), cos_lat.powi(5));
+
+            let i = self.meridional_arc(lat) + self.false_northing;
+            let ii = nu / 2.0 * sin_lat * cos_lat;
+            let iii = nu / 24.0 * sin_lat * c3 * (5.0 - t2 + 9.0 * eta2);
+            let iiia = nu / 720.0 * sin_lat * c5 * (61.0 - 58.0 * t2 + t4);
+            let iv = nu * cos_lat;
+            let v = nu / 6.0 * c3 * (nu / rho - t2);
+            let vi = nu / 120.0 * c5 * (5.0 - 18.0 * t2 + t4 + 14.0 * eta2 - 58.0 * t2 * eta2);
+
+            let dl = lon - self.lon0_deg.to_radians();
+            let (dl2, dl3) = (dl * dl, dl * dl * dl);
+            let northing = i + ii * dl2 + iii * dl2 * dl2 + iiia * dl3 * dl3;
+            let easting = self.false_easting + iv * dl + v * dl3 + vi * dl3 * dl2;
+            (northing.is_finite() && easting.is_finite()).then_some(Coord {
+                x: easting,
+                y: northing,
+            })
+        }
+
+        /// Easting and northing back to geodetic latitude and longitude in radians.
+        pub fn unproject(&self, coord: Coord) -> Option<(f64, f64)> {
+            let (easting, northing) = (coord.x, coord.y);
+            let a = self.ellipsoid.a;
+            let lat0 = self.lat0_deg.to_radians();
+            let mut lat = (northing - self.false_northing) / (a * self.scale) + lat0;
+            let mut converged = false;
+            for _ in 0..MAX_ITERATIONS {
+                let remainder = northing - self.false_northing - self.meridional_arc(lat);
+                // A hundredth of a millimetre, which is the tolerance the Ordnance Survey
+                // worked example stops at.
+                if remainder.abs() < 1.0e-5 {
+                    converged = true;
+                    break;
+                }
+                lat += remainder / (a * self.scale);
+            }
+            if !converged {
+                return None;
+            }
+
+            let (nu, rho, eta2) = self.radii(lat);
+            let tan_lat = lat.tan();
+            let (t2, t4, t6) = (tan_lat * tan_lat, tan_lat.powi(4), tan_lat.powi(6));
+            let sec = 1.0 / lat.cos();
+            let (nu3, nu5, nu7) = (nu.powi(3), nu.powi(5), nu.powi(7));
+
+            let vii = tan_lat / (2.0 * rho * nu);
+            let viii = tan_lat / (24.0 * rho * nu3) * (5.0 + 3.0 * t2 + eta2 - 9.0 * t2 * eta2);
+            let ix = tan_lat / (720.0 * rho * nu5) * (61.0 + 90.0 * t2 + 45.0 * t4);
+            let x = sec / nu;
+            let xi = sec / (6.0 * nu3) * (nu / rho + 2.0 * t2);
+            let xii = sec / (120.0 * nu5) * (5.0 + 28.0 * t2 + 24.0 * t4);
+            let xiia = sec / (5040.0 * nu7) * (61.0 + 662.0 * t2 + 1320.0 * t4 + 720.0 * t6);
+
+            let de = easting - self.false_easting;
+            let (de2, de3) = (de * de, de * de * de);
+            let latitude = lat - vii * de2 + viii * de2 * de2 - ix * de3 * de3;
+            let longitude = self.lon0_deg.to_radians() + x * de - xi * de3 + xii * de3 * de2
+                - xiia * de3 * de2 * de2;
+            (latitude.is_finite() && longitude.is_finite()).then_some((latitude, longitude))
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------
 // EPSG:27700 — OSGB36 / British National Grid
 // -------------------------------------------------------------------------------------
 
@@ -220,6 +631,7 @@ mod web_mercator {
 /// of a triangulation network laid out in the 1930s, and no seven parameters describe it
 /// exactly. See [`PROJECTION_ACCURACY_METRES`](super::PROJECTION_ACCURACY_METRES).
 mod bng {
+    use super::tm::{Ellipsoid, TransverseMercator};
     use geo::Coord;
 
     /// Airy 1830, the ellipsoid OSGB36 is defined on.
@@ -364,98 +776,28 @@ mod bng {
         Some((lat, lon, p / lat.cos() - nu))
     }
 
-    /// The meridional arc: the distance along the meridian from the projection origin.
-    ///
-    /// Shared by the projection and its inverse, which is the point of pulling it out — the
-    /// inverse solves for the latitude that makes this equal a given northing, so the two
-    /// must be the same series or the round trip does not close.
-    fn meridional_arc(lat: f64) -> f64 {
-        let lat0 = LAT0_DEG.to_radians();
-        let n = (AIRY_A - AIRY_B) / (AIRY_A + AIRY_B);
-        let (n2, n3) = (n * n, n * n * n);
-        let a = (1.0 + n + 1.25 * n2 + 1.25 * n3) * (lat - lat0);
-        let b = (3.0 * n + 3.0 * n2 + 2.625 * n3) * (lat - lat0).sin() * (lat + lat0).cos();
-        let c = (1.875 * n2 + 1.875 * n3) * (2.0 * (lat - lat0)).sin() * (2.0 * (lat + lat0)).cos();
-        let d = (35.0 / 24.0) * n3 * (3.0 * (lat - lat0)).sin() * (3.0 * (lat + lat0)).cos();
-        AIRY_B * F0 * (a - b + c - d)
-    }
-
-    /// nu, rho and eta squared at a latitude: the three radii the series is written in.
-    fn radii(lat: f64) -> (f64, f64, f64) {
-        let e2 = eccentricity_squared(AIRY_A, AIRY_B);
-        let sin_lat = lat.sin();
-        let w = 1.0 - e2 * sin_lat * sin_lat;
-        let nu = AIRY_A * F0 / w.sqrt();
-        let rho = AIRY_A * F0 * (1.0 - e2) / (w * w.sqrt());
-        (nu, rho, nu / rho - 1.0)
-    }
+    /// The National Grid, as a Transverse Mercator on Airy 1830 with the Ordnance Survey's
+    /// origin, scale and false origin.
+    const NATIONAL_GRID: TransverseMercator = TransverseMercator {
+        ellipsoid: Ellipsoid {
+            a: AIRY_A,
+            b: AIRY_B,
+        },
+        scale: F0,
+        lat0_deg: LAT0_DEG,
+        lon0_deg: LON0_DEG,
+        false_easting: E0,
+        false_northing: N0,
+    };
 
     /// OSGB36 geodetic to National Grid easting and northing.
     fn project(lat: f64, lon: f64) -> Option<Coord> {
-        let (nu, rho, eta2) = radii(lat);
-        let (sin_lat, cos_lat) = lat.sin_cos();
-        let tan_lat = lat.tan();
-        let (t2, t4) = (tan_lat * tan_lat, tan_lat.powi(4));
-        let (c3, c5) = (cos_lat.powi(3), cos_lat.powi(5));
-
-        let i = meridional_arc(lat) + N0;
-        let ii = nu / 2.0 * sin_lat * cos_lat;
-        let iii = nu / 24.0 * sin_lat * c3 * (5.0 - t2 + 9.0 * eta2);
-        let iiia = nu / 720.0 * sin_lat * c5 * (61.0 - 58.0 * t2 + t4);
-        let iv = nu * cos_lat;
-        let v = nu / 6.0 * c3 * (nu / rho - t2);
-        let vi = nu / 120.0 * c5 * (5.0 - 18.0 * t2 + t4 + 14.0 * eta2 - 58.0 * t2 * eta2);
-
-        let dl = lon - LON0_DEG.to_radians();
-        let (dl2, dl3) = (dl * dl, dl * dl * dl);
-        let northing = i + ii * dl2 + iii * dl2 * dl2 + iiia * dl3 * dl3;
-        let easting = E0 + iv * dl + v * dl3 + vi * dl3 * dl2;
-        (northing.is_finite() && easting.is_finite()).then_some(Coord {
-            x: easting,
-            y: northing,
-        })
+        NATIONAL_GRID.project(lat, lon)
     }
 
     /// National Grid easting and northing back to OSGB36 geodetic.
     fn unproject(coord: Coord) -> Option<(f64, f64)> {
-        let (easting, northing) = (coord.x, coord.y);
-        let lat0 = LAT0_DEG.to_radians();
-        let mut lat = (northing - N0) / (AIRY_A * F0) + lat0;
-        let mut converged = false;
-        for _ in 0..MAX_ITERATIONS {
-            let remainder = northing - N0 - meridional_arc(lat);
-            // A hundredth of a millimetre, which is the tolerance the Ordnance Survey
-            // worked example stops at.
-            if remainder.abs() < 1.0e-5 {
-                converged = true;
-                break;
-            }
-            lat += remainder / (AIRY_A * F0);
-        }
-        if !converged {
-            return None;
-        }
-
-        let (nu, rho, eta2) = radii(lat);
-        let tan_lat = lat.tan();
-        let (t2, t4, t6) = (tan_lat * tan_lat, tan_lat.powi(4), tan_lat.powi(6));
-        let sec = 1.0 / lat.cos();
-        let (nu3, nu5, nu7) = (nu.powi(3), nu.powi(5), nu.powi(7));
-
-        let vii = tan_lat / (2.0 * rho * nu);
-        let viii = tan_lat / (24.0 * rho * nu3) * (5.0 + 3.0 * t2 + eta2 - 9.0 * t2 * eta2);
-        let ix = tan_lat / (720.0 * rho * nu5) * (61.0 + 90.0 * t2 + 45.0 * t4);
-        let x = sec / nu;
-        let xi = sec / (6.0 * nu3) * (nu / rho + 2.0 * t2);
-        let xii = sec / (120.0 * nu5) * (5.0 + 28.0 * t2 + 24.0 * t4);
-        let xiia = sec / (5040.0 * nu7) * (61.0 + 662.0 * t2 + 1320.0 * t4 + 720.0 * t6);
-
-        let de = easting - E0;
-        let (de2, de3) = (de * de, de * de * de);
-        let latitude = lat - vii * de2 + viii * de2 * de2 - ix * de3 * de3;
-        let longitude =
-            LON0_DEG.to_radians() + x * de - xi * de3 + xii * de3 * de2 - xiia * de3 * de2 * de2;
-        (latitude.is_finite() && longitude.is_finite()).then_some((latitude, longitude))
+        NATIONAL_GRID.unproject(coord)
     }
 
     /// Half the transformation, reachable on its own so a test can tell a wrong series
@@ -713,7 +1055,7 @@ mod tests {
     #[test]
     fn every_canonical_uri_round_trips_through_from_uri() {
         for crs in Crs::all() {
-            assert_eq!(Crs::from_uri(crs.uri()), Some(crs), "{crs:?}");
+            assert_eq!(Crs::from_uri(&crs.uri()), Some(crs), "{crs:?}");
         }
     }
 

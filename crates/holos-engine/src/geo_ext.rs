@@ -342,9 +342,8 @@ fn parse_wkt_literal(value: &str) -> Option<Geometry> {
 /// half a reprojected polygon is a shape that exists nowhere, and returning it would be
 /// worse than returning nothing.
 fn reproject(geom: &Geometry, from: Crs, to: Crs) -> Option<Geometry> {
-    if from == to {
-        return Some(geom.clone());
-    }
+    // No shortcut for `from == to`: `transform` still refuses a coordinate that is not a
+    // place, and a bare CRS84 literal is exactly where one turns up.
     let failed = std::cell::Cell::new(false);
     let moved = map_coords(geom, &|c| match crate::crs::transform(from, to, c) {
         Some(c) => c,
@@ -755,8 +754,23 @@ fn holos_transform(args: &[Term]) -> Option<Term> {
     let [term, target] = args else {
         return None;
     };
-    let target = Crs::from_uri(extract_units_iri(target)?)?;
+    let target = Crs::from_uri(extract_system_iri(target)?)?;
     transform_to(term, target, pick_output_kind(args))
+}
+
+/// The reference system an argument names: an IRI, an `xsd:anyURI` literal — which is what
+/// `geof:getSRID` returns — or a plain string, which is what a query written for Jena
+/// passes and what `"http://…/27700"` is in SPARQL when nobody adds a datatype.
+fn extract_system_iri(term: &Term) -> Option<&str> {
+    match term {
+        Term::NamedNode(node) => Some(node.as_str()),
+        Term::Literal(literal)
+            if literal.datatype() == xsd::ANY_URI || literal.datatype() == xsd::STRING =>
+        {
+            Some(literal.value())
+        }
+        _ => None,
+    }
 }
 
 /// <http://jena.apache.org/function/spatial#transformSRS>
@@ -779,7 +793,7 @@ fn spatialf_transform_datatype(args: &[Term]) -> Option<Term> {
     let [term, datatype] = args else {
         return None;
     };
-    let kind = kind_of_datatype(extract_units_iri(datatype)?)?;
+    let kind = kind_of_datatype(extract_system_iri(datatype)?)?;
     let system = declared_system(term)?;
     transform_to(term, system, kind)
 }
@@ -791,8 +805,8 @@ fn spatialf_transform(args: &[Term]) -> Option<Term> {
     let [term, datatype, target] = args else {
         return None;
     };
-    let kind = kind_of_datatype(extract_units_iri(datatype)?)?;
-    let target = Crs::from_uri(extract_units_iri(target)?)?;
+    let kind = kind_of_datatype(extract_system_iri(datatype)?)?;
+    let target = Crs::from_uri(extract_system_iri(target)?)?;
     transform_to(term, target, kind)
 }
 
@@ -1205,6 +1219,68 @@ mod tests {
         let target =
             Literal::new_typed_literal(crate::crs::EPSG_3857_URI.to_owned(), xsd::ANY_URI).into();
         assert!(holos_transform(&[wkt("POINT(0 0)"), target]).is_some());
+    }
+
+    /// The target may also be a plain string: `"http://…/27700"` in a query is `xsd:string`
+    /// unless someone adds a datatype, and Jena's `transformSRS` takes it that way.
+    #[test]
+    fn transform_accepts_the_target_as_a_plain_string() {
+        let target = Literal::new_simple_literal(crate::crs::EPSG_27700_URI).into();
+        let out = holos_transform(&[wkt("POINT(-3.181 51.4816)"), target]).expect("transformed");
+        assert!(out
+            .to_string()
+            .contains(&format!("<{}>", crate::crs::EPSG_27700_URI)));
+        // But not a number, or a language-tagged string, which are not names of anything.
+        assert!(holos_transform(&[wkt("POINT(0 0)"), number(27700.0)]).is_none());
+    }
+
+    /// A UTM zone is named by its EPSG code, in any of the three spellings, and a point in
+    /// the Netherlands lands where PROJ puts it in ETRS89 / UTM zone 32N.
+    #[test]
+    fn transform_reaches_a_utm_zone_by_epsg_code() {
+        let amsterdam = crs_wkt(crate::crs::EPSG_4326_URI, "POINT(52.3791 4.9003)");
+        let out = holos_transform(&[
+            amsterdam,
+            Literal::new_simple_literal("http://www.opengis.net/def/crs/EPSG/0/25832").into(),
+        ])
+        .expect("transformed");
+        let Term::Literal(literal) = &out else {
+            panic!("expected a literal");
+        };
+        let (crs, geometry) = declared_crs(literal.value()).expect("declares a system");
+        assert_eq!(crs, Crs::Utm(25832));
+        let Geometry::Point(point) = <Geometry>::try_from_wkt_str(geometry).expect("parses") else {
+            panic!("expected a point");
+        };
+        assert!(
+            (point.x() - 220_997.635).abs() < 0.01,
+            "easting {}",
+            point.x()
+        );
+        assert!(
+            (point.y() - 5_811_116.297).abs() < 0.01,
+            "northing {}",
+            point.y()
+        );
+    }
+
+    /// A latitude past 90° is not a place, and the commonest way to write one is to put
+    /// longitude first under a system that wants latitude first. It is refused, not read.
+    #[test]
+    fn a_coordinate_off_the_planet_is_refused() {
+        for literal in [
+            crs_wkt(crate::crs::EPSG_4326_URI, "POINT(120 4.9003)"),
+            wkt("POINT(4.9003 120)"),
+            wkt("POINT(200 52)"),
+        ] {
+            assert!(extract_geometry(&literal).is_none(), "{literal} was read");
+            assert!(geof_boundary(&[literal.clone()]).is_none());
+            assert!(holos_transform(&[literal, crs_iri(crate::crs::EPSG_3857_URI)]).is_none());
+        }
+        // Whereas the same numbers in an order that is a place are read.
+        assert!(
+            extract_geometry(&crs_wkt(crate::crs::EPSG_4326_URI, "POINT(4.9003 120)")).is_some()
+        );
     }
 
     /// A target this engine cannot reach comes back unbound rather than unchanged. A caller

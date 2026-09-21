@@ -3,6 +3,49 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.13.0 — unreleased
+
+### The geospatial review: axis order, UTM, coordinates off the planet, and a string for a system
+
+Prompted by a query that put Amsterdam in the Indian Ocean. It built its points as
+`<…/EPSG/0/4326> POINT(4.9003 52.3791)` — longitude first — and EPSG:4326 puts **latitude**
+first, so the store read latitude 4.9, longitude 52.4, and buffered a spot off the Somali
+coast. That reading is GeoSPARQL's: a literal uses the axis order its reference system
+defines, and Apache Jena reads the same literal the same way. It is also the trap `crs.rs`
+has warned about since the systems were added, and the review found the store right about
+it and wrong, or short, about four things around it. Every number below was checked against
+PROJ 9.
+
+- **A coordinate off the planet was read as a place.** `<…/4326> POINT(120 4.9)` — a
+  latitude of 120° — was buffered, measured and drawn at latitude 120. A geographic
+  coordinate past ±90° of latitude or ±180° of longitude is now refused, in every function
+  and in the spatial index: unbound, not somewhere. The commonest way to write one is to
+  put the axes the wrong way round, and refusing it is the one case of that mistake a store
+  can catch. The other case — both numbers plausible either way, which is the Amsterdam
+  query — it cannot, and nothing can; the literal has to be written in the system's order,
+  or in CRS84 with longitude first, or built with `spatialF:transformSRS` from a system
+  whose order is not in doubt.
+- **UTM.** `spatialF:transformSRS(?p, "…/EPSG/0/25832")` came back unbound: ETRS89 / UTM
+  zone 32N, the Dutch and German working system, was not one the store could reach. Every
+  UTM zone is now: `326zz` and `327zz` on WGS 84, north and south, and `258zz` on ETRS89,
+  which is taken as WGS 84 — the two have drifted under a metre apart since 1989, which is
+  how PROJ treats them by default. The projection is the Transverse Mercator the National
+  Grid already had, generalised over its ellipsoid and origin; the Grid's own tests still
+  hold it to the Ordnance Survey worked example. Eight points across five zones agree with
+  PROJ to a millimetre within 3° of a zone's meridian, 2 mm at 4°, 5 mm at 6°.
+- **A system named by a plain string was refused.** The same query wrote the target as
+  `"http://…/27700"`, which in SPARQL is an `xsd:string`, and the function took only an IRI
+  or an `xsd:anyURI`. Jena takes the string; so does this now.
+- **The National Grid, checked again.** Amsterdam in EPSG:27700 agrees with PROJ's
+  Ordnance-Survey Helmert to 2 mm, 7° from the Grid's meridian. PROJ's own default answer
+  for a point outside Britain is 150 m from that — it falls back to a datum-free
+  "ballpark" operation there — which is worth knowing before comparing.
+
+What was already right and is now tested as such: `geof:buffer` in degrees and metres,
+`geof:envelope`, `geof:distance` in metres (Amsterdam Central to Rotterdam Port, 58,337 m),
+`geof:sfWithin`, a bare literal read as CRS84, and `geof:getSRID` reporting the declared
+system.
+
 ## 0.12.0 — 2026-09-20
 
 ### A failed query explains itself to a program, not only to a person

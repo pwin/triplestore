@@ -482,7 +482,7 @@ fn every_advertised_system_can_be_read_and_written() {
             crs.uri()
         ));
         assert_eq!(found.len(), 1, "{crs:?}");
-        assert!(found[0].contains(crs.uri()), "{crs:?}: {}", found[0]);
+        assert!(found[0].contains(&crs.uri()), "{crs:?}: {}", found[0]);
     }
 }
 
