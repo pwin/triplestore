@@ -8,12 +8,26 @@ from the actual dependency graph, so a new dependency with an awkward licence sh
 next time it is run rather than the next time somebody audits by hand.
 """
 import collections
+import io
 import json
+import re
 import subprocess
 import sys
 
 # Licences that would change what this project may be licensed as, or that need a decision.
 COPYLEFT = ('GPL', 'AGPL', 'SSPL', 'CC-BY-NC', 'CDDL', 'EPL', 'MPL')
+
+# Where the console pins what the browser loads. The versions in the section below are read
+# from here rather than typed, so bumping a pin cannot leave this file describing the old one.
+UI_SOURCE = 'crates/holos-server/src/ui.rs'
+
+
+def pinned(source, package):
+    """The version `ui.rs` pins for a CDN package, from its `https://unpkg.com/<pkg>@<v>/` URL."""
+    found = set(re.findall(r'unpkg\.com/%s@([0-9][^/]*)/' % re.escape(package), source))
+    if len(found) != 1:
+        sys.exit('%s: expected one pinned version of %s, found %s' % (UI_SOURCE, package, sorted(found)))
+    return found.pop()
 
 
 def main():
@@ -73,7 +87,8 @@ def main():
     out('| CSV → RDF via a TARQL-style `CONSTRUCT` | '
         '[semanticarts/oxi-gen](https://github.com/semanticarts/oxi-gen) | Apache-2.0 **only** | '
         'Copying Apache-only source would force this project to Apache-only, dropping the MIT arm. '
-        'See [`holos-tabular`](crates/holos-tabular) |\n')
+        'A clean-room implementation was written and then dropped before 0.3.0 as an unwired '
+        'feature; the licence reasoning is kept because the constraint has not changed |\n')
     out('| Hypertrie / worst-case-optimal joins | '
         '[Tentris](https://dice-research.org/Tentris) | varies | '
         '`DESIGN.md` §12: implement from the papers rather than copy code whose licence is unverified |\n\n')
@@ -82,7 +97,38 @@ def main():
     out('Function signatures and semantics are specifications, not source, and the\n')
     out('implementations here were written for this project.\n\n')
 
-    out('---\n\n## Dependency licences\n\n')
+    ui = io.open(UI_SOURCE, encoding='utf-8').read()
+    yasgui = pinned(ui, '@matdata/yasgui')
+    leaflet = pinned(ui, 'leaflet')
+    out('---\n\n## Loaded by the browser, not shipped\n\n')
+    out('The console at `/` is a page that tells the user\'s browser to fetch these from a CDN. None\n')
+    out('of their code is in this tree or in any binary this project ships; each is named by exact\n')
+    out('version and subresource-integrity hash in\n')
+    out('[`crates/holos-server/src/ui.rs`](crates/holos-server/src/ui.rs), so what runs is what was\n')
+    out('reviewed. That puts the Apache-2.0 entries on the same footing as the Apache-2.0 crates\n')
+    out('below — a dependency, not copied source — and this project\'s own licence is unaffected.\n\n')
+    out('| Component | Version | Licence | What it is |\n|---|---|---|---|\n')
+    out('| [`@matdata/yasgui`](https://github.com/Matdata-eu/MatGUI) | %s | MIT | '
+        'The console: the YASGUI editor and result viewer, maintained as MatGUI. '
+        'Bundles the three plugins below |\n' % yasgui)
+    out('| [`yasgui-geo-plugin`](https://github.com/Matdata-eu/yasgui-geo-plugin) | bundled | MIT | '
+        'The map tab: Leaflet, `betterknown` (WKT), `proj4`, `leaflet-draw`, '
+        '`leaflet.markercluster`, `leaflet.heat`, turf |\n')
+    out('| [`yasgui-graph-plugin`](https://github.com/Matdata-eu/yasgui-graph-plugin) | bundled | '
+        'Apache-2.0 | The node-edge view for `CONSTRUCT` and `DESCRIBE` |\n')
+    out('| [`yasgui-table-plugin`](https://github.com/Matdata-eu/yasgui-table-plugin) | bundled | '
+        'Apache-2.0 | The table with virtual scrolling |\n')
+    out('| [Leaflet](https://leafletjs.com/) | %s | BSD-2-Clause | '
+        'The map library the geo plugin expects on the page |\n' % leaflet)
+    out('| [OpenStreetMap tiles](https://operations.osmfoundation.org/policies/tiles/) | — | '
+        'ODbL data; the tile usage policy applies | '
+        'The default basemap. `--ui-tiles` names another host or `none` |\n\n')
+    out('The geo plugin would look an unknown SRID up at `epsg.io`; the console\'s policy blocks that\n')
+    out('request, and the geometry is skipped. Before 0.11.0 the console was the Zazuko fork of YASGUI\n')
+    out('(MIT) with a map plugin written for this project; that plugin was retired when the measured\n')
+    out('comparison in `ui.rs` favoured the fork above.\n\n')
+
+    out('## Dependency licences\n\n')
     out('%d third-party crates in the full dependency graph.\n\n' % len(third))
     out('| Count | Licence |\n|---:|---|\n')
     for lic, n in counts.most_common():

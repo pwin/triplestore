@@ -3,7 +3,7 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## 0.13.0 — unreleased
+## 0.13.0 — 2026-09-21
 
 ### A running server says which build it is
 
@@ -25,6 +25,9 @@ version line, and neither binary took `--version`. Now, from one stamp:
   stale between edit and rebuild. A build without a repository says only its version.
 
 New crate `holos-build` holds both halves — the stamp and its display — so the two agree.
+Also in this release: `scripts/third-party.py` again reproduces `THIRD-PARTY.md` — the
+console's "loaded by the browser" section, hand-written at 0.11.0, is generated now, with
+the versions read from the pins in `ui.rs` — and the dependency counts are current.
 
 ### `ORDER BY … LIMIT` from a heap of the rows it returns, and a timeout that says which limit
 

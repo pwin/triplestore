@@ -65,11 +65,11 @@ comparison in `ui.rs` favoured the fork above.
 
 ## Dependency licences
 
-183 third-party crates in the full dependency graph.
+182 third-party crates in the full dependency graph.
 
 | Count | Licence |
 |---:|---|
-| 112 | MIT OR Apache-2.0 |
+| 113 | MIT OR Apache-2.0 |
 | 21 | MIT |
 | 11 | MIT/Apache-2.0 |
 | 8 | Apache-2.0 OR MIT |
@@ -77,17 +77,16 @@ comparison in `ui.rs` favoured the fork above.
 | 3 | Unlicense OR MIT |
 | 3 | Apache-2.0 |
 | 2 | Apache-2.0/MIT |
-| 2 | Unlicense/MIT |
+| 2 | ISC |
 | 2 | MIT OR Apache-2.0 OR LGPL-2.1-or-later |
-| 2 | Apache-2.0 OR BSL-1.0 |
 | 2 | BSD-2-Clause OR Apache-2.0 OR MIT |
 | 1 | 0BSD OR MIT OR Apache-2.0 |
 | 1 | BSD-3-Clause |
-| 1 | ISC |
 | 1 | Apache-2.0 / MIT |
 | 1 | Zlib |
 | 1 | MIT/Apache-2.0/BSD-3-Clause |
 | 1 | MIT OR Zlib OR Apache-2.0 |
+| 1 | Apache-2.0 OR BSL-1.0 |
 | 1 | Apache-2.0 WITH LLVM-exception |
 | 1 | Zlib OR Apache-2.0 OR MIT |
 | 1 | MIT OR Apache-2.0 OR Zlib |
