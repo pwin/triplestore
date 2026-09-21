@@ -5,6 +5,53 @@ them are in `BENCHMARKS.md` and are runnable.
 
 ## 0.13.0 — unreleased
 
+### `ORDER BY … LIMIT` from a heap of the rows it returns, and a timeout that says which limit
+
+Prompted by `SELECT ?o WHERE { ?s schema:deathDate ?o } ORDER BY DESC(?o) LIMIT 4` on the
+653.8-million-triple store, which had run for ninety minutes at one core when it was looked
+at, holding gigabytes, and could not be stopped. The evaluator answers `ORDER BY` by
+collecting every row, sorting the lot, and applying the `LIMIT` afterwards; its comparator
+decodes both sides of every comparison from the dictionary, so a sort of *n* rows costs
+`2·n·log₂n` point reads and literal parses. And once the rows were collected the query had
+stopped reading, which is where both the timeout and the memory ceiling are checked — so
+neither could reach it.
+
+- **A top-k operator.** `SELECT … ORDER BY … LIMIT`, with or without `OFFSET`, is now
+  answered from a heap of `OFFSET + LIMIT` rows: the body is evaluated as a stream, each
+  row's sort key is decoded once as it arrives, and a row that sorts after the heap's worst
+  is dropped on arrival. The cost is *n* decodes of the key, `n·log₂k` comparisons in
+  memory, and *k* rows held. Where the bind join accepts the body — a scan, a star, an
+  optional, a filter — its rows are streamed as ids and only the key is decoded per row;
+  the columns of the rows that survive are decoded at the end, so a wide projection costs
+  what a narrow one does. The body is a streaming evaluation, so the deadline and the
+  ceiling apply the whole way through. The shape is recognised exactly and everything else
+  — a `DISTINCT` between the sort and the slice, no `LIMIT`, a slice past a million rows, a
+  sort key with `EXISTS` or `RAND()` — goes to the evaluator unchanged. The order is
+  SPARQL's, held to the evaluator's own by a test that sorts a mixed bag of every kind of
+  term both ways. The query above, 48.4 million rows on the predicate, answers in **42 s**,
+  of which the scan alone is 21; `SELECT ?s ?o … ORDER BY ?o LIMIT 3` in 41 s. On an
+  in-memory store of two million dates the heap is **17.6×** faster than the evaluator's
+  sort (`holos-bench`'s `topk`).
+- **A decode cache on the view.** Every path that turns an id into a term — the
+  evaluator's rows, the bind join's, a filter's variable, a sort key — now goes through one
+  cache per query, bounded at a quarter of a million terms and started again when full. A
+  scan grouped by object decodes each date once rather than once per row: the heap's
+  evaluator-side path went from 264 s to 43 s on the query above from this alone, and an
+  `ORDER BY` the heap declines, whose comparator decodes both sides of every comparison,
+  is helped in the same proportion.
+- **Admission control follows.** `--max-blocking-rows` measures a sort in that shape by
+  what is under it rather than by its input, and the refusal of a sort it still declines
+  now says which `LIMIT` would help, since one does.
+- **A timeout is answered with its number.** A query stopped by `--timeout` was answered
+  with the evaluator's own words, *the SPARQL operation has been cancelled*, under the
+  `timeout` problem type. It now says *query cancelled: it ran past the 300 s time limit
+  (raise it with --timeout, or ask a narrower question)* — the same way every other failure
+  is told what happened and what would change it. The `type` is unchanged.
+- **`deploy/holos.env` sets `HOLOS_TIMEOUT=300`.** The server's own default is still no
+  limit; the deployment patterns are for a server other people reach, where five minutes is
+  the difference between a query that is wrong and a process that is over its ceiling for
+  everyone until it finishes.
+
 ### The geospatial review: axis order, UTM, coordinates off the planet, and a string for a system
 
 Prompted by a query that put Amsterdam in the Indian Ocean. It built its points as

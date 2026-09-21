@@ -32,6 +32,7 @@ pub mod service;
 pub mod source;
 pub mod spatial;
 pub mod spill;
+pub mod topk;
 pub mod topology;
 pub mod update;
 pub mod validate;
@@ -99,9 +100,10 @@ impl EngineError {
     /// `OPERATIONS.md` lists them and what each asks the caller to do.
     ///
     /// The cancellations the evaluator reports as one variant are told apart here: a timeout
-    /// is `Cancelled`, and the memory ceiling arrives boxed inside `Dataset`, since that is
-    /// how the scan hands a refusal up. Both are the deployment's limits, not the query's
-    /// mistake, and both are 500.
+    /// and the memory ceiling each arrive boxed inside `Dataset`, since that is how the
+    /// guard and the scan hand a refusal up, and a bare `Cancelled` — the evaluator's own
+    /// word, when nothing replaced it — is read as the timeout it always was. All are the
+    /// deployment's limits, not the query's mistake, and all are 500.
     #[must_use]
     pub fn kind(&self) -> (&'static str, u16) {
         use spareval::QueryEvaluationError as E;
@@ -122,6 +124,8 @@ impl EngineError {
             Self::Evaluation(E::Dataset(inner)) => {
                 if inner.is::<crate::memory::LimitExceeded>() {
                     ("memory-ceiling", 500)
+                } else if inner.is::<crate::options::TimedOut>() {
+                    ("timeout", 500)
                 } else {
                     match inner.downcast_ref::<ViewError>() {
                         Some(ViewError::AccessDenied) => ("policy", 403),
@@ -405,9 +409,12 @@ impl Engine {
         // answering it at all. No spatial routing here — this entry point takes no options,
         // so there is no index to route to, and the unnarrowed form is the correct one.
         let parsed = crate::topology::rewrite(&parsed, None);
-        // The same fast path the other two entry points take. This is the one the Python
-        // binding and the audited CLI path reach, so leaving it out meant the most-used
+        // The same fast paths the other two entry points take. This is the one the Python
+        // binding and the audited CLI path reach, so leaving either out meant the most-used
         // surface was the only one not getting the operator.
+        if let Some(plan) = crate::topk::plan(&parsed) {
+            return Self::top_k(view, &plan, &QueryOptions::default(), None);
+        }
         if let Some(results) = Self::try_bind_join(view, &parsed, None, None)? {
             return Ok(results);
         }
@@ -473,7 +480,7 @@ impl Engine {
                 return Err(EngineError::Refused(format!(
                     "refusing {blocking}, over the {budget}-row budget. {} Raise it with --max-blocking-rows, or make the pattern more selective.",
                     if blocking.operator == "ORDER BY" {
-                        "A LIMIT will not help: the rows must all be sorted before the smallest is known."
+                        "A LIMIT helps: SELECT … ORDER BY … LIMIT, without DISTINCT, keeps only the rows it returns."
                     } else {
                         "A LIMIT may help, since the operator can stop once it has enough."
                     }
@@ -503,6 +510,16 @@ impl Engine {
         // an operator that skips the evaluator also skips the evaluator's deadline checks
         // unless it makes its own.
         let deadline = Deadline::guard(options.timeout, options.memory_limit);
+
+        // `ORDER BY … LIMIT`, from a heap of the rows it returns rather than a sort of every
+        // row. Before the bind join, which declines a sort anyway, and skipped for an
+        // explanation, since there is no plan to show for a path that skips the planner.
+        if !options.explain {
+            if let Some(plan) = crate::topk::plan(&parsed) {
+                return Self::top_k(view, &plan, options, deadline).map(|results| (results, None));
+            }
+        }
+
         let token = deadline.as_ref().map(Deadline::token);
 
         // The index nested-loop fast path, for the shapes that suffer most without one.
@@ -570,7 +587,7 @@ impl Engine {
                 row.into_iter()
                     .map(|id| match id {
                         None => Ok(None),
-                        Some(id) => view.store().decode_term(id),
+                        Some(id) => view.decode_term(id),
                     })
                     .collect::<Result<Vec<Option<oxrdf::Term>>, _>>()
             })
@@ -578,6 +595,66 @@ impl Engine {
         Ok(Some(QueryResults::Solutions(
             spareval::QuerySolutionIter::from_tuples(variables, solutions.into_iter().map(Ok)),
         )))
+    }
+
+    /// Answers a recognised `ORDER BY … LIMIT` from a heap of `OFFSET + LIMIT` rows.
+    ///
+    /// The body under the sort is evaluated the way the whole query would have been, under
+    /// the same deadline: streamed as ids from the bind join where it accepts the body —
+    /// [`crate::topk::Plan::collect_ids`] — and as the evaluator's decoded rows otherwise —
+    /// [`crate::topk::Plan::collect`]. Nothing here is a fallback: the plan has already
+    /// accepted the shape, and a failure from the body is the query's failure.
+    fn top_k<'a>(
+        view: &'a DatasetView<'a>,
+        plan: &crate::topk::Plan,
+        options: &QueryOptions,
+        deadline: Option<Deadline>,
+    ) -> Result<QueryResults<'a>, EngineError> {
+        let evaluator = Self::evaluator();
+        let token = deadline.as_ref().map(Deadline::token);
+        let variables: std::sync::Arc<[spargebra::term::Variable]> =
+            plan.projected.clone().into();
+
+        // The same conditions as the bind join itself: nothing in the options may change
+        // what the body means. See `query_with`.
+        if !options.skip_bind_join && !options.touches_dataset() && options.substitutions.is_empty()
+        {
+            if let Some(join) = crate::bindjoin::plan(&plan.inner) {
+                let rows = plan.collect_ids(
+                    view,
+                    &join,
+                    options.reorder_with.as_deref(),
+                    token.as_ref(),
+                    &evaluator,
+                )?;
+                return match (rows, &deadline) {
+                    (Some(rows), _) => Ok(QueryResults::Solutions(
+                        spareval::QuerySolutionIter::from_tuples(
+                            variables,
+                            rows.into_iter().map(Ok),
+                        ),
+                    )),
+                    // Abandoned on its token, which only the guard cancels: the guard says
+                    // why, the same way it would for any other path.
+                    (None, Some(guard)) => Err(EngineError::Evaluation(guard.cancellation())),
+                    (None, None) => Err(EngineError::Evaluation(
+                        spareval::QueryEvaluationError::Cancelled,
+                    )),
+                };
+            }
+        }
+
+        let (results, _) = Self::evaluate_with(view, &plan.inner, options, deadline)?;
+        let QueryResults::Solutions(rows) = results else {
+            // The inner query is a SELECT, and a SELECT yields solutions.
+            return Err(EngineError::BadRequest(
+                "the body of an ORDER BY did not yield solutions".to_owned(),
+            ));
+        };
+        let rows = plan.collect(rows, &evaluator)?;
+        Ok(QueryResults::Solutions(
+            spareval::QuerySolutionIter::from_tuples(variables, rows.into_iter().map(Ok)),
+        ))
     }
 
     /// Answers the two `DISTINCT` shapes that can be spilled, or declines.
@@ -743,7 +820,15 @@ impl Engine {
             let (results, explanation) = prepared.explain(view);
             (results?, Some(explanation))
         } else {
-            (prepared.execute(view)?, None)
+            (
+                prepared
+                    .execute(view)
+                    .map_err(|e| match &deadline {
+                        Some(guard) => guard.explain(e),
+                        None => e,
+                    })?,
+                None,
+            )
         };
 
         // The token alone is not enough: it is only consulted when the evaluator reads
@@ -860,6 +945,10 @@ fn load_parsed<R: Read + Send>(
     })
 }
 
+///
+/// A row the evaluator refused with its own bare `Cancelled` — the token tripped at a read
+/// — is answered with the guard's reason instead, so the client is told which limit and
+/// what would change it, the same way every other failure is told.
 fn guard_with_deadline<'a>(results: QueryResults<'a>, deadline: Deadline) -> QueryResults<'a> {
     match results {
         QueryResults::Solutions(solutions) => {
@@ -870,7 +959,7 @@ fn guard_with_deadline<'a>(results: QueryResults<'a>, deadline: Deadline) -> Que
                     if deadline.expired() {
                         return Err(deadline.cancellation());
                     }
-                    solution
+                    solution.map_err(|e| deadline.explain(e))
                 }),
             ))
         }
@@ -879,7 +968,7 @@ fn guard_with_deadline<'a>(results: QueryResults<'a>, deadline: Deadline) -> Que
                 if deadline.expired() {
                     return Err(deadline.cancellation());
                 }
-                triple
+                triple.map_err(|e| deadline.explain(e))
             })))
         }
         // A boolean is already computed; there is nothing left to interrupt.

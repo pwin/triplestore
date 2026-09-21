@@ -636,6 +636,7 @@ dependencies = [
  "oxiri",
  "oxrdf",
  "oxrdfio",
+ "oxsdatatypes",
  "rstar 0.12.2",
  "rustc-hash",
  "sparesults",

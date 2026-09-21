@@ -33,11 +33,13 @@
 //! # What a `LIMIT` does and does not fix
 //!
 //! It is tempting to answer every refusal with "add a `LIMIT`", and for `DISTINCT` that
-//! genuinely helps: an engine may stop once it has *k* distinct rows. For `ORDER BY` it does
-//! not. The k smallest rows cannot be known without seeing all of them, and `spareval` sorts
-//! the lot before applying the slice, so `ORDER BY ... LIMIT 10` over a billion rows buffers
-//! a billion rows. Only a top-k operator would fix that, and there is not one. The message
-//! this module produces says so rather than offering advice that will not work.
+//! genuinely helps: an engine may stop once it has *k* distinct rows. For `ORDER BY` it
+//! helps only because [`crate::topk`] exists: `spareval` sorts every row before applying
+//! the slice, so `ORDER BY ... LIMIT 10` over a billion rows would buffer a billion rows,
+//! and the heap answers `SELECT … ORDER BY … LIMIT` from the ten instead. A sort in that
+//! shape is measured here by what is *under* it — the body still runs in full, and a
+//! blocking operator inside it still blocks — and a sort in any other shape, `DISTINCT`
+//! between it and the slice, or no `LIMIT` at all, is measured by its input as before.
 //!
 //! # Estimates, and being wrong in the safe direction
 //!
@@ -91,7 +93,10 @@ pub fn over_budget(
 ) -> Option<Blocking> {
     let ctx = Context { stats, store };
     let mut found = Vec::new();
-    ctx.walk(body(query), &mut found);
+    // A sort the heap answers holds `OFFSET + LIMIT` rows, whatever its input; what can
+    // still block is inside it.
+    let root = crate::topk::sorted_body(query).unwrap_or_else(|| body(query));
+    ctx.walk(root, &mut found);
     found
         .into_iter()
         .filter(|b| b.rows > budget)
@@ -168,8 +173,9 @@ impl Context<'_> {
             }
 
             // A slice bounds what leaves it, and for `DISTINCT` it bounds the work too: an
-            // engine may stop once it has k distinct rows. It does *not* bound an `ORDER BY`,
-            // which is why the slice is applied here and the message says so separately.
+            // engine may stop once it has k distinct rows. It does *not* bound an `ORDER BY`
+            // under some other operator — only the shape `crate::topk` answers is spared,
+            // and `over_budget` steps past that one before walking.
             GraphPattern::Slice { inner, length, .. } => match length {
                 Some(limit) => self.rows(inner).min(*limit as u64),
                 None => self.rows(inner),

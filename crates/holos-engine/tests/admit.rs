@@ -102,19 +102,47 @@ fn an_order_by_over_the_whole_store_is_refused_with_its_estimate() {
     );
 }
 
-/// And a `LIMIT` must not be offered as the fix for an `ORDER BY`, because it is not one.
+/// A `LIMIT` is offered as the fix for an `ORDER BY`, because since 0.13.0 it is one.
 ///
-/// `spareval` sorts the whole input before applying the slice, so `ORDER BY ... LIMIT 10`
-/// over a billion rows buffers a billion rows. Advice that does not work is worse than none.
+/// `spareval` sorts the whole input before applying the slice, but `holos_engine::topk`
+/// answers `SELECT … ORDER BY … LIMIT` from a heap of the rows it returns, so the advice
+/// now works — and the message is precise about the shape, since a `DISTINCT` in between
+/// is still the whole sort.
 #[test]
-fn the_refusal_does_not_claim_a_limit_would_help_an_order_by() {
+fn the_refusal_says_which_limit_would_help_an_order_by() {
     let engine = engine();
     let query = format!("PREFIX ex: <{EX}> SELECT ?s ?o WHERE {{ ?s ex:p ?o }} ORDER BY ?o");
     let error = run(&engine, &query, &capped(&engine, 1_000)).expect_err("refused");
     assert!(
-        error.contains("A LIMIT will not help"),
-        "an ORDER BY refusal must say a LIMIT is not the fix: {error}"
+        error.contains("A LIMIT helps") && error.contains("without DISTINCT"),
+        "an ORDER BY refusal must say which LIMIT is the fix: {error}"
     );
+}
+
+/// And taking the advice works: the same sort with a `LIMIT` is admitted under a budget a
+/// thousandth of its input, because what it holds is the slice, not the input.
+#[test]
+fn an_order_by_with_a_limit_is_admitted_whatever_its_input() {
+    let engine = engine();
+    let query = format!(
+        "PREFIX ex: <{EX}> SELECT ?s ?o WHERE {{ ?s ex:p ?o }} ORDER BY DESC(?o) LIMIT 4"
+    );
+    assert_eq!(
+        run(&engine, &query, &capped(&engine, 10)).expect("four rows is not a runaway"),
+        4
+    );
+    // A `DISTINCT` between the sort and the slice is still the whole sort, and still refused.
+    let query = format!(
+        "PREFIX ex: <{EX}> SELECT DISTINCT ?o WHERE {{ ?s ex:p ?o }} ORDER BY DESC(?o) LIMIT 4"
+    );
+    let error = run(&engine, &query, &capped(&engine, 10)).expect_err("refused");
+    assert!(error.contains("over the 10-row budget"), "{error}");
+    // And a blocking operator under the sort is measured as before.
+    let query = format!(
+        "PREFIX ex: <{EX}> SELECT ?o WHERE {{ SELECT DISTINCT ?o WHERE {{ ?s ex:p ?o }} }} ORDER BY DESC(?o) LIMIT 4"
+    );
+    let error = run(&engine, &query, &capped(&engine, 10)).expect_err("refused");
+    assert!(error.contains("DISTINCT"), "{error}");
 }
 
 /// `DISTINCT` is different, and the message says so: an engine may stop at k distinct rows.

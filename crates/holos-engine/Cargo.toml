@@ -27,6 +27,7 @@ sparesults.workspace = true
 thiserror.workspace = true
 rustc-hash.workspace = true
 rstar.workspace = true
+oxsdatatypes.workspace = true
 
 [features]
 default = []

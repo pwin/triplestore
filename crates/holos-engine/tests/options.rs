@@ -267,12 +267,19 @@ fn a_long_running_query_is_stopped() {
         });
     let elapsed = started.elapsed();
 
-    assert!(
-        outcome.is_err(),
-        "a 400-million-row cross product should have been cancelled, not completed"
+    let error = outcome.expect_err(
+        "a 400-million-row cross product should have been cancelled, not completed",
     );
     assert!(
         elapsed < Duration::from_secs(30),
         "cancellation took too long: {elapsed:?}"
+    );
+    // And the failure says which limit, and what to do about it — the same way every
+    // other failure is told, rather than the evaluator's bare "cancelled".
+    assert_eq!(error.kind(), ("timeout", 500), "{error}");
+    let detail = error.detail();
+    assert!(
+        detail.contains("0.06 s time limit") && detail.contains("--timeout"),
+        "the detail must name the limit and the flag: {detail}"
     );
 }

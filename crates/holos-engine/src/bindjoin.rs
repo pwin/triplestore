@@ -134,6 +134,9 @@ pub struct Limits<'a> {
     pub token: Option<&'a CancellationToken>,
 }
 
+/// A consumer of finished rows, in projection order. See [`Plan::evaluate_each`].
+pub type Sink<'a> = dyn FnMut(Vec<Option<TermId>>) -> Result<(), ViewError> + 'a;
+
 /// Rows this path will hold in memory before handing the query back to the evaluator.
 ///
 /// A row of three bound variables costs roughly a hundred bytes once the `Vec` and its
@@ -157,6 +160,10 @@ struct Run<'a> {
     /// once per row: constructing one registers the whole custom-function table.
     evaluator: spareval::QueryEvaluator,
     out: Vec<Vec<Option<TermId>>>,
+    /// Where a finished row goes instead of `out`, for a caller that consumes rows as they
+    /// are produced — the top-k heap — and so needs neither the rows held nor the row
+    /// budget that bounds holding them.
+    sink: Option<&'a mut Sink<'a>>,
     seen: rustc_hash::FxHashSet<Vec<Option<TermId>>>,
     /// Rows consumed by `OFFSET` so far.
     skipped: usize,
@@ -1050,7 +1057,7 @@ fn flatten_conjunction<'e>(expr: &'e Expression, out: &mut Vec<&'e Expression>) 
 /// which reads a dataset the borrowed evaluator does not have, and the context-dependent
 /// builtins. Both would otherwise fail quietly — `EXISTS` by answering `false` everywhere —
 /// which is worse than refusing the query.
-fn inspect_expression(expr: &Expression, out: &mut Vec<Variable>) -> bool {
+pub(crate) fn inspect_expression(expr: &Expression, out: &mut Vec<Variable>) -> bool {
     match expr {
         Expression::NamedNode(_) | Expression::Literal(_) => true,
         Expression::Variable(v) | Expression::Bound(v) => {
@@ -1106,7 +1113,7 @@ fn inspect_expression(expr: &Expression, out: &mut Vec<Variable>) -> bool {
 /// There is no public conversion for a bare expression, so it travels inside a `FILTER` and
 /// is taken out the other side. Roundabout, but it is upstream's own conversion rather than
 /// a second copy of it, which is the property worth having.
-fn to_sparopt(expr: &Expression) -> Option<sparopt::algebra::Expression> {
+pub(crate) fn to_sparopt(expr: &Expression) -> Option<sparopt::algebra::Expression> {
     let wrapper = GraphPattern::Filter {
         expr: expr.clone(),
         inner: Box::new(GraphPattern::Bgp {
@@ -1197,10 +1204,55 @@ impl Plan {
         stats: Option<&Statistics>,
         limits: Limits<'_>,
     ) -> Result<Option<Vec<Vec<Option<TermId>>>>, ViewError> {
+        let run = self.run(view, stats, limits, None)?;
+        // Discarded, not truncated. A partial answer returned as a whole one is precisely
+        // the failure this operator must not introduce.
+        if run.abandoned {
+            return Ok(None);
+        }
+        Ok(Some(run.out))
+    }
+
+    /// Evaluates the plan, handing each solution to `sink` as it is produced.
+    ///
+    /// The same evaluation as [`Plan::evaluate`] with nothing held: a row goes to the sink
+    /// and is forgotten, so the only memory is the sink's own, and the row budget in
+    /// `limits` has nothing to bound. The cancellation token is still read. Returns `false`
+    /// if the evaluation was abandoned on it, in which case the sink has seen some prefix
+    /// of the rows and the caller must not present what it built from them as an answer.
+    ///
+    /// # Errors
+    ///
+    /// The view's, and the sink's own.
+    pub fn evaluate_each(
+        &self,
+        view: &DatasetView<'_>,
+        stats: Option<&Statistics>,
+        limits: Limits<'_>,
+        sink: &mut Sink<'_>,
+    ) -> Result<bool, ViewError> {
+        // A sink and a row budget are at odds — the budget bounds rows held, and none are —
+        // so the budget is dropped rather than left to count an empty `out`.
+        let limits = Limits {
+            rows: None,
+            token: limits.token,
+        };
+        Ok(!self.run(view, stats, limits, Some(sink))?.abandoned)
+    }
+
+    /// The nested loop from the top, collecting into `out` or streaming to `sink`.
+    fn run<'a>(
+        &self,
+        view: &DatasetView<'_>,
+        stats: Option<&Statistics>,
+        limits: Limits<'a>,
+        sink: Option<&'a mut Sink<'a>>,
+    ) -> Result<Run<'a>, ViewError> {
         let mut bindings: FxHashMap<&Variable, TermId> = FxHashMap::default();
         let mut run = Run {
             evaluator: crate::Engine::evaluator(),
             out: Vec::new(),
+            sink,
             seen: rustc_hash::FxHashSet::default(),
             skipped: 0,
             completions: 0,
@@ -1221,13 +1273,7 @@ impl Plan {
             .filter(|i| !owned.contains(i))
             .collect();
         self.step(view, stats, &todo, &pending, &mut bindings, &mut run)?;
-
-        // Discarded, not truncated. A partial answer returned as a whole one is precisely
-        // the failure this operator must not introduce.
-        if run.abandoned {
-            return Ok(None);
-        }
-        Ok(Some(run.out))
+        Ok(run)
     }
 
     /// The cheapest remaining pattern, given what is already bound.
@@ -1315,7 +1361,10 @@ impl Plan {
                 run.skipped += 1;
                 return Ok(());
             }
-            run.out.push(row);
+            match &mut run.sink {
+                Some(sink) => sink(row)?,
+                None => run.out.push(row),
+            }
             return Ok(());
         };
 
@@ -1669,7 +1718,7 @@ impl Plan {
             let Some(id) = bindings.get(variable) else {
                 return Ok(false);
             };
-            let Some(term) = view.store().decode_term(*id)? else {
+            let Some(term) = view.decode_term(*id)? else {
                 return Ok(false);
             };
             substitutions.push((variable, term));

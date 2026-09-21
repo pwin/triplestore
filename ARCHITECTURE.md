@@ -147,7 +147,9 @@ for a file; `Store::begin` / `commit` / `rollback` for a transaction around seve
 3. **Rewrite.** GeoSPARQL topology predicates become geometry lookups plus a filter
    ([`topology.rs`](crates/holos-engine/src/topology.rs)); a basic graph pattern is reordered
    by estimated cardinality ([`holos-stats/src/reorder.rs`](crates/holos-stats/src/reorder.rs)).
-4. **Try the fast path.** [`bindjoin.rs`](crates/holos-engine/src/bindjoin.rs) is an index
+4. **Try the fast paths.** [`topk.rs`](crates/holos-engine/src/topk.rs) answers
+   `SELECT … ORDER BY … LIMIT` from a heap of the rows it returns, streaming the body under
+   the sort rather than collecting it. [`bindjoin.rs`](crates/holos-engine/src/bindjoin.rs) is an index
    nested-loop join for the fragment it accepts, with range filters pushed into the scan by
    [`range.rs`](crates/holos-engine/src/range.rs). Anything outside the fragment falls through
    to the reused evaluator, `spareval`.
@@ -240,7 +242,7 @@ Numbers in the documentation are measured, and the measurement is checked in:
 | **add a storage backend** → implement [`Storage`](crates/holos-store/src/storage.rs), then run `backend_parity.rs` against it |
 | **change how a term is encoded** → [`holos-core/src/inline.rs`](crates/holos-core/src/inline.rs); it changes the on-disk format, so read `DESIGN.md` §5 first |
 | **add a policy rule** → [`holos-security/src/policy.rs`](crates/holos-security/src/policy.rs); it compiles to a per-quad decision, so measure with `scanrate` |
-| **make a query shape faster** → [`bindjoin.rs`](crates/holos-engine/src/bindjoin.rs) if it is a join, [`range.rs`](crates/holos-engine/src/range.rs) if it is a filter, [`holos-stats`](crates/holos-stats/src/) if the plan is wrong |
+| **make a query shape faster** → [`bindjoin.rs`](crates/holos-engine/src/bindjoin.rs) if it is a join, [`topk.rs`](crates/holos-engine/src/topk.rs) if it is a sort with a `LIMIT`, [`range.rs`](crates/holos-engine/src/range.rs) if it is a filter, [`holos-stats`](crates/holos-stats/src/) if the plan is wrong |
 | **make loading faster** → [`rocks/mod.rs`](crates/holos-store/src/rocks/mod.rs) around `encode_into` and `flush_dictionary`; `loadprofile` tells you which phase you moved |
 | **add an HTTP endpoint** → [`holos-server/src/main.rs`](crates/holos-server/src/main.rs), the `match` on method and path in `dispatch` |
 | **add a CLI command** → [`holos-cli/src/main.rs`](crates/holos-cli/src/main.rs), the `match` in `main` and the `USAGE` text beside it |

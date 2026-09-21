@@ -234,7 +234,10 @@ impl QueryOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trip {
     /// The query ran past its deadline.
-    Timeout,
+    Timeout {
+        /// The limit it ran past.
+        limit: Duration,
+    },
     /// The query allocated past its ceiling.
     Memory {
         /// Bytes allocated beyond the baseline.
@@ -344,7 +347,7 @@ impl Deadline {
                     return;
                 }
                 let reason = if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                    Some(Trip::Timeout)
+                    timeout.map(|limit| Trip::Timeout { limit })
                 } else if let Some(limit) = memory_limit {
                     let used = crate::memory::live_bytes().saturating_sub(baseline);
                     if used > limit {
@@ -380,9 +383,12 @@ impl Deadline {
 
     /// The error a tripped guard should surface, ready to hand to `spareval`.
     ///
-    /// A timeout keeps `Cancelled`, which is what it has always been and what clients
-    /// already recognise. A memory trip carries its numbers instead, because "cancelled"
-    /// would send someone looking for a timeout that did not happen.
+    /// Each trip carries its numbers: a timeout says which limit it ran past, a memory trip
+    /// how far over which ceiling. Both travel as `Dataset` errors, the evaluator's variant
+    /// for "the thing underneath refused", and [`crate::EngineError::kind`] tells them
+    /// apart by type — so a client gets `timeout` or `memory-ceiling`, and a person gets the
+    /// number to change. The bare `Cancelled` the evaluator raises on its own is what a
+    /// guard that has not tripped would report, which is to say nothing this can explain.
     #[must_use]
     pub fn cancellation(&self) -> spareval::QueryEvaluationError {
         match self.trip() {
@@ -392,7 +398,24 @@ impl Deadline {
                     limit,
                 }))
             }
-            _ => spareval::QueryEvaluationError::Cancelled,
+            Some(Trip::Timeout { limit }) => {
+                spareval::QueryEvaluationError::Dataset(Box::new(TimedOut { limit }))
+            }
+            None => spareval::QueryEvaluationError::Cancelled,
+        }
+    }
+
+    /// The evaluator's own cancellation, re-read as this guard's reason.
+    ///
+    /// The evaluator checks the token at every read and reports `Cancelled`, with no way
+    /// of saying why — it does not know. This guard does, so an error passing back up
+    /// through it is replaced with the one that names the limit. Any other error is left
+    /// exactly as it was.
+    #[must_use]
+    pub fn explain(&self, error: spareval::QueryEvaluationError) -> spareval::QueryEvaluationError {
+        match error {
+            spareval::QueryEvaluationError::Cancelled if self.expired() => self.cancellation(),
+            other => other,
         }
     }
 
@@ -406,6 +429,44 @@ impl Deadline {
     #[must_use]
     pub fn expired(&self) -> bool {
         self.token.is_cancelled()
+    }
+}
+
+/// A query stopped for running past its time limit.
+///
+/// Carried out of the evaluator as `spareval::QueryEvaluationError::Dataset`, like
+/// [`crate::memory::LimitExceeded`], and rendered transparently — the client reads the
+/// limit, not the word `Dataset`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimedOut {
+    /// The limit the query ran past.
+    pub limit: Duration,
+}
+
+impl std::fmt::Display for TimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "query cancelled: it ran past the {} time limit (raise it with --timeout, or ask a narrower question)",
+            seconds(self.limit)
+        )
+    }
+}
+
+impl std::error::Error for TimedOut {}
+
+/// A duration as seconds a person can read: `300 s`, `0.5 s`.
+fn seconds(limit: Duration) -> String {
+    let secs = limit.as_secs_f64();
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a whole, non-negative number of seconds, checked just above"
+    )]
+    if secs.fract() == 0.0 {
+        format!("{} s", secs as u64)
+    } else {
+        format!("{secs} s")
     }
 }
 

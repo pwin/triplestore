@@ -68,12 +68,33 @@ struct Ephemeral {
     index: FxHashMap<Term, u64>,
 }
 
+/// Decoded terms a view keeps before starting its cache again.
+///
+/// A quarter of a million: a few tens of megabytes of terms at most, and far more than the
+/// distinct values a sort key or a filter usually sees between one recurrence and the
+/// next. A scan grouped by object needs one.
+pub const DECODE_CACHE_ENTRIES: usize = 1 << 18;
+
 /// A read-only, policy-filtered view of a [`Store`].
 #[derive(Debug)]
 pub struct DatasetView<'a> {
     store: &'a Store,
     policy: &'a CompiledPolicy,
     ephemeral: RefCell<Ephemeral>,
+    /// Terms decoded through this view, by id.
+    ///
+    /// A query decodes the same id many times over: the next row of a scan grouped by
+    /// object, both sides of every comparison in a sort, a filter's variable on every row.
+    /// Each decode of a dictionary-backed term is a point read, and on a large store the
+    /// read is the query — `ORDER BY DESC(?o) LIMIT 4` over 48 million dates was 264 s of
+    /// which the scan was 21. So a term read once is kept, and read again for the cost of
+    /// a hash lookup and a clone.
+    ///
+    /// Bounded at [`DECODE_CACHE_ENTRIES`], past which the map is cleared and starts
+    /// again: the memory of a query over millions of distinct terms stays flat, and
+    /// whatever recurs within a window still hits. Inline, vocabulary and ephemeral ids
+    /// are not kept — decoding those is arithmetic or a table lookup already.
+    decoded: RefCell<FxHashMap<TermId, Term>>,
     /// Quads the policy withheld during this view's lifetime. Operator telemetry only —
     /// never returned to the principal, because the count reveals that hidden data exists.
     filtered: Cell<u64>,
@@ -94,9 +115,42 @@ impl<'a> DatasetView<'a> {
             store,
             policy,
             ephemeral: RefCell::new(Ephemeral::default()),
+            decoded: RefCell::new(FxHashMap::default()),
             filtered: Cell::new(0),
             bounded: Cell::new(0),
         }
+    }
+
+    /// Decodes an id to its term, through the view's cache.
+    ///
+    /// `None` for an id the dictionary does not have, which the store's scans never
+    /// produce. This is the one route from an id to a term for anything evaluating through
+    /// the view — the evaluator's own decoding, the bind join's, a filter's — so that they
+    /// share the cache rather than each paying for the same read.
+    pub fn decode_term(&self, id: TermId) -> Result<Option<Term>, ViewError> {
+        if id.tag() == Tag::Ephemeral {
+            return Ok(self
+                .ephemeral
+                .borrow()
+                .terms
+                .get(usize::try_from(id.payload()).map_err(|_| ViewError::UnknownTerm(id))?)
+                .cloned());
+        }
+        if !id.tag().is_dictionary_backed() {
+            return Ok(self.store.decode_term(id)?);
+        }
+        if let Some(term) = self.decoded.borrow().get(&id) {
+            return Ok(Some(term.clone()));
+        }
+        let term = self.store.decode_term(id)?;
+        if let Some(term) = &term {
+            let mut cache = self.decoded.borrow_mut();
+            if cache.len() >= DECODE_CACHE_ENTRIES {
+                cache.clear();
+            }
+            cache.insert(id, term.clone());
+        }
+        Ok(term)
     }
 
     /// How many scans through this view were bounded by a span.
@@ -360,17 +414,6 @@ impl<'a> QueryableDataset<'a> for &'a DatasetView<'a> {
     }
 
     fn externalize_term(&self, term: TermId) -> Result<Term, ViewError> {
-        if term.tag() == Tag::Ephemeral {
-            return self
-                .ephemeral
-                .borrow()
-                .terms
-                .get(usize::try_from(term.payload()).map_err(|_| ViewError::UnknownTerm(term))?)
-                .cloned()
-                .ok_or(ViewError::UnknownTerm(term));
-        }
-        self.store
-            .decode_term(term)?
-            .ok_or(ViewError::UnknownTerm(term))
+        self.decode_term(term)?.ok_or(ViewError::UnknownTerm(term))
     }
 }

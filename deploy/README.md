@@ -172,7 +172,9 @@ independent of how the query was written and is what `--max-blocking-rows` needs
 the first start on a large store builds statistics, which is a scan and takes minutes at
 hundreds of millions of triples; they are kept with the store, so later starts are
 immediate. `HOLOS_TIMEOUT` and `HOLOS_MAX_QUERY_MEMORY` are what stop one query from taking
-the instance down; set the memory ceiling to a third of what you can spare, at most
+the instance down; `holos.env` already sets the timeout to 300 s, and a public door wants
+less. A query that runs past it is answered with a problem document naming the limit. Set
+the memory ceiling to a third of what you can spare, at most
 ([OPERATIONS.md](../OPERATIONS.md#configuration) says why). `Caddyfile` and `nginx.conf` are
 the two front doors, with the header handling already in them.
 

@@ -360,12 +360,15 @@ predicate prunes branches before the remaining patterns are scanned. `JOIN`, `UN
 `VALUES` bought **2,408×** on a spatial query, for the reason below. `OPTIONAL` bought **41×**
 at 820,000 quads and `GRAPH ?g` **9×**, both flat where the evaluator grows with the store.
 
-Two constructs are refused on principle rather than pending work. **`ORDER BY`** needs a term
-comparator, and SPARQL leaves the relative order of incomparable terms to the implementation —
-so matching the evaluator's sequence means matching its tie-breaking, which is duplicating
-code rather than reusing it and creating two implementations that must agree exactly forever.
-**Aggregation** is the same argument over a larger surface. A fallback costs time; a second
-implementation that drifts costs answers.
+One construct is refused on principle rather than pending work: **aggregation**, which would
+mean a second implementation of a large surface, and a second implementation that drifts
+costs answers where a fallback costs only time. **`ORDER BY`** was refused on the same
+principle — SPARQL leaves the relative order of incomparable terms to the implementation,
+so matching the evaluator's sequence means matching its tie-breaking — until a four-row
+`LIMIT` over a predicate scan ran for hours, and the principle was weighed against that.
+`topk.rs` now carries the one term comparator this engine writes itself, held to the
+evaluator's by a test that sorts every kind of term both ways; the bind join still declines a
+sort, and the heap takes it from there (§16).
 
 The refusals that are pending work rather than principle: closure paths (`*`, `+`, `?`) need a
 fixpoint traversal; a subquery hiding a variable needs that variable renamed before splicing;
@@ -1482,9 +1485,15 @@ paid for once: §6.1 records a load whose final merge reached 18 GB that nothing
 see, refuse, or report. Reason about RocksDB's memory from its own options, not from this
 ceiling.
 
-And only `DISTINCT` spills. `ORDER BY` and keyed `GROUP BY` still buffer in `spareval`, so a
-large one is refused rather than answered. The same collector generalises to an external
-merge sort; that is the next piece.
+And only `DISTINCT` spills. A keyed `GROUP BY`, and an `ORDER BY` in any shape but one, still
+buffer in `spareval`, so a large one is refused rather than answered. The one shape is
+`SELECT … ORDER BY … LIMIT`, which `topk.rs` answers from a heap of `OFFSET + LIMIT` rows
+as the body streams past: the sort key is decoded once per row, the heap holds k rows, and
+the deadline and the ceiling are consulted the whole way through, because the body never
+stops being a scan. It was written for a four-row `LIMIT` over a predicate scan that the
+evaluator answered by collecting every row and decoding both sides of every comparison —
+hours, at one core, out of reach of both guards. The same collector generalises to an
+external merge sort for the shapes the heap declines; that is the next piece.
 
 ---
 
