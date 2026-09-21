@@ -278,5 +278,6 @@ from outside.
 |---|---|
 | What is in the store, and is there room? | `holos stats --store DIR` |
 | Is the server up and answering? | `deploy/smoke.sh` |
+| Which build is running? | `curl -sI http://127.0.0.1:7878/health \| grep -i '^server'`, or `holos-server --version` on the binary |
 | Which store did the server open? | its first line of output |
 | Why does a query return nothing? | that first line; then `holos stats --store` on the directory the load used |

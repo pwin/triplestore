@@ -44,6 +44,10 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tiny_http::{Header, Request, Response, Server};
 
+/// What this binary was built from, for `--version`, the banner, the `Server` header and
+/// `/stats`. See `holos_build`.
+const BUILD: holos_build::Build = holos_build::build!();
+
 const USAGE: &str = "\
 holos-server — SPARQL 1.2 over HTTP, with a YASGUI console
 
@@ -62,10 +66,14 @@ GRAPH STORE PROTOCOL      https://www.w3.org/TR/sparql11-http-rdf-update/
     PUT    /graph?graph=<IRI>    Replace a graph with the request body
     POST   /graph?graph=<IRI>    Merge the request body into a graph
     DELETE /graph?graph=<IRI>    Remove a graph
-    GET  /stats              Store statistics, as JSON
+    GET  /stats              Store statistics and the server's version, as JSON
     GET  /health             Liveness
 
+    Every response carries a Server header naming the build: Server: holos/0.13.0 (d4b4fdd).
+
 SERVER
+    --version, -V            Print the version, the commit it was built from, and whether
+                             the tree was clean, then exit.
     --listen <ADDR>          Default 127.0.0.1:7878
     --data <FILE>            Load a file at start-up. Repeatable. Also reads .gz, streamed.
     --store <DIR>            Use a persistent RocksDB store at DIR.
@@ -356,6 +364,10 @@ fn main() -> Result<()> {
         print!("{USAGE}");
         return Ok(());
     }
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("holos-server {BUILD}");
+        return Ok(());
+    }
     let config = parse_args(&args)?;
 
     let mut engine = open_engine(&config)?;
@@ -426,7 +438,7 @@ surprise, check that this is the directory the load wrote to."
     }
 
     let server = Arc::new(Server::http(&listen).map_err(|e| anyhow::anyhow!("{e}"))?);
-    eprintln!("holos-server listening on http://{listen}");
+    eprintln!("holos-server {BUILD} listening on http://{listen}");
     if ui_enabled {
         eprintln!("  console  http://{listen}/");
     }
@@ -1424,6 +1436,11 @@ fn principal_for(state: &State, request: &Request) -> Principal {
     principal
 }
 
+/// The store's counts and the server's build, as one JSON object.
+///
+/// The build is here as well as in the `Server` header because a monitor that reads
+/// `/stats` already, and keeps the numbers, should be able to keep the version next to
+/// them without parsing headers.
 fn stats(state: &State) -> String {
     let Ok(guard) = state.engine.read() else {
         return r#"{"error":"store lock poisoned"}"#.to_owned();
@@ -1431,10 +1448,11 @@ fn stats(state: &State) -> String {
     let store = guard.store();
     let graphs = store.named_graphs().map(|g| g.len()).unwrap_or(0);
     format!(
-        r#"{{"quads":{},"dictionaryTerms":{},"namedGraphs":{}}}"#,
+        r#"{{"quads":{},"dictionaryTerms":{},"namedGraphs":{},{}}}"#,
         store.len(),
         store.dictionary_len(),
-        graphs
+        graphs,
+        BUILD.json_members()
     )
 }
 
@@ -1451,7 +1469,12 @@ fn respond_with(
     extra: &[(&str, &str)],
 ) -> Result<()> {
     let mut response = Response::from_data(body).with_status_code(status);
+    // RFC 9110 §10.2.4: the one place HTTP gives a server to say what it is. tiny-http
+    // fills it with its own name unless told otherwise, and an operator asking "which
+    // build is answering on this port" wants ours. A front door may replace it.
+    let product = BUILD.product("holos");
     for (name, value) in [
+        ("Server", product.as_str()),
         ("Content-Type", content_type),
         // The console is served from this same origin, but a SPARQL endpoint is routinely
         // queried from a page somewhere else, and refusing that by default makes the

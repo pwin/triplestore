@@ -575,11 +575,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "holos-build"
+version = "0.12.0"
+
+[[package]]
 name = "holos-cli"
 version = "0.12.0"
 dependencies = [
  "anyhow",
  "fs4",
+ "holos-build",
  "holos-core",
  "holos-engine",
  "holos-security",
@@ -698,6 +703,7 @@ version = "0.12.0"
 dependencies = [
  "anyhow",
  "fs4",
+ "holos-build",
  "holos-core",
  "holos-engine",
  "holos-security",

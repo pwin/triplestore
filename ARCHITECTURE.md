@@ -170,6 +170,7 @@ The entry point is `Engine::query_with` in
 
 | crate | layer | what it holds | start reading at |
 |---|---|---|---|
+| `holos-build` | — | What a binary was built from — version, commit, clean or modified — stamped by its build script and shown by `--version`, the banner, the `Server` header and `/stats` | [`lib.rs`](crates/holos-build/src/lib.rs) |
 | `holos-core` | L1 | `TermId`, the inline value codec, the well-known vocabulary | [`term_id.rs`](crates/holos-core/src/term_id.rs) |
 | `holos-store` | L2 | The `Store` API, the `Storage` trait, both backends, the index orders, bulk loading | [`storage.rs`](crates/holos-store/src/storage.rs), then [`rocks/mod.rs`](crates/holos-store/src/rocks/mod.rs) |
 | `holos-security` | — | Principals, the compiled access policy, the audit record | [`policy.rs`](crates/holos-security/src/policy.rs) |

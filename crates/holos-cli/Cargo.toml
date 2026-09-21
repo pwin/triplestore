@@ -12,6 +12,7 @@ name = "holos"
 path = "src/main.rs"
 
 [dependencies]
+holos-build.workspace = true
 holos-core.workspace = true
 holos-store.workspace = true
 holos-security.workspace = true
@@ -31,3 +32,6 @@ tempfile.workspace = true
 [features]
 default = ["rocksdb"]
 rocksdb = ["holos-store/rocksdb"]
+
+[build-dependencies]
+holos-build.workspace = true

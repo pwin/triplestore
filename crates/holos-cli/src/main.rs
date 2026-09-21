@@ -19,6 +19,9 @@ use std::fs::File;
 use std::io::{stdout, Read, Write};
 use std::path::Path;
 
+/// What this binary was built from, for `--version`. See `holos_build`.
+const BUILD: holos_build::Build = holos_build::build!();
+
 const USAGE: &str = "\
 holos — an RDF 1.2 store with SPARQL 1.2 and policy enforced at the scan
 
@@ -142,6 +145,10 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("holos {BUILD}");
         return Ok(());
     }
     let (command, rest) = args.split_first().expect("checked non-empty");

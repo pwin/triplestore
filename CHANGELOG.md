@@ -5,6 +5,27 @@ them are in `BENCHMARKS.md` and are runnable.
 
 ## 0.13.0 — unreleased
 
+### A running server says which build it is
+
+Asked of a server that had just been restarted: was it the binary with the fix, or the one
+from before? Nothing said. `/health` answered `ok`, `/stats` gave the counts, every
+response carried the HTTP library's own `Server: tiny-http (Rust)`, the banner had no
+version line, and neither binary took `--version`. Now, from one stamp:
+
+- **`Server: holos/0.13.0 (d4b4fdd)`** on every response — the place HTTP gives a server
+  to say what it is (RFC 9110 §10.2.4), replacing the library's name.
+- **`/stats`** carries `"version"`, `"commit"` and `"modified"` next to the counts, for a
+  monitor that already reads it.
+- **`holos-server --version`** and **`holos --version`**, and the same line in the
+  startup banner.
+- **The commit, and whether the tree was clean.** A binary built between releases says
+  the same version number as the release; the parenthesis says which commit it was built
+  at, and `modified` that the tree had uncommitted changes. The stamp is written by a
+  build script that re-runs whenever anything under `crates/` changes, so it cannot go
+  stale between edit and rebuild. A build without a repository says only its version.
+
+New crate `holos-build` holds both halves — the stamp and its display — so the two agree.
+
 ### `ORDER BY … LIMIT` from a heap of the rows it returns, and a timeout that says which limit
 
 Prompted by `SELECT ?o WHERE { ?s schema:deathDate ?o } ORDER BY DESC(?o) LIMIT 4` on the

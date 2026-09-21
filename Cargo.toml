@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/holos-build",
     "crates/holos-core",
     "crates/holos-store",
     "crates/holos-security",
@@ -51,6 +52,7 @@ wkt = "0.14"
 geojson = "0.24"
 
 # --- internal
+holos-build = { path = "crates/holos-build", version = "0.12.0" }
 holos-core = { path = "crates/holos-core", version = "0.12.0" }
 holos-store = { path = "crates/holos-store", version = "0.12.0" }
 holos-engine = { path = "crates/holos-engine", version = "0.12.0" }

@@ -670,7 +670,25 @@ than answering it with holes.
 | Endpoint | Use |
 |---|---|
 | `GET /health` | Liveness. Cheap, no store access |
-| `GET /stats` | `{"quads":…, "dictionaryTerms":…, "namedGraphs":…}` |
+| `GET /stats` | `{"quads":…, "dictionaryTerms":…, "namedGraphs":…, "version":"0.13.0", "commit":"d4b4fdd", "modified":false}` |
+
+**Which build is answering.** Every response carries a `Server` header naming it — the
+place HTTP gives a server to say what it is (RFC 9110 §10.2.4) — and `/stats` carries the
+same three facts as data:
+
+```sh
+curl -sI http://127.0.0.1:7878/health | grep -i '^server'
+# Server: holos/0.13.0 (d4b4fdd)
+holos-server --version
+# holos-server 0.13.0 (d4b4fdd)
+```
+
+The parenthesis is the commit the binary was built from, and `modified` after it means the
+working tree had uncommitted changes at the time — a binary built between releases, which
+the version number alone cannot tell from the release. A build without a repository, from
+a source tarball, says only its version. The startup banner prints the same line. A front
+door that rewrites `Server` for its own reasons leaves `/stats` and `--version` as they
+are.
 
 `deploy/smoke.sh` exits non-zero on the first failure, so it works as a deployment gate or a
 container health check. It checks thirteen things and changes nothing: content negotiation on
