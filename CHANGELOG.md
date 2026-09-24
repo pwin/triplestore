@@ -3,7 +3,7 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## 0.14.0 — unreleased
+## 0.14.0 — 2026-09-24
 
 ### Spilling has a disk ceiling, not only a memory budget
 
