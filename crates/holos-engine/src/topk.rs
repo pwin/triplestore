@@ -510,16 +510,31 @@ impl Plan {
         rows: QuerySolutionIter<'a>,
         evaluator: &QueryEvaluator,
         budget: usize,
+        disk_limit: Option<usize>,
         token: Option<spareval::CancellationToken>,
     ) -> Result<QuerySolutionIter<'a>, EngineError> {
         let variables = rows.variables().to_vec();
         let readers = self.readers(&variables);
         let output = self.output_positions(&variables);
         let descending: Arc<[bool]> = self.keys.iter().map(|k| k.descending).collect();
-        let io = |e: std::io::Error| EngineError::Evaluation(spareval::QueryEvaluationError::Dataset(Box::new(e)));
+        // A scratch ceiling travels inside the `io::Error` the write path returns; unwrapped
+        // here so the client is told which ceiling rather than handed an I/O failure.
+        let io = |e: std::io::Error| -> EngineError {
+            match e.downcast::<crate::spill::DiskLimitExceeded>() {
+                Ok(over) => EngineError::Evaluation(
+                    spareval::QueryEvaluationError::Dataset(Box::new(over)),
+                ),
+                Err(other) => EngineError::Evaluation(
+                    spareval::QueryEvaluationError::Dataset(Box::new(other)),
+                ),
+            }
+        };
 
         let mut sorted =
             crate::spill::Sorted::new(self.projected.len(), descending, budget).map_err(io)?;
+        if let Some(limit) = disk_limit {
+            sorted = sorted.with_disk_limit(limit);
+        }
         let mut rows = rows;
         for row in rows.by_ref() {
             let row = row?;
@@ -560,7 +575,16 @@ impl Plan {
                 match merged.next_row() {
                     Ok(None) => return None,
                     Err(e) => {
-                        return Some(Err(spareval::QueryEvaluationError::Dataset(Box::new(e))))
+                        return Some(Err(
+                            match e.downcast::<crate::spill::DiskLimitExceeded>() {
+                                Ok(over) => {
+                                    spareval::QueryEvaluationError::Dataset(Box::new(over))
+                                }
+                                Err(other) => {
+                                    spareval::QueryEvaluationError::Dataset(Box::new(other))
+                                }
+                            },
+                        ))
                     }
                     Ok(Some(row)) => {
                         if skipped < start {

@@ -309,3 +309,67 @@ fn the_edges_hold() {
     )
     .is_empty());
 }
+
+/// A sort that would write more scratch than it is allowed is refused, not left to fill
+/// the volume.
+///
+/// The hazard this closes: `--spill-bytes` bounds what an operator *holds* and says nothing
+/// about what it *writes*, and a sort writes in proportion to its input. Until the ceiling
+/// existed, a sort over a large store would write until the disk holding the scratch
+/// directory — very often the system volume — was full, where before it spilled at all the
+/// same query was refused in seconds by the memory ceiling. Trading a refusal for a full
+/// volume is not an improvement.
+#[test]
+fn a_sort_that_spills_too_much_is_refused() {
+    let engine = engine();
+    let session = Session::unrestricted(engine.store()).expect("session");
+    let view = engine.view(&session);
+    let query = format!("PREFIX ex: <{EX}> SELECT ?s ?o WHERE {{ ?s ex:died ?o }} ORDER BY ?o");
+
+    // Spills constantly, and is allowed a fraction of what that adds up to.
+    let options = QueryOptions::new().spilling(4 * 1024).with_spill_disk(64 * 1024);
+    let error = match Engine::query_with(&view, &query, &options) {
+        Err(e) => e,
+        Ok((results, _)) => {
+            let QueryResults::Solutions(iter) = results else {
+                panic!("expected solutions");
+            };
+            iter.filter_map(Result::err)
+                .next()
+                .expect("the ceiling should have stopped this sort")
+                .into()
+        }
+    };
+
+    assert_eq!(error.kind(), ("spill-ceiling", 500), "{error}");
+    let detail = error.detail();
+    assert!(
+        detail.contains("spilled") && detail.contains("--max-spill-disk"),
+        "the detail must name what it wrote and the flag: {detail}"
+    );
+}
+
+/// And the same sort finishes when the ceiling is removed, so the test above is measuring
+/// the ceiling and not some other failure.
+#[test]
+fn the_same_sort_finishes_without_a_ceiling() {
+    let engine = engine();
+    let session = Session::unrestricted(engine.store()).expect("session");
+    let view = engine.view(&session);
+    let query = format!("PREFIX ex: <{EX}> SELECT ?s ?o WHERE {{ ?s ex:died ?o }} ORDER BY ?o");
+    let options = QueryOptions::new().spilling(4 * 1024).with_spill_disk(0);
+    assert_eq!(rows(&view, &query, &options).len(), ROWS);
+}
+
+/// A sort small enough never to spill is untouched by the ceiling, however low it is set.
+#[test]
+fn a_sort_that_never_spills_ignores_the_ceiling() {
+    let engine = engine();
+    let session = Session::unrestricted(engine.store()).expect("session");
+    let view = engine.view(&session);
+    let query = format!(
+        "PREFIX ex: <{EX}> SELECT ?o WHERE {{ ?s ex:died ?o }} ORDER BY ?o LIMIT 5000"
+    );
+    let options = QueryOptions::new().spilling(64 << 20).with_spill_disk(1);
+    assert_eq!(rows(&view, &query, &options).len(), ROWS);
+}

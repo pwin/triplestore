@@ -124,6 +124,8 @@ impl EngineError {
             Self::Evaluation(E::Dataset(inner)) => {
                 if inner.is::<crate::memory::LimitExceeded>() {
                     ("memory-ceiling", 500)
+                } else if inner.is::<crate::spill::DiskLimitExceeded>() {
+                    ("spill-ceiling", 500)
                 } else if inner.is::<crate::options::TimedOut>() {
                     ("timeout", 500)
                 } else {
@@ -704,6 +706,7 @@ impl Engine {
             rows,
             &Self::evaluator(),
             budget,
+            options.spill_disk,
             token,
         )?))
     }
@@ -766,7 +769,8 @@ impl Engine {
                 let QueryResults::Solutions(solutions) = results else {
                     return Ok(None);
                 };
-                let mut distinct = crate::spill::deduplicate(solutions, budget)?;
+                let mut distinct =
+                    crate::spill::deduplicate(solutions, budget, options.spill_disk)?;
                 if let Some((start, length)) = slice {
                     let variables: std::sync::Arc<[spargebra::term::Variable]> =
                         std::sync::Arc::from(distinct.variables().to_vec());
@@ -813,7 +817,7 @@ impl Engine {
                 // past and never held, so this is the one `DISTINCT` whose answer is O(1)
                 // however large its input.
                 let mut count: u64 = 0;
-                for row in crate::spill::deduplicate(solutions, budget)? {
+                for row in crate::spill::deduplicate(solutions, budget, options.spill_disk)? {
                     row?;
                     count += 1;
                 }

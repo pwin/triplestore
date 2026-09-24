@@ -5,6 +5,25 @@ them are in `BENCHMARKS.md` and are runnable.
 
 ## 0.14.0 — unreleased
 
+### Spilling has a disk ceiling, not only a memory budget
+
+Caught while deciding whether this release was ready, and it is the kind of thing a release
+should not carry. `--spill-bytes` bounds what a spilling operator *holds*; nothing bounded
+what it *writes*, and an operator that spills writes in proportion to its input. That was a
+documented hazard while it was reachable only by a `DISTINCT` under `--reorder`. Making
+`ORDER BY` spill put it on by default for every unbounded sort — and the behaviour it
+replaced was a clean refusal, the memory ceiling stopping the query in seconds. A sort over
+a 654-million-quad store would have written on the order of a hundred gigabytes to the
+scratch directory, which is very often the system volume. Trading a refusal for a full disk
+is not an improvement.
+
+`--max-spill-disk <GiB>`, **default 16**, bounds it. Past that the query is refused with a
+`spill-ceiling` problem document carrying what it wrote, the ceiling, and the flag — the way
+the memory ceiling already did. `0` removes it. The ceiling is per query, so two spilling at
+once can write twice it, and it is enforced in the collectors themselves, so a library
+caller gets it without asking. The 48.4-million-row sort this was sized against writes about
+7 GB, well inside the default.
+
 ### The top-k query was half heap allocation, and the heap was free
 
 Profiled rather than guessed at, after the last release left the question open. `holos-bench`

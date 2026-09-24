@@ -83,6 +83,10 @@ QUERY
                              may hold before spilling a sorted run to disk. Default 128;
                              0 disables it, leaving the operator to buffer in memory.
                              Was --spill-distinct, which is still accepted.
+    --max-spill-disk <GiB>   Scratch one query may write while spilling, before it is
+                             refused. Default 16; 0 removes the ceiling. Scratch goes to
+                             TMPDIR (TMP/TEMP on Windows), which is often the system
+                             volume: see OPERATIONS.md before raising this.
 
                              Reached only where --max-blocking-rows would otherwise refuse
                              the query, so it needs --reorder for the same reason. It is
@@ -936,6 +940,8 @@ struct Options {
     /// `None` is the built-in default rather than zero: `Options` derives `Default`, and a
     /// bare `usize` would have defaulted to nothing-in-memory, which reads as "off".
     spill_bytes: Option<usize>,
+    /// Scratch one query may write while spilling. `None` keeps the engine's own default.
+    max_spill_disk: Option<usize>,
     /// Rows a blocking operator may be *estimated* to buffer before the query is refused.
     ///
     /// `None` means the built-in default, for the same reason as `spill_bytes` above.
@@ -993,6 +999,9 @@ impl Options {
             Some(bytes) => options = options.spilling(bytes),
             None => options = options.spilling(holos_engine::spill::SPILL_BYTES),
         }
+        if let Some(bytes) = self.max_spill_disk {
+            options = options.with_spill_disk(bytes);
+        }
         // And the budget, without which the spill above is unreachable. Spilling used to be
         // tried first and unconditionally; it is now what a query gets *instead of* being
         // refused, so it is only ever reached from inside the over-budget branch. Setting one
@@ -1038,6 +1047,16 @@ impl Options {
                 "--named-graph" => o.named_graphs.push(value(&mut i)?),
                 "--union-default-graph" => o.union_default_graph = true,
                 "--timeout" => o.timeout = Some(value(&mut i)?.parse()?),
+                "--max-spill-disk" => {
+                    let gigabytes: f64 = value(&mut i)?.parse()?;
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "a byte count from a gigabyte figure, bounded by the parse"
+                    )]
+                    let bytes = (gigabytes.max(0.0) * 1024.0 * 1024.0 * 1024.0) as usize;
+                    o.max_spill_disk = Some(bytes);
+                }
                 "--spill-bytes" | "--spill-distinct" => {
                     let mib: f64 = value(&mut i)?.parse()?;
                     #[allow(

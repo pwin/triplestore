@@ -63,6 +63,61 @@ use std::sync::Arc;
 /// small enough to leave room for everything else the query is doing.
 pub const SPILL_BYTES: usize = 128 << 20;
 
+/// Bytes a single operator may write to its scratch directory before it is stopped.
+///
+/// # Why a disk ceiling as well as a memory budget
+///
+/// [`SPILL_BYTES`] bounds what an operator *holds*; it says nothing about what it *writes*,
+/// and a spilling operator writes in proportion to its input. Before 0.14.0 that was a
+/// documented hazard reachable only by a `DISTINCT` under `--reorder`; when `ORDER BY`
+/// started spilling it became reachable by any sort, on by default, and the failure it
+/// replaced was a clean one — the memory ceiling refusing the query in seconds. Trading a
+/// refusal for a full system volume is not an improvement, and the scratch directory is
+/// very often *on* the system volume (see [`scratch_dir`]).
+///
+/// So the disk is bounded too, and going past it fails the query the way the memory ceiling
+/// does: with the numbers and the flag that changes them. 16 GiB is far above any sort this
+/// store is for — the 48.4-million-row sort it was sized against writes about 7 GB — and far
+/// below what would fill a volume anyone would notice.
+pub const SPILL_DISK_BYTES: usize = 16 << 30;
+
+/// A query stopped for writing more scratch than it was allowed.
+///
+/// Carried out of the collector inside a `std::io::Error`, because that is what the write
+/// path returns, and unwrapped again by whoever turns it into a query error so that the
+/// client is told which ceiling rather than being handed an I/O failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskLimitExceeded {
+    /// Bytes the operator had written when it was stopped.
+    pub written: usize,
+    /// The ceiling it passed.
+    pub limit: usize,
+}
+
+impl std::fmt::Display for DiskLimitExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "query cancelled: it spilled {} to scratch, over the {} ceiling \
+             (raise it or remove it with --max-spill-disk, and see OPERATIONS.md for where \
+             the scratch goes)",
+            crate::memory::human(self.written),
+            crate::memory::human(self.limit)
+        )
+    }
+}
+
+impl std::error::Error for DiskLimitExceeded {}
+
+/// Turns the collector's `std::io::Error` into a query error, keeping a ceiling breach
+/// recognisable instead of burying it as an I/O failure.
+fn spill_error(e: std::io::Error) -> QueryEvaluationError {
+    match e.downcast::<DiskLimitExceeded>() {
+        Ok(over) => QueryEvaluationError::Dataset(Box::new(over)),
+        Err(other) => QueryEvaluationError::Dataset(Box::new(other)),
+    }
+}
+
 /// One encoded row, as written to a run file.
 type Row = Vec<u8>;
 
@@ -102,6 +157,10 @@ fn scratch_dir(prefix: &str) -> std::io::Result<PathBuf> {
 pub struct Distinct {
     dir: PathBuf,
     runs: Vec<PathBuf>,
+    /// Bytes written to the runs so far, against [`Distinct::disk_limit`].
+    written: usize,
+    /// Bytes this collector may write before it gives up. Zero removes the ceiling.
+    disk_limit: usize,
     /// Deduplicating as rows arrive, which is what makes the common case cost what
     /// `spareval` costs. Encoding happens only when this has to be written out.
     live: FxHashSet<Live>,
@@ -124,6 +183,8 @@ impl Distinct {
         Ok(Self {
             dir,
             runs: Vec::new(),
+            written: 0,
+            disk_limit: SPILL_DISK_BYTES,
             live: FxHashSet::default(),
             bytes: 0,
             budget,
@@ -135,6 +196,13 @@ impl Distinct {
     #[must_use]
     pub fn runs(&self) -> usize {
         self.runs.len()
+    }
+
+    /// Replaces the scratch ceiling. Zero removes it. See [`SPILL_DISK_BYTES`].
+    #[must_use]
+    pub fn with_disk_limit(mut self, bytes: usize) -> Self {
+        self.disk_limit = bytes;
+        self
     }
 
     /// Where this collector's runs live, for an operator that wants to report it and for a
@@ -175,14 +243,14 @@ impl Distinct {
         let path = self.dir.join(format!("{}.run", self.runs.len()));
         let mut out = BufWriter::new(File::create(&path)?);
         for row in &rows {
-            write_row(&mut out, row)?;
+            self.written += write_row(&mut out, row)?;
         }
         out.flush()?;
         rows.clear();
 
         self.runs.push(path);
         self.bytes = 0;
-        Ok(())
+        over_disk_limit(self.written, self.disk_limit)
     }
 
     /// What is held, encoded and sorted, leaving the set empty.
@@ -366,21 +434,24 @@ impl Merged {
 pub fn deduplicate(
     input: QuerySolutionIter<'_>,
     budget: usize,
+    disk_limit: Option<usize>,
 ) -> Result<QuerySolutionIter<'static>, QueryEvaluationError> {
     let variables: Arc<[Variable]> = Arc::from(input.variables().to_vec());
     let width = variables.len();
-    let io = |e: std::io::Error| QueryEvaluationError::Dataset(Box::new(e));
 
-    let mut distinct = Distinct::new(width, budget).map_err(io)?;
+    let mut distinct = Distinct::new(width, budget).map_err(spill_error)?;
+    if let Some(limit) = disk_limit {
+        distinct = distinct.with_disk_limit(limit);
+    }
     for solution in input {
-        distinct.push(&solution?).map_err(io)?;
+        distinct.push(&solution?).map_err(spill_error)?;
     }
 
-    let mut merged = distinct.merge().map_err(io)?;
+    let mut merged = distinct.merge().map_err(spill_error)?;
     let rows = std::iter::from_fn(move || match merged.next_row() {
         Ok(Some(row)) => Some(Ok(row)),
         Ok(None) => None,
-        Err(e) => Some(Err(QueryEvaluationError::Dataset(Box::new(e)))),
+        Err(e) => Some(Err(spill_error(e))),
     });
     Ok(QuerySolutionIter::from_tuples(variables, rows))
 }
@@ -415,6 +486,10 @@ pub fn deduplicate(
 pub struct Sorted {
     dir: PathBuf,
     runs: Vec<PathBuf>,
+    /// Bytes written to the runs so far, against [`Sorted::disk_limit`].
+    written: usize,
+    /// Bytes this collector may write before it gives up. Zero removes the ceiling.
+    disk_limit: usize,
     /// What is held: each row with the keys it is sorted by.
     live: Vec<(Keys, Live)>,
     bytes: usize,
@@ -443,6 +518,8 @@ impl Sorted {
         Ok(Self {
             dir,
             runs: Vec::new(),
+            written: 0,
+            disk_limit: SPILL_DISK_BYTES,
             live: Vec::new(),
             bytes: 0,
             budget,
@@ -456,6 +533,13 @@ impl Sorted {
     #[must_use]
     pub fn runs(&self) -> usize {
         self.runs.len()
+    }
+
+    /// Replaces the scratch ceiling. Zero removes it. See [`SPILL_DISK_BYTES`].
+    #[must_use]
+    pub fn with_disk_limit(mut self, bytes: usize) -> Self {
+        self.disk_limit = bytes;
+        self
     }
 
     /// Where this collector's runs live, for an operator that wants to report it and for a
@@ -490,12 +574,12 @@ impl Sorted {
         for (keys, row) in self.live.drain(..) {
             let mut record = encode_row(&key_terms(&keys), self.key_width);
             record.extend_from_slice(&encode_row(&row, self.row_width));
-            write_row(&mut out, &record)?;
+            self.written += write_row(&mut out, &record)?;
         }
         out.flush()?;
         self.runs.push(path);
         self.bytes = 0;
-        Ok(())
+        over_disk_limit(self.written, self.disk_limit)
     }
 
     /// Sorts what is held, in place. Stable, so equal keys keep arrival order — see the
@@ -798,9 +882,22 @@ fn decode_at(row: &[u8], width: usize, from: usize) -> (Vec<Option<Term>>, usize
     (out, at)
 }
 
-fn write_row(out: &mut BufWriter<File>, row: &[u8]) -> std::io::Result<()> {
+/// Writes one length-prefixed record, and reports how many bytes that took.
+fn write_row(out: &mut BufWriter<File>, row: &[u8]) -> std::io::Result<usize> {
     out.write_all(&u32::try_from(row.len()).unwrap_or(u32::MAX).to_le_bytes())?;
-    out.write_all(row)
+    out.write_all(row)?;
+    Ok(row.len() + 4)
+}
+
+/// `Ok` while the scratch written is within the ceiling, and the breach otherwise.
+///
+/// Checked after a run rather than after a row: a run is the unit that is written, the
+/// overshoot is one run at most, and a comparison per row would be a comparison per row.
+fn over_disk_limit(written: usize, limit: usize) -> std::io::Result<()> {
+    if limit != 0 && written > limit {
+        return Err(std::io::Error::other(DiskLimitExceeded { written, limit }));
+    }
+    Ok(())
 }
 
 /// Reads one run file back, a row at a time.

@@ -86,6 +86,10 @@ SERVER
                              may hold before spilling a sorted run to disk. Default 128;
                              0 disables it, leaving the operator to buffer in memory.
                              Was --spill-distinct, which is still accepted.
+    --max-spill-disk <GiB>   Scratch one query may write while spilling, before it is
+                             refused. Default 16; 0 removes the ceiling. Scratch goes to
+                             TMPDIR (TMP/TEMP on Windows), which is often the system
+                             volume: see OPERATIONS.md before raising this.
 
                              Engaged only where --max-blocking-rows would otherwise refuse
                              the query, so it needs --reorder too. It is not the fast path
@@ -178,6 +182,8 @@ struct Config {
     max_blocking_rows: Option<u64>,
     /// Bytes a DISTINCT may hold before spilling a sorted run. `None` leaves it to spareval.
     spill_bytes: Option<usize>,
+    /// Scratch one query may write while spilling. `None` keeps the engine's own default.
+    max_spill_disk: Option<usize>,
     read_only: bool,
     reorder: bool,
     gsp_base: Option<String>,
@@ -223,6 +229,7 @@ impl Default for Config {
             // taken down by, and a sort costs `n log n` against a hash set's `n` only when
             // the answer was small enough not to matter.
             spill_bytes: Some(holos_engine::spill::SPILL_BYTES),
+            max_spill_disk: None,
             read_only: false,
             reorder: false,
             gsp_base: None,
@@ -1261,6 +1268,9 @@ fn query_options(
     if let Some(rows) = state.config.max_blocking_rows {
         options = options.with_blocking_budget(rows);
     }
+    if let Some(bytes) = state.config.max_spill_disk {
+        options = options.with_spill_disk(bytes);
+    }
     if let Some(bytes) = state.config.spill_bytes {
         options = options.spilling(bytes);
     }
@@ -1597,6 +1607,16 @@ fn parse_args(args: &[String]) -> Result<Config> {
                 } else {
                     None
                 };
+            }
+            "--max-spill-disk" => {
+                let gigabytes: f64 = value(&mut i)?.parse()?;
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "a byte count from a gigabyte figure, bounded by the parse"
+                )]
+                let bytes = (gigabytes.max(0.0) * 1024.0 * 1024.0 * 1024.0) as usize;
+                c.max_spill_disk = Some(bytes);
             }
             "--spill-bytes" | "--spill-distinct" => {
                 let mib: f64 = value(&mut i)?.parse()?;

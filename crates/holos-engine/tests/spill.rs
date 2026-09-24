@@ -48,7 +48,7 @@ fn solutions(rows: Vec<Vec<Option<Term>>>) -> QuerySolutionIter<'static> {
 
 /// Runs the deduplicator and returns the rows it kept, sorted for comparison.
 fn deduplicated(rows: Vec<Vec<Option<Term>>>, budget: usize) -> Vec<String> {
-    let out = spill::deduplicate(solutions(rows), budget).expect("dedup");
+    let out = spill::deduplicate(solutions(rows), budget, None).expect("dedup");
     let mut kept: Vec<String> = out
         .map(|solution| {
             let solution = solution.expect("solution");

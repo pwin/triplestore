@@ -87,6 +87,18 @@ pub struct QueryOptions {
     /// with no `LIMIT` or a very large one.
     pub spill_bytes: Option<usize>,
 
+    /// Bytes a spilling operator may write to scratch before the query is stopped.
+    ///
+    /// `None` leaves the collectors' own default, [`crate::spill::SPILL_DISK_BYTES`]. Zero
+    /// removes the ceiling, which means a sort over a large store may write until the
+    /// volume holding the scratch directory is full — see [`crate::spill`] for where that
+    /// directory is, which is very often the system volume.
+    ///
+    /// Separate from [`Self::spill_bytes`] because they bound different things: that one is
+    /// what an operator *holds*, this is what it *writes*, and an operator that spills
+    /// writes in proportion to its input however small its buffer.
+    pub spill_disk: Option<usize>,
+
     /// Collect the query plan, with per-operator statistics.
     pub explain: bool,
 
@@ -168,6 +180,13 @@ impl QueryOptions {
     #[must_use]
     pub fn spilling(mut self, budget: usize) -> Self {
         self.spill_bytes = Some(budget);
+        self
+    }
+
+    /// Bytes a spilling operator may write to scratch. Zero removes the ceiling.
+    #[must_use]
+    pub fn with_spill_disk(mut self, bytes: usize) -> Self {
+        self.spill_disk = Some(bytes);
         self
     }
 

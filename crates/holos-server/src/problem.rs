@@ -40,6 +40,7 @@ fn title(kind: &str) -> &'static str {
         "policy" => "Refused by policy",
         "read-only" => "This endpoint is read-only",
         "memory-ceiling" => "The query outgrew the memory ceiling",
+        "spill-ceiling" => "The query outgrew the scratch-disk ceiling",
         "timeout" => "The query ran past its time limit",
         "evaluation" => "The query failed while running",
         "internal" => "The server failed",
