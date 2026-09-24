@@ -79,8 +79,10 @@ QUERY
                              estimated to buffer more than N rows. Default 10,000,000;
                              0 disables it. Needs --reorder, since the estimate is what
                              decides, and there is no estimate without statistics.
-    --spill-distinct <MiB>   Bytes a SELECT DISTINCT or COUNT(DISTINCT *) may hold before
-                             spilling a sorted run to disk. Default 128; 0 disables it.
+    --spill-bytes <MiB>      Bytes a SELECT DISTINCT, a COUNT(DISTINCT *) or an ORDER BY
+                             may hold before spilling a sorted run to disk. Default 128;
+                             0 disables it, leaving the operator to buffer in memory.
+                             Was --spill-distinct, which is still accepted.
 
                              Reached only where --max-blocking-rows would otherwise refuse
                              the query, so it needs --reorder for the same reason. It is
@@ -933,10 +935,10 @@ struct Options {
     ///
     /// `None` is the built-in default rather than zero: `Options` derives `Default`, and a
     /// bare `usize` would have defaulted to nothing-in-memory, which reads as "off".
-    spill_distinct: Option<usize>,
+    spill_bytes: Option<usize>,
     /// Rows a blocking operator may be *estimated* to buffer before the query is refused.
     ///
-    /// `None` means the built-in default, for the same reason as `spill_distinct` above.
+    /// `None` means the built-in default, for the same reason as `spill_bytes` above.
     max_blocking_rows: Option<u64>,
     explain: bool,
     reorder: bool,
@@ -986,10 +988,10 @@ impl Options {
         // The same bounded-memory DISTINCT the server gets. A CLI invocation that dies
         // takes only itself, which is why it has no memory ceiling -- but a `DISTINCT`
         // that cannot finish is a wrong answer either way, and spilling makes it finish.
-        match self.spill_distinct {
+        match self.spill_bytes {
             Some(0) => {}
-            Some(bytes) => options = options.spilling_distinct(bytes),
-            None => options = options.spilling_distinct(holos_engine::spill::SPILL_BYTES),
+            Some(bytes) => options = options.spilling(bytes),
+            None => options = options.spilling(holos_engine::spill::SPILL_BYTES),
         }
         // And the budget, without which the spill above is unreachable. Spilling used to be
         // tried first and unconditionally; it is now what a query gets *instead of* being
@@ -1036,7 +1038,7 @@ impl Options {
                 "--named-graph" => o.named_graphs.push(value(&mut i)?),
                 "--union-default-graph" => o.union_default_graph = true,
                 "--timeout" => o.timeout = Some(value(&mut i)?.parse()?),
-                "--spill-distinct" => {
+                "--spill-bytes" | "--spill-distinct" => {
                     let mib: f64 = value(&mut i)?.parse()?;
                     #[allow(
                         clippy::cast_possible_truncation,
@@ -1044,7 +1046,7 @@ impl Options {
                         reason = "a byte count from a mebibyte figure, bounded by the parse"
                     )]
                     let bytes = (mib.max(0.0) * 1024.0 * 1024.0) as usize;
-                    o.spill_distinct = Some(bytes);
+                    o.spill_bytes = Some(bytes);
                 }
                 "--max-blocking-rows" => o.max_blocking_rows = Some(value(&mut i)?.parse()?),
                 "--explain" => o.explain = true,

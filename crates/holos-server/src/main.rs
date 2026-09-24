@@ -82,8 +82,10 @@ SERVER
                              Enforced while a query reads or streams rows; a query blocked
                              inside one in-memory step is not interruptible. See
                              OPERATIONS.md.
-    --spill-distinct <MiB>   Bytes a SELECT DISTINCT or COUNT(DISTINCT *) may hold before
-                             spilling a sorted run to disk. Default 128; 0 disables it.
+    --spill-bytes <MiB>      Bytes a SELECT DISTINCT, a COUNT(DISTINCT *) or an ORDER BY
+                             may hold before spilling a sorted run to disk. Default 128;
+                             0 disables it, leaving the operator to buffer in memory.
+                             Was --spill-distinct, which is still accepted.
 
                              Engaged only where --max-blocking-rows would otherwise refuse
                              the query, so it needs --reorder too. It is not the fast path
@@ -175,7 +177,7 @@ struct Config {
     /// Rows a blocking operator may be estimated to buffer. Needs `--reorder` to apply.
     max_blocking_rows: Option<u64>,
     /// Bytes a DISTINCT may hold before spilling a sorted run. `None` leaves it to spareval.
-    spill_distinct: Option<usize>,
+    spill_bytes: Option<usize>,
     read_only: bool,
     reorder: bool,
     gsp_base: Option<String>,
@@ -220,7 +222,7 @@ impl Default for Config {
             // On by default: a DISTINCT that cannot finish is the failure this server was
             // taken down by, and a sort costs `n log n` against a hash set's `n` only when
             // the answer was small enough not to matter.
-            spill_distinct: Some(holos_engine::spill::SPILL_BYTES),
+            spill_bytes: Some(holos_engine::spill::SPILL_BYTES),
             read_only: false,
             reorder: false,
             gsp_base: None,
@@ -1259,8 +1261,8 @@ fn query_options(
     if let Some(rows) = state.config.max_blocking_rows {
         options = options.with_blocking_budget(rows);
     }
-    if let Some(bytes) = state.config.spill_distinct {
-        options = options.spilling_distinct(bytes);
+    if let Some(bytes) = state.config.spill_bytes {
+        options = options.spilling(bytes);
     }
     if let Some(stats) = state.statistics() {
         options = options.reordering(stats);
@@ -1596,9 +1598,9 @@ fn parse_args(args: &[String]) -> Result<Config> {
                     None
                 };
             }
-            "--spill-distinct" => {
+            "--spill-bytes" | "--spill-distinct" => {
                 let mib: f64 = value(&mut i)?.parse()?;
-                c.spill_distinct = if mib > 0.0 {
+                c.spill_bytes = if mib > 0.0 {
                     #[allow(
                         clippy::cast_possible_truncation,
                         clippy::cast_sign_loss,

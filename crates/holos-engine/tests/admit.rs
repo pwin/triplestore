@@ -240,8 +240,10 @@ fn the_estimate_is_close_to_the_truth() {
         .parse_query(&query)
         .expect("parses");
 
-    // Budget of zero, so whatever it estimated comes back.
-    let blocking = admit::over_budget(&parsed, &stats, engine.store(), 0).expect("blocking");
+    // Budget of zero, so whatever it estimated comes back. Spilling off, so this sort —
+    // which has no LIMIT for the heap to use — is measured by its input.
+    let blocking =
+        admit::over_budget(&parsed, &stats, engine.store(), 0, false).expect("blocking");
     assert_eq!(blocking.operator, "ORDER BY");
     #[allow(
         clippy::cast_precision_loss,

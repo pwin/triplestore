@@ -81,5 +81,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("evaluator sort  {full_s:8.3} s   {}", full.join(" "));
     assert_eq!(heap, full, "the two paths must agree");
     println!("\nratio {:.1}×", full_s / heap_s);
+
+    // And the same sort with no LIMIT, which the heap declines: every row comes back, so
+    // this is the collector against the evaluator's buffer rather than against the heap.
+    let whole = format!("PREFIX ex: <{EX}> SELECT ?o WHERE {{ ?s ex:deathDate ?o }} ORDER BY ?o");
+    let count = |options: &QueryOptions| -> Result<(usize, f64), Box<dyn std::error::Error>> {
+        let view = engine.view(&session);
+        let started = Instant::now();
+        let (results, _) = Engine::query_with(&view, &whole, options)?;
+        let QueryResults::Solutions(iter) = results else {
+            return Err("solutions expected".into());
+        };
+        let mut n = 0;
+        let mut last: Option<String> = None;
+        for solution in iter {
+            let value = solution?.get(0).map(ToString::to_string).unwrap_or_default();
+            if let Some(previous) = &last {
+                assert!(*previous <= value, "out of order at row {n}");
+            }
+            last = Some(value);
+            n += 1;
+        }
+        Ok((n, started.elapsed().as_secs_f64()))
+    };
+
+    println!("\nORDER BY with no LIMIT, every row out");
+    // A budget the sort overruns many times over, so the runs are real.
+    let (spilled_n, spilled_s) = count(&QueryOptions::new().spilling(8 << 20))?;
+    println!("spilling 8 MiB  {spilled_s:8.3} s   {spilled_n} rows");
+    let (whole_n, whole_s) = count(&QueryOptions::new())?;
+    println!("evaluator       {whole_s:8.3} s   {whole_n} rows");
+    assert_eq!(spilled_n, whole_n, "the two paths must agree");
     Ok(())
 }

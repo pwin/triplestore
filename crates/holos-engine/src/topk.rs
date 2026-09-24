@@ -99,10 +99,24 @@ pub struct Plan {
     /// What the query projects, in order.
     pub projected: Vec<Variable>,
     keys: Vec<Key>,
-    /// The slice's `OFFSET`.
+    /// The slice's `OFFSET`, zero where there is no slice.
     pub start: usize,
-    /// The slice's `LIMIT`.
-    pub length: usize,
+    /// The slice's `LIMIT`, `None` where there is none.
+    pub length: Option<usize>,
+}
+
+impl Plan {
+    /// Rows the heap would hold, or `None` for a sort it cannot answer.
+    ///
+    /// The heap needs a `LIMIT`: without one every row is wanted, and holding `k` of them
+    /// when `k` is all of them is just a sort with extra steps. It also needs the slice to
+    /// be small enough to hold, which [`MAX_HELD`] decides. Everything else goes to
+    /// [`crate::spill::Sorted`], which bounds memory by a budget instead of by `k`.
+    #[must_use]
+    pub fn held(&self) -> Option<usize> {
+        let held = self.start.checked_add(self.length?)?;
+        (held > 0 && held <= MAX_HELD).then_some(held)
+    }
 }
 
 /// The query taken apart, borrowed: what [`plan`] builds from and [`sorted_body`] reports.
@@ -111,7 +125,7 @@ struct Shape<'q> {
     variables: &'q [Variable],
     expression: &'q [OrderExpression],
     start: usize,
-    length: usize,
+    length: Option<usize>,
     dataset: &'q Option<spargebra::algebra::QueryDataset>,
     base_iri: &'q Option<oxiri::Iri<String>>,
 }
@@ -126,15 +140,17 @@ fn shape(query: &Query) -> Option<Shape<'_>> {
     else {
         return None;
     };
-    let GraphPattern::Slice {
-        inner,
-        start,
-        length: Some(length),
-    } = pattern
-    else {
-        return None;
+    // A slice is optional: with one the heap may answer this, without one the sort is the
+    // whole of it, and either way the shape underneath must be a projection over a sort.
+    let (projection, start, length) = match pattern {
+        GraphPattern::Slice {
+            inner,
+            start,
+            length,
+        } => (inner.as_ref(), *start, *length),
+        other => (other, 0, None),
     };
-    let GraphPattern::Project { inner, variables } = inner.as_ref() else {
+    let GraphPattern::Project { inner, variables } = projection else {
         return None;
     };
     let GraphPattern::OrderBy {
@@ -144,16 +160,16 @@ fn shape(query: &Query) -> Option<Shape<'_>> {
     else {
         return None;
     };
-    let held = start.checked_add(*length)?;
-    if held == 0 || held > MAX_HELD {
+    // A `LIMIT 0` answers nothing and is not worth a special path.
+    if length == Some(0) {
         return None;
     }
     Some(Shape {
         body,
         variables,
         expression,
-        start: *start,
-        length: *length,
+        start,
+        length,
         dataset,
         base_iri,
     })
@@ -211,16 +227,28 @@ pub fn plan(query: &Query) -> Option<Plan> {
     })
 }
 
-/// The pattern under a sort this module will answer, or `None` for a query it declines.
+/// The pattern under a sort that will be answered in bounded memory, or `None`.
 ///
-/// What [`crate::admit`] measures instead of the sort: the body is still evaluated in
-/// full, and a blocking operator inside it still blocks, but the sort itself holds
-/// `OFFSET + LIMIT` rows rather than its input.
+/// What [`crate::admit`] measures instead of the sort: the body is still evaluated in full,
+/// and a blocking operator inside it still blocks, but the sort itself holds `OFFSET +
+/// LIMIT` rows in the heap, or `spilling` bytes in [`crate::spill::Sorted`] — never its
+/// input. A sort neither can take is measured by its input, as it always was.
 #[must_use]
-pub fn sorted_body(query: &Query) -> Option<&GraphPattern> {
+pub fn sorted_body(query: &Query, spilling: bool) -> Option<&GraphPattern> {
     let shape = shape(query)?;
-    keys(shape.expression, &mut Vec::new())?;
-    Some(shape.body)
+    let mut needed = shape.variables.to_vec();
+    let keys = keys(shape.expression, &mut needed)?;
+    let bounded = spilling
+        || Plan {
+            inner: query.clone(),
+            projected: Vec::new(),
+            keys,
+            start: shape.start,
+            length: shape.length,
+        }
+        .held()
+        .is_some();
+    bounded.then_some(shape.body)
 }
 
 /// A row in the heap: its keys, whatever the caller keeps of the row, and when it arrived.
@@ -237,18 +265,7 @@ struct Entry<R> {
 impl<R> Entry<R> {
     /// Where this row sorts relative to another, in output order.
     fn output_cmp(&self, other: &Self) -> Ordering {
-        for ((a, b), descending) in self.keys.iter().zip(&other.keys).zip(self.descending.iter()) {
-            let ordering = cmp_terms(a.as_ref(), b.as_ref());
-            let ordering = if *descending {
-                ordering.reverse()
-            } else {
-                ordering
-            };
-            if ordering != Ordering::Equal {
-                return ordering;
-            }
-        }
-        self.seq.cmp(&other.seq)
+        cmp_keys(&self.keys, &other.keys, &self.descending).then(self.seq.cmp(&other.seq))
     }
 }
 
@@ -287,13 +304,17 @@ struct Collector<R> {
 }
 
 impl<R> Collector<R> {
-    fn new(plan: &Plan) -> Self {
-        let held = plan.start + plan.length;
+    /// The heap for a plan it can answer.
+    ///
+    /// `held` is [`Plan::held`], which the caller has already checked: the heap paths are
+    /// reached only for a plan that has one, and a plan without one goes to the spilling
+    /// sort instead.
+    fn new(plan: &Plan, held: usize) -> Self {
         Self {
             heap: BinaryHeap::with_capacity(held + 1),
             held,
             start: plan.start,
-            length: plan.length,
+            length: held - plan.start,
             descending: plan.keys.iter().map(|k| k.descending).collect(),
             seq: 0,
         }
@@ -344,18 +365,7 @@ impl<R> Collector<R> {
 impl Entry<()> {
     /// [`Entry::output_cmp`] against an entry holding a row, for the probe that has none.
     fn keys_cmp<R>(&self, other: &Entry<R>) -> Ordering {
-        for ((a, b), descending) in self.keys.iter().zip(&other.keys).zip(self.descending.iter()) {
-            let ordering = cmp_terms(a.as_ref(), b.as_ref());
-            let ordering = if *descending {
-                ordering.reverse()
-            } else {
-                ordering
-            };
-            if ordering != Ordering::Equal {
-                return ordering;
-            }
-        }
-        self.seq.cmp(&other.seq)
+        cmp_keys(&self.keys, &other.keys, &self.descending).then(self.seq.cmp(&other.seq))
     }
 }
 
@@ -369,11 +379,12 @@ impl Plan {
         &self,
         rows: QuerySolutionIter<'_>,
         evaluator: &QueryEvaluator,
+        held: usize,
     ) -> Result<Vec<Vec<Option<Term>>>, EngineError> {
         let variables = rows.variables().to_vec();
         let readers = self.readers(&variables);
         let output = self.output_positions(&variables);
-        let mut collector = Collector::new(self);
+        let mut collector = Collector::new(self, held);
         for row in rows {
             let row = row?;
             let values = row.values();
@@ -408,11 +419,12 @@ impl Plan {
         stats: Option<&holos_stats::Statistics>,
         token: Option<&spareval::CancellationToken>,
         evaluator: &QueryEvaluator,
+        held: usize,
     ) -> Result<Option<Vec<Vec<Option<Term>>>>, EngineError> {
         let variables = join.variables().to_vec();
         let readers = self.readers(&variables);
         let output = self.output_positions(&variables);
-        let mut collector: Collector<Vec<Option<TermId>>> = Collector::new(self);
+        let mut collector: Collector<Vec<Option<TermId>>> = Collector::new(self, held);
         let completed = {
             let mut sink = |row: Vec<Option<TermId>>| -> Result<(), ViewError> {
                 let keys = readers
@@ -475,6 +487,89 @@ impl Plan {
     }
 }
 
+impl Plan {
+    /// Sorts every row of the body in bounded memory and returns the slice, in order.
+    ///
+    /// For the sorts the heap declines — no `LIMIT`, or one too large to hold. Rows go into
+    /// [`crate::spill::Sorted`], which keeps them in memory until `budget` bytes and writes
+    /// sorted runs past that, so what an `ORDER BY` costs stops being the size of its input.
+    /// The order is [`cmp_keys`], the same as the heap's.
+    ///
+    /// Returned as an iterator rather than a `Vec`, because the whole point is that the
+    /// answer need never be resident: the merge yields one row at a time and the serialiser
+    /// writes it out.
+    pub fn collect_spilled<'a>(
+        &self,
+        rows: QuerySolutionIter<'a>,
+        evaluator: &QueryEvaluator,
+        budget: usize,
+        token: Option<spareval::CancellationToken>,
+    ) -> Result<QuerySolutionIter<'a>, EngineError> {
+        let variables = rows.variables().to_vec();
+        let readers = self.readers(&variables);
+        let output = self.output_positions(&variables);
+        let descending: Arc<[bool]> = self.keys.iter().map(|k| k.descending).collect();
+        let io = |e: std::io::Error| EngineError::Evaluation(spareval::QueryEvaluationError::Dataset(Box::new(e)));
+
+        let mut sorted =
+            crate::spill::Sorted::new(self.projected.len(), descending, budget).map_err(io)?;
+        let mut rows = rows;
+        for row in rows.by_ref() {
+            let row = row?;
+            let values = row.values();
+            let keys = readers
+                .iter()
+                .map(|reader| reader.key(values, |t| Ok(Some(t.clone())), evaluator))
+                .collect::<Result<Vec<_>, ViewError>>()?;
+            let projected = output
+                .iter()
+                .map(|at| at.and_then(|i| values.get(i).cloned().flatten()))
+                .collect();
+            sorted.push(keys, projected).map_err(io)?;
+        }
+
+        let mut merged = sorted.merge().map_err(io)?;
+        let mut skipped = 0;
+        let start = self.start;
+        let mut emitted = 0;
+        let length = self.length;
+        let projected: Arc<[Variable]> = self.projected.clone().into();
+        // `rows` is exhausted and is moved in anyway, because the deadline guarding the
+        // query lives inside it: dropping it here would stop the watchdog, and the merge
+        // below — which can be minutes of a large sort — would then run with no time limit
+        // at all. Held to the last row, the token beneath still fires.
+        let out = std::iter::from_fn(move || {
+            let _guarded = &rows;
+            loop {
+                if length.is_some_and(|limit| emitted >= limit) {
+                    return None;
+                }
+                if token
+                    .as_ref()
+                    .is_some_and(spareval::CancellationToken::is_cancelled)
+                {
+                    return Some(Err(spareval::QueryEvaluationError::Cancelled));
+                }
+                match merged.next_row() {
+                    Ok(None) => return None,
+                    Err(e) => {
+                        return Some(Err(spareval::QueryEvaluationError::Dataset(Box::new(e))))
+                    }
+                    Ok(Some(row)) => {
+                        if skipped < start {
+                            skipped += 1;
+                            continue;
+                        }
+                        emitted += 1;
+                        return Some(Ok(row));
+                    }
+                }
+            }
+        });
+        Ok(QuerySolutionIter::from_tuples(projected, out))
+    }
+}
+
 /// A sort key's reader, with the variables resolved to positions in the row.
 enum Reader<'p> {
     /// `None` when the variable is not in the row at all, which makes the key unbound.
@@ -519,6 +614,51 @@ impl Reader<'_> {
             }
         }
     }
+}
+
+/// Where one row's sort keys place it against another's, under an `ORDER BY`'s conditions.
+///
+/// Each key in turn by [`cmp_terms`], reversed where its condition said `DESC`, until one
+/// of them decides. `Equal` means the conditions do not separate these two rows, and the
+/// caller breaks the tie — by arrival, everywhere in this engine, so that a sort is stable
+/// and two runs of one query agree.
+///
+/// This is the whole of the engine's own ordering, used by the heap in this module and by
+/// the spilling sort in [`crate::spill`], so that a query answered by either comes back the
+/// same way.
+///
+/// # Where it differs from the evaluator's, and why that is allowed
+///
+/// SPARQL §15.1 orders unbound before blank nodes before IRIs before literals, and orders
+/// two literals by value where `<` is defined between them. Between the rest — an integer
+/// and a string, say — it defines **no** order, and says an implementation may extend it.
+/// `spareval` extends it by comparing lexical forms, and this module does the same so that
+/// the two agree; the consequence, worth knowing before relying on it, is that the extension
+/// is not transitive. `2 < 10` by value, `"1abc" < 2` and `10 < "1abc"` by lexical form, so
+/// those three terms form a cycle, and which of them a sort puts first depends on the order
+/// they arrived in. Both paths were measured doing exactly that, and disagreeing with each
+/// other. Nothing is wrong with either answer — the specification defines no order over that
+/// trio — but neither is repeatable, so **a query whose sort key mixes datatypes has no
+/// dependable order**, whatever it is sorted by. A key of one datatype, which is what real
+/// data has, is a total order and is fully determined.
+#[must_use]
+pub fn cmp_keys(
+    a: &[Option<ExpressionTerm>],
+    b: &[Option<ExpressionTerm>],
+    descending: &[bool],
+) -> Ordering {
+    for ((a, b), descending) in a.iter().zip(b).zip(descending) {
+        let ordering = cmp_terms(a.as_ref(), b.as_ref());
+        let ordering = if *descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
 }
 
 /// SPARQL's `ORDER BY` order over two possibly-unbound terms.
@@ -710,20 +850,35 @@ mod tests {
     #[test]
     fn the_shape_is_recognised_exactly() {
         let p = "PREFIX ex: <http://example.com/> ";
-        assert!(plan(&parse(&format!("{p}SELECT ?o WHERE {{ ?s ex:died ?o }} ORDER BY DESC(?o) LIMIT 4"))).is_some());
-        assert!(plan(&parse(&format!("{p}SELECT * WHERE {{ ?s ex:died ?o }} ORDER BY ?o OFFSET 2 LIMIT 4"))).is_some());
-        assert!(plan(&parse(&format!("{p}SELECT ?s WHERE {{ ?s ex:died ?o }} ORDER BY DESC(?o) ?s LIMIT 4"))).is_some());
-        assert!(plan(&parse(&format!("{p}SELECT ?s WHERE {{ ?s ex:rank ?r }} ORDER BY (?r * 2) LIMIT 4"))).is_some());
-        // Every row is wanted: nothing to gain, and the evaluator's path is the plain one.
-        assert!(plan(&parse(&format!("{p}SELECT ?o WHERE {{ ?s ex:died ?o }} ORDER BY DESC(?o)"))).is_none());
+        let heap = |q: &str| plan(&parse(q)).and_then(|plan| plan.held());
+        let recognised = |q: &str| plan(&parse(q)).is_some();
+
+        // The heap takes a sort with a LIMIT it can hold.
+        assert_eq!(heap(&format!("{p}SELECT ?o WHERE {{ ?s ex:died ?o }} ORDER BY DESC(?o) LIMIT 4")), Some(4));
+        assert_eq!(heap(&format!("{p}SELECT * WHERE {{ ?s ex:died ?o }} ORDER BY ?o OFFSET 2 LIMIT 4")), Some(6));
+        assert_eq!(heap(&format!("{p}SELECT ?s WHERE {{ ?s ex:died ?o }} ORDER BY DESC(?o) ?s LIMIT 4")), Some(4));
+        assert_eq!(heap(&format!("{p}SELECT ?s WHERE {{ ?s ex:rank ?r }} ORDER BY (?r * 2) LIMIT 4")), Some(4));
+
+        // Recognised, but past what the heap will hold, so the spilling sort takes it.
+        for query in [
+            format!("{p}SELECT ?o WHERE {{ ?s ex:died ?o }} ORDER BY DESC(?o)"),
+            format!("{p}SELECT ?o WHERE {{ ?s ex:died ?o }} ORDER BY ?o OFFSET 5"),
+            format!("{p}SELECT ?o WHERE {{ ?s ex:died ?o }} ORDER BY ?o LIMIT {}", MAX_HELD + 1),
+        ] {
+            assert!(recognised(&query), "{query}");
+            assert_eq!(heap(&query), None, "{query}");
+        }
+
+        // Not a sort this module answers at all, by either route.
         // A DISTINCT between the sort and the slice is another operator.
-        assert!(plan(&parse(&format!("{p}SELECT DISTINCT ?o WHERE {{ ?s ex:died ?o }} ORDER BY ?o LIMIT 4"))).is_none());
+        assert!(!recognised(&format!("{p}SELECT DISTINCT ?o WHERE {{ ?s ex:died ?o }} ORDER BY ?o LIMIT 4")));
         // A key the evaluator's public entry point cannot answer.
-        assert!(plan(&parse(&format!("{p}SELECT ?s WHERE {{ ?s ex:died ?o }} ORDER BY RAND() LIMIT 4"))).is_none());
-        assert!(plan(&parse(&format!("{p}SELECT ?s WHERE {{ ?s ex:died ?o }} ORDER BY EXISTS {{ ?s ex:rank ?r }} LIMIT 4"))).is_none());
-        // Larger than the heap is allowed to be.
-        assert!(plan(&parse(&format!("{p}SELECT ?o WHERE {{ ?s ex:died ?o }} ORDER BY ?o LIMIT {}", MAX_HELD + 1))).is_none());
-        assert!(plan(&parse(&format!("{p}SELECT ?o WHERE {{ ?s ex:died ?o }} ORDER BY ?o LIMIT 0"))).is_none());
+        assert!(!recognised(&format!("{p}SELECT ?s WHERE {{ ?s ex:died ?o }} ORDER BY RAND() LIMIT 4")));
+        assert!(!recognised(&format!("{p}SELECT ?s WHERE {{ ?s ex:died ?o }} ORDER BY EXISTS {{ ?s ex:rank ?r }} LIMIT 4")));
+        // Nothing to return.
+        assert!(!recognised(&format!("{p}SELECT ?o WHERE {{ ?s ex:died ?o }} ORDER BY ?o LIMIT 0")));
+        // No sort.
+        assert!(!recognised(&format!("{p}SELECT ?o WHERE {{ ?s ex:died ?o }} LIMIT 4")));
     }
 
     #[test]
@@ -742,7 +897,7 @@ mod tests {
         let names: Vec<&str> = variables.iter().map(Variable::as_str).collect();
         assert_eq!(names, ["s", "o", "r"]);
         assert_eq!(plan.projected.len(), 1);
-        assert_eq!((plan.start, plan.length), (0, 2));
+        assert_eq!((plan.start, plan.length, plan.held()), (0, Some(2), Some(2)));
     }
 
     #[test]

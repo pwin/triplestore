@@ -26,6 +26,12 @@
 //! | `GROUP BY` | a group may gain a member at any time |
 //! | the build side of a hash join | probing cannot start until the table is built |
 //!
+//! Two of those are no longer refused for their size, because they no longer buffer their
+//! input: a `DISTINCT` spills ([`crate::spill::Distinct`]), and an `ORDER BY` is answered
+//! from a heap when it has a `LIMIT` ([`crate::topk`]) and from a sort-spill-merge when it
+//! does not ([`crate::spill::Sorted`]). What is measured for those is the pattern *under*
+//! the operator, which can still block.
+//!
 //! `COUNT(*)` is the instructive contrast: `spareval` answers it with a `u64` counter and
 //! streams, while `COUNT(DISTINCT *)` holds every distinct solution and does not. The
 //! difference is not the aggregate, it is the `DISTINCT`.
@@ -36,10 +42,14 @@
 //! genuinely helps: an engine may stop once it has *k* distinct rows. For `ORDER BY` it
 //! helps only because [`crate::topk`] exists: `spareval` sorts every row before applying
 //! the slice, so `ORDER BY ... LIMIT 10` over a billion rows would buffer a billion rows,
-//! and the heap answers `SELECT … ORDER BY … LIMIT` from the ten instead. A sort in that
-//! shape is measured here by what is *under* it — the body still runs in full, and a
-//! blocking operator inside it still blocks — and a sort in any other shape, `DISTINCT`
-//! between it and the slice, or no `LIMIT` at all, is measured by its input as before.
+//! and the heap answers `SELECT … ORDER BY … LIMIT` from the ten instead.
+//!
+//! Without a `LIMIT` the sort is bounded by a budget rather than by *k*, which needs
+//! `--spill-bytes` to be set; it is by default. So a sort is measured here by what is
+//! *under* it whenever either operator will take it — the body still runs in full, and a
+//! blocking operator inside it still blocks — and by its input only when neither will,
+//! which means a shape they do not recognise, such as a `DISTINCT` between the sort and
+//! the slice.
 //!
 //! # Estimates, and being wrong in the safe direction
 //!
@@ -90,12 +100,13 @@ pub fn over_budget(
     stats: &Statistics,
     store: &Store,
     budget: u64,
+    spilling: bool,
 ) -> Option<Blocking> {
     let ctx = Context { stats, store };
     let mut found = Vec::new();
-    // A sort the heap answers holds `OFFSET + LIMIT` rows, whatever its input; what can
-    // still block is inside it.
-    let root = crate::topk::sorted_body(query).unwrap_or_else(|| body(query));
+    // A sort answered in bounded memory holds its heap or its budget, whatever its input;
+    // what can still block is inside it.
+    let root = crate::topk::sorted_body(query, spilling).unwrap_or_else(|| body(query));
     ctx.walk(root, &mut found);
     found
         .into_iter()

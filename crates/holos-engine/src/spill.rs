@@ -1,4 +1,4 @@
-//! `DISTINCT` in bounded memory: sort, spill, merge.
+//! `DISTINCT` and `ORDER BY` in bounded memory: sort, spill, merge.
 //!
 //! # Why this exists
 //!
@@ -48,19 +48,19 @@
 
 use oxrdf::{Term, Variable};
 use rustc_hash::FxHashSet;
-use spareval::{QueryEvaluationError, QuerySolution, QuerySolutionIter};
-use std::cmp::Reverse;
+use spareval::{ExpressionTerm, QueryEvaluationError, QuerySolution, QuerySolutionIter};
+use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Bytes of encoded rows held before a run is written out.
+/// Bytes of rows held before a run is written out.
 ///
-/// The whole point is that this, and not the size of the answer, is what a `DISTINCT`
-/// costs. 128 MiB is large enough that ordinary queries never touch the disk and small
-/// enough to leave room for everything else the query is doing.
+/// The whole point is that this, and not the size of the answer, is what a `DISTINCT` or an
+/// `ORDER BY` costs. 128 MiB is large enough that ordinary queries never touch the disk and
+/// small enough to leave room for everything else the query is doing.
 pub const SPILL_BYTES: usize = 128 << 20;
 
 /// One encoded row, as written to a run file.
@@ -68,6 +68,35 @@ type Row = Vec<u8>;
 
 /// One row as held in memory: the terms themselves, never serialised unless they spill.
 type Live = Vec<Option<Term>>;
+
+/// A directory of this collector's own, under the platform's temporary directory.
+///
+/// A counter as well as the process id: two collectors can be alive in one process — a
+/// nested subquery, or a second query on another thread — and sharing a directory would
+/// mean sharing run *filenames*, so one would silently read the other's rows.
+///
+/// `temp_dir`, which means `TMPDIR` on Unix and `TMP`/`TEMP` on Windows, is very often the
+/// *system* volume rather than the one the store lives on. That is a sharper edge than it
+/// looks: a `DISTINCT` over a large store spills in proportion to its answer, not to any
+/// buffer, so it will happily write tens of gigabytes. Measured on a 653.8-million-triple
+/// store, one reached 5.5 GB in twenty-two minutes and was heading for something near
+/// seventy, against 29 GB free on that machine's `C:`.
+///
+/// The bulk loader had the same choice and made the other one: `ingest_dir` puts its scratch
+/// beside the database, so it lands on the volume an operator sized for the store. This
+/// cannot do that — a query is not attached to one store's directory, and an in-memory store
+/// has no directory at all — so the placement stays the platform's and the operator's,
+/// through the environment. OPERATIONS.md says to set it.
+fn scratch_dir(prefix: &str) -> std::io::Result<PathBuf> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
 
 /// Collects rows, spilling sorted runs when the in-memory set outgrows its budget.
 pub struct Distinct {
@@ -91,25 +120,7 @@ impl Distinct {
         // A counter, not just the thread id: two collectors can be alive on one thread —
         // a nested subquery, or a second query on a pooled thread — and sharing a directory
         // would mean sharing run *filenames*, so one would silently read the other's rows.
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        // `temp_dir`, which means `TMPDIR` on Unix and `TMP`/`TEMP` on Windows, and which is
-        // very often the *system* volume rather than the one the store lives on. That is a
-        // sharper edge than it looks: a `DISTINCT` over a large store spills in proportion to
-        // its answer, not to any buffer, so it will happily write tens of gigabytes. Measured
-        // on a 653.8-million-triple store, this reached 5.5 GB in twenty-two minutes and was
-        // heading for something near seventy, against 29 GB free on that machine's `C:`.
-        //
-        // The bulk loader had the same choice and made the other one: `ingest_dir` puts its
-        // scratch beside the database, so it lands on the volume an operator sized for the
-        // store. This cannot do that — a query is not attached to one store's directory, and
-        // an in-memory store has no directory at all — so the placement stays the platform's
-        // and the operator's, through the environment. OPERATIONS.md says to set it.
-        let dir = std::env::temp_dir().join(format!(
-            "holos-distinct-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir)?;
+        let dir = scratch_dir("holos-distinct")?;
         Ok(Self {
             dir,
             runs: Vec::new(),
@@ -375,6 +386,356 @@ pub fn deduplicate(
 }
 
 // ---------------------------------------------------------------------------------
+// ORDER BY
+// ---------------------------------------------------------------------------------
+
+/// Collects rows with their sort keys, spilling sorted runs when the buffer outgrows its
+/// budget, and merges them into one ordered stream.
+///
+/// # Why a second collector rather than the one above
+///
+/// [`Distinct`] answers "have I seen this row?", and any total order over encoded rows will
+/// do for that — which is why it compares raw bytes. A sort has to come back in *SPARQL's*
+/// order, and that order is over decoded terms: `"9"^^xsd:integer` sorts before
+/// `"10"^^xsd:integer` and after them as strings. So this holds each row's sort keys as
+/// terms beside it and compares with [`crate::topk::cmp_keys`] — the same comparison the
+/// heap in [`crate::topk`] uses, so a query answered by either comes back the same way.
+///
+/// The cost of that choice is one decode per row per run, when a run is read back; the
+/// alternative, an order-preserving byte encoding of every SPARQL datatype, is a great deal
+/// of code to write and to be wrong in, and would still have to fall back to the terms for
+/// the datatypes it did not cover.
+///
+/// # Stability
+///
+/// Runs are sorted with a **stable** sort and merged preferring the earlier run, and the
+/// buffer that never reached a run sorts last because it arrived last. So rows whose keys
+/// do not separate them come back in the order they arrived, whether or not anything
+/// spilled — which is what lets [`crate::topk`]'s heap and this agree on a query that ties.
+pub struct Sorted {
+    dir: PathBuf,
+    runs: Vec<PathBuf>,
+    /// What is held: each row with the keys it is sorted by.
+    live: Vec<(Keys, Live)>,
+    bytes: usize,
+    budget: usize,
+    key_width: usize,
+    row_width: usize,
+    descending: Arc<[bool]>,
+}
+
+/// One row's sort keys, in the order the `ORDER BY` names them.
+type Keys = Vec<Option<ExpressionTerm>>;
+
+impl Sorted {
+    /// A collector for rows of `row_width` variables sorted by `descending.len()` keys,
+    /// spilling past `budget` bytes.
+    ///
+    /// # Errors
+    ///
+    /// If the scratch directory cannot be made.
+    pub fn new(
+        row_width: usize,
+        descending: Arc<[bool]>,
+        budget: usize,
+    ) -> std::io::Result<Self> {
+        let dir = scratch_dir("holos-sort")?;
+        Ok(Self {
+            dir,
+            runs: Vec::new(),
+            live: Vec::new(),
+            bytes: 0,
+            budget,
+            key_width: descending.len(),
+            row_width,
+            descending,
+        })
+    }
+
+    /// How many runs were written. Zero means the whole sort fitted in memory.
+    #[must_use]
+    pub fn runs(&self) -> usize {
+        self.runs.len()
+    }
+
+    /// Where this collector's runs live, for an operator that wants to report it and for a
+    /// test that wants to check they were cleaned up.
+    #[must_use]
+    pub fn scratch(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    /// Adds a row and the keys it sorts by.
+    ///
+    /// # Errors
+    ///
+    /// If a run cannot be written.
+    pub fn push(&mut self, keys: Keys, row: Live) -> std::io::Result<()> {
+        self.bytes += footprint(&row) + keys_footprint(&keys);
+        self.live.push((keys, row));
+        if self.bytes >= self.budget {
+            self.spill()?;
+        }
+        Ok(())
+    }
+
+    /// Sorts what is held and writes it out as a run.
+    fn spill(&mut self) -> std::io::Result<()> {
+        if self.live.is_empty() {
+            return Ok(());
+        }
+        self.sort_live();
+        let path = self.dir.join(format!("{}.sortrun", self.runs.len()));
+        let mut out = BufWriter::new(File::create(&path)?);
+        for (keys, row) in self.live.drain(..) {
+            let mut record = encode_row(&key_terms(&keys), self.key_width);
+            record.extend_from_slice(&encode_row(&row, self.row_width));
+            write_row(&mut out, &record)?;
+        }
+        out.flush()?;
+        self.runs.push(path);
+        self.bytes = 0;
+        Ok(())
+    }
+
+    /// Sorts what is held, in place. Stable, so equal keys keep arrival order — see the
+    /// note on stability above, and `sort_unstable_by` would additionally be entitled to
+    /// panic on the intransitivity [`crate::topk::cmp_keys`] documents.
+    fn sort_live(&mut self) {
+        let descending = Arc::clone(&self.descending);
+        self.live
+            .sort_by(|(a, _), (b, _)| crate::topk::cmp_keys(a, b, &descending));
+    }
+
+    /// Every row, in order.
+    ///
+    /// When nothing spilled this is the sorted buffer — no encoding, no files — which is
+    /// the case that has to cost what an in-memory sort costs.
+    ///
+    /// # Errors
+    ///
+    /// If a run cannot be read back.
+    pub fn merge(mut self) -> std::io::Result<SortedRows> {
+        self.sort_live();
+        if self.runs.is_empty() {
+            let rows: Vec<Live> = std::mem::take(&mut self.live)
+                .into_iter()
+                .map(|(_, row)| row)
+                .collect();
+            return Ok(SortedRows(Rows::InMemory {
+                rows: rows.into_iter(),
+                _owner: self,
+            }));
+        }
+
+        let (key_width, row_width) = (self.key_width, self.row_width);
+        let descending = Arc::clone(&self.descending);
+        let buffer: Vec<(Keys, Live)> = std::mem::take(&mut self.live);
+        let mut sources = Vec::with_capacity(self.runs.len());
+        for path in &self.runs {
+            sources.push(RunReader::open(path)?);
+        }
+        // One past the last run: the buffer arrived after every run, so ranking it last
+        // among equal keys is what keeps the whole merge stable.
+        let tail = sources.len();
+
+        let mut heap = BinaryHeap::with_capacity(tail + 1);
+        for (index, source) in sources.iter_mut().enumerate() {
+            if let Some(record) = source.next()? {
+                let (keys, row) = split_record(&record, key_width, row_width);
+                heap.push(Reverse(Head {
+                    keys,
+                    row,
+                    source: index,
+                    descending: Arc::clone(&descending),
+                }));
+            }
+        }
+        if let Some((keys, row)) = buffer.first() {
+            heap.push(Reverse(Head {
+                keys: keys.clone(),
+                row: row.clone(),
+                source: tail,
+                descending: Arc::clone(&descending),
+            }));
+        }
+
+        Ok(SortedRows(Rows::Spilled {
+            buffer,
+            sources,
+            heap,
+            tail,
+            tail_at: 0,
+            key_width,
+            row_width,
+            descending,
+            _owner: self,
+        }))
+    }
+}
+
+impl Drop for Sorted {
+    fn drop(&mut self) {
+        for path in &self.runs {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+/// The next row of one merge source, and where it came from.
+struct Head {
+    keys: Keys,
+    row: Live,
+    /// Which run, or the index standing for the buffer.
+    source: usize,
+    descending: Arc<[bool]>,
+}
+
+impl Ord for Head {
+    /// The sort's own order, with the source breaking a tie. Earlier runs hold earlier
+    /// rows, so preferring the lower index is what makes the merge stable.
+    fn cmp(&self, other: &Self) -> Ordering {
+        crate::topk::cmp_keys(&self.keys, &other.keys, &self.descending)
+            .then(self.source.cmp(&other.source))
+    }
+}
+
+impl PartialOrd for Head {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Head {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+    }
+}
+
+impl Eq for Head {}
+
+/// The sorted rows, whatever it took to produce them.
+///
+/// Opaque: whether anything spilled changes how the next row is found and nothing else, so
+/// it is not the caller's business.
+pub struct SortedRows(Rows);
+
+/// However the rows ended up being held.
+enum Rows {
+    /// Nothing spilled: the buffer, sorted, still holding its terms.
+    InMemory {
+        rows: std::vec::IntoIter<Live>,
+        /// Held only so the (empty) scratch directory is cleaned up on drop.
+        _owner: Sorted,
+    },
+    /// Runs on disk, merged with whatever was still held.
+    Spilled {
+        /// What was still held when the last run was written, sorted. One more source.
+        buffer: Vec<(Keys, Live)>,
+        /// A reader per run on disk, each holding one block.
+        sources: Vec<RunReader>,
+        /// The merge frontier: the next row from every source, smallest first.
+        heap: BinaryHeap<Reverse<Head>>,
+        /// The index standing for `buffer` in the heap, one past the last run.
+        tail: usize,
+        /// How far `buffer` has been consumed.
+        tail_at: usize,
+        key_width: usize,
+        row_width: usize,
+        descending: Arc<[bool]>,
+        /// Held so the run files are removed when the merge is done with them. Last, so
+        /// that the readers above are closed before it runs.
+        _owner: Sorted,
+    },
+}
+
+impl SortedRows {
+    /// The next row, in order.
+    ///
+    /// # Errors
+    ///
+    /// If a run cannot be read back.
+    pub fn next_row(&mut self) -> std::io::Result<Option<Live>> {
+        match &mut self.0 {
+            Rows::InMemory { rows, .. } => Ok(rows.next()),
+            Rows::Spilled {
+                buffer,
+                sources,
+                heap,
+                tail,
+                tail_at,
+                key_width,
+                row_width,
+                descending,
+                ..
+            } => {
+                let Some(Reverse(head)) = heap.pop() else {
+                    return Ok(None);
+                };
+                if head.source == *tail {
+                    *tail_at += 1;
+                    if let Some((keys, row)) = buffer.get(*tail_at) {
+                        heap.push(Reverse(Head {
+                            keys: keys.clone(),
+                            row: row.clone(),
+                            source: *tail,
+                            descending: Arc::clone(descending),
+                        }));
+                    }
+                } else if let Some(record) = sources[head.source].next()? {
+                    let (keys, row) = split_record(&record, *key_width, *row_width);
+                    heap.push(Reverse(Head {
+                        keys,
+                        row,
+                        source: head.source,
+                        descending: Arc::clone(descending),
+                    }));
+                }
+                Ok(Some(head.row))
+            }
+        }
+    }
+}
+
+/// The keys and the row a record holds, written one after the other by [`Sorted::spill`].
+fn split_record(record: &[u8], key_width: usize, row_width: usize) -> (Keys, Live) {
+    let (keys, at) = decode_at(record, key_width, 0);
+    let (row, _) = decode_at(record, row_width, at);
+    (
+        keys.into_iter()
+            .map(|term| term.map(ExpressionTerm::from))
+            .collect(),
+        row,
+    )
+}
+
+/// Sort keys as the terms they came from, for encoding.
+fn key_terms(keys: &[Option<ExpressionTerm>]) -> Live {
+    keys.iter()
+        .map(|key| key.clone().map(Term::from))
+        .collect()
+}
+
+/// What a row's keys cost in memory, near enough to bound a buffer by.
+fn keys_footprint(keys: &[Option<ExpressionTerm>]) -> usize {
+    keys.iter()
+        .map(|key| match key {
+            None => 8,
+            Some(ExpressionTerm::NamedNode(n)) => n.as_str().len() + 24,
+            Some(ExpressionTerm::BlankNode(b)) => b.as_str().len() + 24,
+            Some(ExpressionTerm::StringLiteral(v)) => v.len() + 32,
+            Some(ExpressionTerm::LangStringLiteral { value, .. }) => value.len() + 48,
+            Some(ExpressionTerm::OtherTypedLiteral { value, datatype }) => {
+                value.len() + datatype.as_str().len() + 48
+            }
+            Some(_) => 48,
+        })
+        .sum::<usize>()
+        + std::mem::size_of::<Keys>()
+}
+
+// ---------------------------------------------------------------------------------
 // encoding
 // ---------------------------------------------------------------------------------
 
@@ -404,8 +765,14 @@ fn encode_row(row: &Live, width: usize) -> Row {
 /// and treating it as unbound is what the rest of the engine does with a term it cannot
 /// resolve.
 fn decode(row: &[u8], width: usize) -> Vec<Option<Term>> {
+    decode_at(row, width, 0).0
+}
+
+/// [`decode`] from an offset, reporting where it stopped, so that two encodings can share
+/// one record — a sort key and then the row it belongs to.
+fn decode_at(row: &[u8], width: usize, from: usize) -> (Vec<Option<Term>>, usize) {
     let mut out = Vec::with_capacity(width);
-    let mut at = 0;
+    let mut at = from;
     for _ in 0..width {
         match row.get(at) {
             Some(0) => {
@@ -428,7 +795,7 @@ fn decode(row: &[u8], width: usize) -> Vec<Option<Term>> {
             None => out.push(None),
         }
     }
-    out
+    (out, at)
 }
 
 fn write_row(out: &mut BufWriter<File>, row: &[u8]) -> std::io::Result<()> {

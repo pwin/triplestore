@@ -142,7 +142,7 @@ for a file; `Store::begin` / `commit` / `rollback` for a transaction around seve
 2. **Decide whether to run it at all.** [`crates/holos-engine/src/admit.rs`](crates/holos-engine/src/admit.rs)
    estimates what a blocking operator (`ORDER BY`, `DISTINCT`, keyed `GROUP BY`) would have
    to buffer, using [`crates/holos-stats`](crates/holos-stats/src/characteristic.rs), and
-   refuses one over budget — unless it is a `DISTINCT`, which
+   refuses one over budget — unless it is a `DISTINCT` or an `ORDER BY`, which
    [`spill.rs`](crates/holos-engine/src/spill.rs) can answer by sorting to disk.
 3. **Rewrite.** GeoSPARQL topology predicates become geometry lookups plus a filter
    ([`topology.rs`](crates/holos-engine/src/topology.rs)); a basic graph pattern is reordered

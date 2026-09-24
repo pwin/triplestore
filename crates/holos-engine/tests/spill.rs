@@ -225,7 +225,7 @@ fn forced(engine: &Engine, spill_bytes: usize) -> QueryOptions {
     QueryOptions::new()
         .reordering(stats)
         .with_blocking_budget(1)
-        .spilling_distinct(spill_bytes)
+        .spilling(spill_bytes)
 }
 
 fn answer(engine: &Engine, query: &str, options: &QueryOptions) -> Vec<String> {
@@ -335,7 +335,7 @@ fn a_spillable_distinct_is_answered_rather_than_refused() {
     drop(view);
 
     // The same budget, with spilling on: answered.
-    let spilling = refusing.spilling_distinct(4 * 1024);
+    let spilling = refusing.spilling(4 * 1024);
     let rows = answer(&engine, query, &spilling);
     assert!(
         rows[0].contains(&(N * 2).to_string()),

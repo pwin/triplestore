@@ -1485,15 +1485,27 @@ paid for once: §6.1 records a load whose final merge reached 18 GB that nothing
 see, refuse, or report. Reason about RocksDB's memory from its own options, not from this
 ceiling.
 
-And only `DISTINCT` spills. A keyed `GROUP BY`, and an `ORDER BY` in any shape but one, still
-buffer in `spareval`, so a large one is refused rather than answered. The one shape is
-`SELECT … ORDER BY … LIMIT`, which `topk.rs` answers from a heap of `OFFSET + LIMIT` rows
-as the body streams past: the sort key is decoded once per row, the heap holds k rows, and
-the deadline and the ceiling are consulted the whole way through, because the body never
-stops being a scan. It was written for a four-row `LIMIT` over a predicate scan that the
-evaluator answered by collecting every row and decoding both sides of every comparison —
-hours, at one core, out of reach of both guards. The same collector generalises to an
-external merge sort for the shapes the heap declines; that is the next piece.
+A keyed `GROUP BY` still buffers in `spareval`, so a large one is refused rather than
+answered. `DISTINCT` and `ORDER BY` no longer do.
+
+`SELECT … ORDER BY … LIMIT` is answered by `topk.rs` from a heap of `OFFSET + LIMIT` rows as
+the body streams past: the sort key is decoded once per row, the heap holds k rows, and the
+deadline and the ceiling are consulted the whole way through, because the body never stops
+being a scan. It was written for a four-row `LIMIT` over a predicate scan that the evaluator
+answered by collecting every row and decoding both sides of every comparison — hours, at one
+core, out of reach of both guards.
+
+Every other sort goes to `spill::Sorted`, the external merge sort the collector generalises
+to: rows and their keys held until the budget, then written out as sorted runs and merged
+into one stream. It is bounded by `--spill-bytes` rather than by the answer, and it is also
+*faster* than the evaluator's in-memory sort — 8.5 s against 20.0 s on two million dates —
+because the key is decoded once per row rather than twice per comparison. Both paths share
+one comparator, `topk::cmp_keys`, and both are stable.
+
+One caution, which the comparator's own documentation carries: SPARQL fixes no order between
+terms of unlike kinds, both this engine and the evaluator extend it by lexical form, and that
+extension is not transitive — `2 < 10 < "1abc" < 2`. A sort key of one datatype is a total
+order; a mixed one has no dependable order in any engine.
 
 ---
 

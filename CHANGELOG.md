@@ -3,6 +3,44 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.14.0 — unreleased
+
+### `ORDER BY` without a `LIMIT` finishes, and is faster than not finishing
+
+0.13.0 gave `SELECT … ORDER BY … LIMIT` a heap of the rows it returns. The sorts the heap
+declines — no `LIMIT`, or one too large to hold — still went to the evaluator, which
+collects every row and sorts the lot, so on a large store they were refused by
+`--max-blocking-rows` or ran until the memory ceiling stopped them. This is the external
+merge sort the design has named as the next piece since that release.
+
+- **A sorting collector beside the deduplicating one.** `holos_engine::spill::Sorted` holds
+  rows with their sort keys, writes a sorted run when it passes its budget, and merges the
+  runs into one ordered stream. What an `ORDER BY` costs is the budget, not the answer, and
+  the answer is never resident: the merge yields one row at a time and the serialiser writes
+  it out. It reuses the run files, the encoding and the readers that `DISTINCT` already had.
+- **Faster, not merely bounded.** Two million dates sorted in **8.5 s** spilling against a
+  budget of 8 MiB, against **20.0 s** for the evaluator holding all of them in memory
+  (`holos-bench`'s `topk`). Writing runs to disk and reading them back still wins, because
+  the evaluator's comparator decodes both sides of every comparison from the dictionary —
+  `2·n·log₂n` decodes — and the collector decodes each key once, as the row arrives.
+- **One order throughout.** The heap and the collector share `topk::cmp_keys`, so a query
+  answered by either comes back the same way. Both are **stable**: rows their conditions do
+  not separate keep the order they arrived in, within a run and across the merge. The
+  evaluator sorts with `sort_unstable_by` and does not, which is conformant — SPARQL fixes
+  no order over tied rows — but is not repeatable.
+- **`--spill-bytes`, was `--spill-distinct`.** The budget now bounds a sort as well as a
+  `DISTINCT`, so it is no longer named for one. The old name is still accepted.
+- **`--max-blocking-rows` follows.** A sort that will be answered in bounded memory is
+  measured by what is *under* it, so it is no longer refused for the size of its input.
+
+Worth knowing before relying on a sort: SPARQL defines no order between terms of unlike
+kinds — an integer and a string — and says an implementation may extend it. Both this engine
+and the evaluator extend it by comparing lexical forms, and that extension is **not
+transitive**: `2 < 10` by value, `"1abc" < 2` and `10 < "1abc"` by lexical form, so those
+three form a cycle and which comes first depends on the order they arrived in. Both paths
+were measured doing exactly that, and disagreeing with each other. A sort key of one
+datatype, which is what real data has, is a total order and is fully determined.
+
 ## 0.13.0 — 2026-09-21
 
 ### A running server says which build it is

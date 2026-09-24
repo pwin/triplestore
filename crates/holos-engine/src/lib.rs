@@ -413,7 +413,9 @@ impl Engine {
         // binding and the audited CLI path reach, so leaving either out meant the most-used
         // surface was the only one not getting the operator.
         if let Some(plan) = crate::topk::plan(&parsed) {
-            return Self::top_k(view, &plan, &QueryOptions::default(), None);
+            if plan.held().is_some() {
+                return Self::top_k(view, &plan, &QueryOptions::default(), None);
+            }
         }
         if let Some(results) = Self::try_bind_join(view, &parsed, None, None)? {
             return Ok(results);
@@ -465,12 +467,18 @@ impl Engine {
         if let (Some(budget), Some(stats)) =
             (options.blocking_budget, options.reorder_with.as_ref())
         {
-            if let Some(blocking) = crate::admit::over_budget(&parsed, stats, view.store(), budget)
+            if let Some(blocking) = crate::admit::over_budget(
+                &parsed,
+                stats,
+                view.store(),
+                budget,
+                options.spill_bytes.is_some(),
+            )
             {
                 // Before the topology rewrite and the bind join, because this re-enters the
                 // evaluator with the `DISTINCT` removed and both would then run on that
                 // inner query anyway.
-                if let Some(spill) = options.spill_distinct {
+                if let Some(spill) = options.spill_bytes {
                     if let Some(results) =
                         Self::try_spilling_distinct(view, &parsed, options, spill)?
                     {
@@ -516,7 +524,17 @@ impl Engine {
         // explanation, since there is no plan to show for a path that skips the planner.
         if !options.explain {
             if let Some(plan) = crate::topk::plan(&parsed) {
-                return Self::top_k(view, &plan, options, deadline).map(|results| (results, None));
+                if plan.held().is_some() {
+                    return Self::top_k(view, &plan, options, deadline)
+                        .map(|results| (results, None));
+                }
+                // No `LIMIT`, or one too large to hold: sort in bounded memory instead,
+                // where a budget was given. Without one this falls through to the
+                // evaluator, which buffers — the same choice `DISTINCT` makes.
+                if let Some(budget) = options.spill_bytes {
+                    return Self::sort_spilling(view, &plan, options, deadline, budget)
+                        .map(|results| (results, None));
+                }
             }
         }
 
@@ -611,6 +629,8 @@ impl Engine {
         deadline: Option<Deadline>,
     ) -> Result<QueryResults<'a>, EngineError> {
         let evaluator = Self::evaluator();
+        // Checked by both callers before they route here.
+        let held = plan.held().unwrap_or_default();
         let token = deadline.as_ref().map(Deadline::token);
         let variables: std::sync::Arc<[spargebra::term::Variable]> =
             plan.projected.clone().into();
@@ -626,6 +646,7 @@ impl Engine {
                     options.reorder_with.as_deref(),
                     token.as_ref(),
                     &evaluator,
+                    held,
                 )?;
                 return match (rows, &deadline) {
                     (Some(rows), _) => Ok(QueryResults::Solutions(
@@ -651,10 +672,40 @@ impl Engine {
                 "the body of an ORDER BY did not yield solutions".to_owned(),
             ));
         };
-        let rows = plan.collect(rows, &evaluator)?;
+        let rows = plan.collect(rows, &evaluator, held)?;
         Ok(QueryResults::Solutions(
             spareval::QuerySolutionIter::from_tuples(variables, rows.into_iter().map(Ok)),
         ))
+    }
+
+    /// Answers an `ORDER BY` the heap declines, in memory bounded by `budget`.
+    ///
+    /// The body is evaluated as its own query, exactly as [`Engine::top_k`] does, and its
+    /// rows go through [`crate::topk::Plan::collect_spilled`]. The bind join is not used
+    /// here: its rows arrive as ids, and a sort has to hold whole rows anyway, so the
+    /// decoding it would save is decoding the collector needs done.
+    fn sort_spilling<'a>(
+        view: &'a DatasetView<'a>,
+        plan: &crate::topk::Plan,
+        options: &QueryOptions,
+        deadline: Option<Deadline>,
+        budget: usize,
+    ) -> Result<QueryResults<'a>, EngineError> {
+        // Taken before the guard is handed over, because `evaluate_with` moves it into the
+        // body's iterator. The token outlives that move and is what the merge reads.
+        let token = deadline.as_ref().map(Deadline::token);
+        let (results, _) = Self::evaluate_with(view, &plan.inner, options, deadline)?;
+        let QueryResults::Solutions(rows) = results else {
+            return Err(EngineError::BadRequest(
+                "the body of an ORDER BY did not yield solutions".to_owned(),
+            ));
+        };
+        Ok(QueryResults::Solutions(plan.collect_spilled(
+            rows,
+            &Self::evaluator(),
+            budget,
+            token,
+        )?))
     }
 
     /// Answers the two `DISTINCT` shapes that can be spilled, or declines.
