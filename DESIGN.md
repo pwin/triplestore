@@ -940,17 +940,32 @@ so a fresh checkout still builds green.
 
 | Suite | Passing | Failing | Skipped | HOLOS bugs |
 |---|---|---|---|---|
-| RDF 1.1 | 987 / 1041 | 54 | 0 | **0** |
-| RDF 1.2 | 1326 / 1406 | 80 | 0 | **0** |
-| SPARQL 1.1 | 523 / 524 | 1 | 101 | **0** |
-| SPARQL 1.2 | 262 / 266 | 4 | 3 | **0** |
-| SPARQL 1.0 | 262 / 263 | 1 | 20 | **0** |
+| RDF 1.1 | **1038 / 1040** | 2 | 1 | **0** |
+| RDF 1.2 | **1401 / 1405** | 4 | 1 | **0** |
+| SPARQL 1.1 | **512 / 512** | 0 | 113 | **0** |
+| SPARQL 1.2 | 268 / 269 | 1 | 0 | **0** |
+| SPARQL 1.0 | 275 / 276 | 1 | 7 | **0** |
 | SPARQL Protocol | **34 / 34** | 0 | 0 | **0** |
 | Graph Store Protocol | **13 / 13** | 0 | 0 | **0** |
-| SHACL Core | 92 / 97 | 5 | 1 | 5 |
-| SHACL 1.2 Core (native) | 94 / 138 | 44 | 0 | 44 |
-| SHACL Core (adapted engine) | 90 / 98 | 8 | 0 | 8 |
-| SHACL 1.2 Core (adapted engine) | **127 / 138** | 11 | 0 | 11 |
+| SHACL Core | **98 / 98** | 0 | 0 | **0** |
+| SHACL 1.2 Core (native) | **138 / 138** | 0 | 0 | **0** |
+| SHACL Core (adapted engine) | **98 / 98** | 0 | 0 | **0** |
+| SHACL 1.2 Core (adapted engine) | **138 / 138** | 0 | 0 | **0** |
+
+4,013 of 4,021, and all eight failures are upstream. Six are one bug — `oxrdfxml` writes an
+`rdf:XMLLiteral` with every in-scope namespace declared on it, where RDF 1.1 asks for
+*exclusive* canonical XML, which declares only the ones used. The other two are `spargebra`:
+a SPARQL 1.0 test of case-insensitive keywords, and SPARQL 1.2's relaxed rule on reusing a
+`SELECT` variable in a later expression of the same `SELECT`, which it still rejects under
+the 1.1 rule.
+
+**A skip is not a pass, so the skips are auditable.** `HOLOS_CONFORMANCE_SKIPS=1` prints
+each suite's skips tallied by reason. SPARQL 1.1's 113 are: 47 protocol tests run by the
+two protocol suites this manifest includes, 34 needing an entailment regime this engine
+does not implement (OWL-Direct, OWL-RDF-Based, RIF, RDF, D), 6 test types not implemented
+(`CSVResultFormatTest`, `ServiceDescriptionTest`), and 26 where HOLOS and a direct
+`spareval` run over an `oxrdf::Dataset` agree with each other and differ from the fixture —
+the oracle below, which is what makes them upstream rather than ours.
 
 ### What is actually under test
 

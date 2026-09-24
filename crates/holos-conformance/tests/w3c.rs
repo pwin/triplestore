@@ -15,7 +15,7 @@
 //! builds and tests green.
 
 use holos_conformance::{manifest, run_rdf_test, run_sparql_test, testsuite_root, Outcome, Report};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Where the known-failure lists live.
@@ -45,8 +45,33 @@ fn run_suite(
     Some(report)
 }
 
+/// What a suite did *not* measure, tallied by reason.
+///
+/// A skip is invisible in a pass count, and a harness that quietly skips a third of a suite
+/// reports a compliance it has not demonstrated. `HOLOS_CONFORMANCE_SKIPS=1` prints the
+/// reasons and how many tests each covers, so the number can be audited rather than
+/// trusted.
+fn report_skips(name: &str, report: &Report) {
+    if std::env::var("HOLOS_CONFORMANCE_SKIPS").is_err() || report.skipped.is_empty() {
+        return;
+    }
+    let mut by_reason: BTreeMap<&str, usize> = BTreeMap::new();
+    for (_, why) in &report.skipped {
+        // Up to the em dash: the reason a test was skipped, without the diff that follows
+        // it. Grouping on the whole text would put every one of them on its own line and
+        // defeat the tally.
+        let category = why.split_once(" — ").map_or(why.as_str(), |(head, _)| head.trim());
+        *by_reason.entry(category).or_default() += 1;
+    }
+    eprintln!("{name}: {} skipped", report.skipped.len());
+    for (why, count) in &by_reason {
+        eprintln!("  {count:4}  {why}");
+    }
+}
+
 /// Compares a run against its checked-in baseline, and fails on drift in either direction.
 fn ratchet(name: &str, report: &Report) {
+    report_skips(name, report);
     let path = baseline_dir().join(format!("{name}.failures"));
     let actual: BTreeSet<String> = report.failed.iter().map(|(id, _)| id.clone()).collect();
 

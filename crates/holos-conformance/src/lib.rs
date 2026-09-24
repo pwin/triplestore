@@ -672,7 +672,7 @@ fn attribute(
 
     match compare_two(mine, oracle, ordered) {
         Ok(()) => Outcome::skip(format!(
-            "upstream: HOLOS agrees with the reference dataset, so the evaluator differs              from the expected result — {failure}"
+            "upstream: HOLOS agrees with the reference dataset, so the evaluator              differs from the expected result — {failure}"
         )),
         Err(divergence) => Outcome::fail(format!(
             "HOLOS differs from the reference dataset: {divergence} (vs expected: {failure});              result file {}",

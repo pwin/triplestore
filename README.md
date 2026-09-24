@@ -146,12 +146,12 @@ expected results as RDF in the DAWG `rs:` vocabulary. Reading that format took c
 from **45% to 93%**, and 135 of the 136 newly-running tests pass. Entailment is what is
 left, and needs the reasoner at L4.
 
-**3,975 of 4,021 W3C tests pass, and all 46 failures are upstream — none is a HOLOS bug.**
+**4,013 of 4,021 W3C tests pass, and all 8 failures are upstream — none is a HOLOS bug.**
 
 | Suite | Passing | Failing | Skipped | HOLOS bugs |
 |---|---|---|---|---|
-| RDF 1.1 | 1019 / 1040 | 21 | 1 | **0** |
-| RDF 1.2 | 1382 / 1405 | 23 | 1 | **0** |
+| RDF 1.1 | **1038 / 1040** | 2 | 1 | **0** |
+| RDF 1.2 | **1401 / 1405** | 4 | 1 | **0** |
 | SPARQL 1.1 | **512 / 512** | 0 | 113 | **0** |
 | SPARQL 1.2 | 268 / 269 | 1 | 0 | **0** |
 | SPARQL 1.0 | 275 / 276 | 1 | 7 | **0** |

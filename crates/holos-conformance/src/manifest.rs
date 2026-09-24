@@ -86,6 +86,12 @@ pub struct TestEntry {
     pub result_data: Option<PathBuf>,
     /// The base IRI test content must be parsed against. See the module note.
     pub base: String,
+    /// The directory the manifest declaring this test lives in.
+    ///
+    /// Not for reading files — every path here is already absolute — but for working out
+    /// what a file is *called* under [`Self::base`]: its IRI is the base directory plus the
+    /// file's path relative to this one. See [`rebase`].
+    pub manifest_dir: PathBuf,
     /// `mf:resultCardinality mf:LaxCardinality` — the result's *cardinality* is not part of
     /// what the test asserts.
     ///
@@ -226,6 +232,7 @@ fn load_into(manifest: &Path, out: &mut Vec<TestEntry>, seen: &mut HashSet<PathB
             result_graph_data: Vec::new(),
             result_data: None,
             base: assumed_base.clone(),
+            manifest_dir: dir.to_path_buf(),
             lax_cardinality: false,
             mf_entailment_regime: None,
             recognized_datatypes: Vec::new(),
@@ -251,7 +258,7 @@ fn load_into(manifest: &Path, out: &mut Vec<TestEntry>, seen: &mut HashSet<PathB
                     .or_else(|| object(&graph, action, &ut("data")))
                     .and_then(term_as_iri)
                     .and_then(|s| file_url_to_path(&s));
-                collect_graph_data(&graph, action, &assumed_base, &mut test.graph_data);
+                collect_graph_data(&graph, action, &assumed_base, dir, &mut test.graph_data);
                 collect_service_data(&graph, action, &mut test.service_data);
                 // A protocol test's action is an ht:Connection. Reading it here keeps the
                 // runner from having to re-parse the manifest.
@@ -282,7 +289,7 @@ fn load_into(manifest: &Path, out: &mut Vec<TestEntry>, seen: &mut HashSet<PathB
         // A SPARQL Protocol test hangs its `ut:graphData` off the *test*, not the action:
         // the graphs are the server's dataset, set up before the conversation starts,
         // rather than an argument to any one request.
-        collect_graph_data(&graph, subject, &assumed_base, &mut test.graph_data);
+        collect_graph_data(&graph, subject, &assumed_base, dir, &mut test.graph_data);
 
         test.lax_cardinality = matches!(
             object(&graph, subject, &mf("resultCardinality")),
@@ -321,7 +328,13 @@ fn load_into(manifest: &Path, out: &mut Vec<TestEntry>, seen: &mut HashSet<PathB
                 test.result_data = object(&graph, result, &ut("data"))
                     .and_then(term_as_iri)
                     .and_then(|s| file_url_to_path(&s));
-                collect_graph_data(&graph, result, &assumed_base, &mut test.result_graph_data);
+                collect_graph_data(
+                    &graph,
+                    result,
+                    &assumed_base,
+                    dir,
+                    &mut test.result_graph_data,
+                );
             }
             _ => {}
         }
@@ -369,6 +382,7 @@ fn collect_graph_data(
     graph: &Graph,
     node: NamedOrBlankNodeRef<'_>,
     assumed_base: &str,
+    manifest_dir: &Path,
     out: &mut Vec<(String, PathBuf)>,
 ) {
     for predicate in [qt("graphData"), ut("graphData")] {
@@ -376,7 +390,7 @@ fn collect_graph_data(
             match g {
                 TermRef::NamedNode(n) => {
                     if let Some(path) = file_url_to_path(n.as_str()) {
-                        out.push((rebase(assumed_base, &path), path));
+                        out.push((rebase(assumed_base, manifest_dir, &path), path));
                     }
                 }
                 TermRef::BlankNode(b) => {
@@ -392,7 +406,7 @@ fn collect_graph_data(
                             Term::Literal(l) => Some(l.value().to_owned()),
                             other => term_as_iri(other),
                         })
-                        .unwrap_or_else(|| rebase(assumed_base, &path));
+                        .unwrap_or_else(|| rebase(assumed_base, manifest_dir, &path));
                     out.push((label, path));
                 }
                 _ => {}
@@ -468,15 +482,42 @@ fn literal_value(term: &Term) -> String {
     }
 }
 
-/// `<assumed base directory>/<file name>` — the IRI a test file is known by.
-fn rebase(assumed_base: &str, path: &Path) -> String {
-    let name = path
-        .file_name()
-        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+/// `<assumed base directory>/<path relative to the manifest>` — the IRI a test file is
+/// known by, and the base its content is parsed against.
+///
+/// # Why the relative path rather than the file name
+///
+/// This took the file name until 0.14.0, which is right for a suite whose files sit beside
+/// their manifest and wrong for one that groups them into subdirectories. The RDF/XML
+/// suites do: `rdf-xml/manifest.ttl` lists `rdf-ns-prefix-confusion/test0004.rdf`, whose
+/// IRI is `<base>/rdf-ns-prefix-confusion/test0004.rdf`. Parsing it against
+/// `<base>/test0004.rdf` resolves every relative IRI in the file one directory too high, so
+/// the subject comes out as `…/rdf-xml/test0004.rdf#foo` where the expected output says
+/// `…/rdf-xml/rdf-ns-prefix-confusion/test0004.rdf#foo`.
+///
+/// Eighteen tests failed that way, and all eighteen were recorded in the baseline as
+/// `upstream:` — a parser defect. They were nothing of the sort: the parser was told the
+/// wrong base and did exactly as it was told. A conformance harness that misreports its own
+/// bugs as the implementation's is worse than no harness, because the baseline makes the
+/// misreport permanent.
+///
+/// A file outside the manifest's directory falls back to its name, which is what a suite
+/// pointing somewhere unexpected used to get and is no worse than before.
+fn rebase(assumed_base: &str, manifest_dir: &Path, path: &Path) -> String {
     let dir = assumed_base
         .rsplit_once('/')
         .map_or(assumed_base, |(head, _)| head);
-    format!("{dir}/{name}")
+    // Compared as URLs rather than as paths, so one normalisation of the separators covers
+    // both sides and Windows does not have to be special-cased twice.
+    let root = format!("{}/", path_to_file_url(manifest_dir));
+    let relative = path_to_file_url(path)
+        .strip_prefix(&root)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            path.file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+        });
+    format!("{dir}/{relative}")
 }
 
 /// Converts a filesystem path into a `file://` URL.
@@ -553,5 +594,5 @@ pub fn parse_dataset(path: &Path, base: &str) -> Result<oxrdf::Dataset> {
 /// The IRI a test file is known by, for use as a parse base.
 #[must_use]
 pub fn base_for(test: &TestEntry, path: &Path) -> String {
-    rebase(&test.base, path)
+    rebase(&test.base, &test.manifest_dir, path)
 }

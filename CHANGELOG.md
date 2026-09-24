@@ -5,6 +5,41 @@ them are in `BENCHMARKS.md` and are runnable.
 
 ## 0.14.0 — unreleased
 
+### Thirty-eight W3C tests were failing because the harness told the parser the wrong base
+
+A conformance baseline is only worth what its attributions are worth, and thirty-eight
+entries in this one were filed under `upstream:` — a parser defect — when the defect was the
+harness's. It parsed every test file against `<assumed base>/<file name>`, which is right
+for a suite whose files sit beside their manifest and wrong for one that groups them into
+subdirectories. The RDF/XML suites do: `rdf-xml/manifest.ttl` lists
+`rdf-ns-prefix-confusion/test0004.rdf`, and parsing it against `<base>/test0004.rdf` resolves
+every relative IRI in the file one directory too high, so the subject came out as
+`…/rdf-xml/test0004.rdf#foo` where the fixture says
+`…/rdf-xml/rdf-ns-prefix-confusion/test0004.rdf#foo`. The parser was told the wrong base and
+did as it was told.
+
+A test file's IRI is now the base directory plus its path **relative to its manifest**.
+
+| Suite | Was | Now |
+|---|---|---|
+| RDF 1.1 | 1019 / 1040 | **1038 / 1040** |
+| RDF 1.2 | 1382 / 1405 | **1401 / 1405** |
+
+That is **4,013 of 4,021** across every suite, and all eight remaining failures are upstream
+for real: six are `oxrdfxml` writing an `rdf:XMLLiteral` with every in-scope namespace
+declared on it where RDF 1.1 asks for *exclusive* canonical XML, and two are `spargebra` —
+a SPARQL 1.0 test of case-insensitive keywords, and SPARQL 1.2's relaxed rule on reusing a
+`SELECT` variable in a later expression of the same `SELECT`. `DESIGN.md` §15's table had
+drifted badly out of date in the other direction, understating every row; it and the
+README now agree with what the suites report.
+
+**A skip is not a pass, so the skips are auditable.** A suite that quietly skips a third of
+its tests reports a compliance it has not demonstrated, and until now the reasons were
+visible nowhere. `HOLOS_CONFORMANCE_SKIPS=1` prints each suite's skips tallied by reason.
+SPARQL 1.1's 113 are 47 protocol tests run by the dedicated protocol suites, 34 needing an
+entailment regime this engine does not implement, 6 test types not implemented, and 26 where
+HOLOS and a direct `spareval` run agree with each other and differ from the fixture.
+
 ### `ORDER BY` without a `LIMIT` finishes, and is faster than not finishing
 
 0.13.0 gave `SELECT … ORDER BY … LIMIT` a heap of the rows it returns. The sorts the heap
