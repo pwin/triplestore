@@ -431,12 +431,14 @@ impl Plan {
         let output = self.output_positions(&variables);
         let mut collector: Collector<Vec<Option<TermId>>> = Collector::new(self, held);
         let completed = {
-            let mut sink = |row: Vec<Option<TermId>>| -> Result<(), ViewError> {
+            let mut sink = |row: &[Option<TermId>]| -> Result<(), ViewError> {
                 let keys = readers
                     .iter()
-                    .map(|reader| reader.key(&row, |id| view.decode_term(*id), evaluator))
+                    .map(|reader| reader.key(row, |id| view.decode_term(*id), evaluator))
                     .collect::<Result<Vec<_>, ViewError>>()?;
-                collector.offer(keys, || row);
+                // Copied only for a row the heap keeps, which for a small slice over a
+                // large body is almost none of them.
+                collector.offer(keys, || row.to_vec());
                 Ok(())
             };
             join.evaluate_each(

@@ -431,6 +431,49 @@ implementation and a hand-written one for a single known shape: choosing the nex
 from statistics at each step, hashed bindings, decoding through the dictionary. That is a
 tuning problem rather than a missing operator, and a much less urgent one.
 
+### 3e. Where the time actually goes, and two allocations that were half the operator
+
+`cargo run --release -p holos-bench --bin topkprofile -- <store> <predicate> <k>` takes the
+top-k query apart by **ablation** rather than by instrumentation: the same join over the same
+rows, four times, changing only what the sink does with each row. Nothing is timed per row,
+so nothing is perturbed by timing it. The first pass warms the page cache and the rest are
+the ones to read.
+
+The tempting decomposition — time a `COUNT(*)` and subtract — measures nothing, because a
+`Group` is outside the join's fragment, so that query is scanned by the evaluator and this
+one by the join, over different index orders.
+
+On `E:/store14`, 653.8M quads, 48.4M rows on the predicate, `ORDER BY DESC(?o) LIMIT 4`:
+
+| phase | what it adds | before | after |
+|---|---|---:|---:|
+| `index` | RocksDB iterating one predicate's slice | 10.7–10.8 s | 11.5–11.8 s |
+| `+ join` | policy, bindings, a projected row per match | **10.4–10.7 s** | **5.4–6.2 s** |
+| `+ decode` | the sort key, through the view's decode cache | 7.0–7.5 s | 6.5–7.0 s |
+| `+ heap` | offering the key to a heap of `k` | 0.4–1.1 s | 0.8–1.1 s |
+| | **total** | 29.0 s | **25.0 s** |
+
+Two findings, both against what the code looked like it would do. The **heap is free** —
+under a second over 48.4 million rows — so the operator that query is named for is not worth
+tuning. And the **join cost as much again as the index scan beneath it**, which is where the
+time was.
+
+It was two heap allocations per row, neither of them obvious:
+
+- `Vec` of the variables each candidate quad bound, allocated inside the scan loop — four
+  pointers, 48.4 million times. It is now four inline slots with a `Vec` behind them that a
+  quad never reaches.
+- `Vec` for the projected row, allocated per emitted row. A sink borrows its row now, so the
+  join fills one buffer and reuses it, and the top-k heap copies only the `k` rows it keeps.
+
+The join phase halved. End to end through the server the same query went from **42 s to
+29.6 s** — more than the 4 s the profile predicts, because `holos-server` installs a counting
+allocator so the memory ceiling has something to read, and every one of those 96.8 million
+allocations was paying it.
+
+The `index` row is the measurement's noise floor: it touches nothing that changed, and it
+still moves about a second between runs.
+
 Three checks on the measurement:
 
 * **The fragment is small.** `SELECT` in the default graph over basic graph patterns, `JOIN`,

@@ -5,6 +5,37 @@ them are in `BENCHMARKS.md` and are runnable.
 
 ## 0.14.0 — unreleased
 
+### The top-k query was half heap allocation, and the heap was free
+
+Profiled rather than guessed at, after the last release left the question open. `holos-bench`
+gains `topkprofile`, which takes the query apart by ablation — the same join over the same
+48.4 million rows, four times, changing only what the sink does with each row, with no timing
+in the hot loop to perturb what it measures.
+
+Two findings, both against expectation. The **heap is free**: under a second over 48.4
+million rows, so the operator the query is named for was never worth tuning. And the **join
+cost as much again as the RocksDB scan beneath it** — 10.5 s on top of 10.7 s — which is
+where the time had been all along.
+
+It was two heap allocations per row:
+
+- a `Vec` of the variables each candidate quad bound, allocated inside the scan loop — four
+  pointers, 48.4 million times. Now four inline slots, with a `Vec` behind them that a quad
+  never reaches and only a wide `VALUES` row can.
+- a `Vec` for each projected row. `bindjoin::Sink` now takes `&[Option<TermId>]` rather than
+  an owned row, so the join fills one buffer and reuses it, and the top-k heap copies only
+  the `k` rows it keeps out of millions.
+
+| | before | after |
+|---|---:|---:|
+| the join, over 48.4M rows | 10.4–10.7 s | **5.4–6.2 s** |
+| the whole query, in the profiler | 29.0 s | **25.0 s** |
+| the whole query, through the server | 42 s | **29.6 s** |
+
+The server gains more than the profiler because it installs a counting allocator so the
+memory ceiling has something to read, and all 96.8 million allocations were paying it.
+`BENCHMARKS.md` §3e has the phase table and the method.
+
 ### Thirty-eight W3C tests were failing because the harness told the parser the wrong base
 
 A conformance baseline is only worth what its attributions are worth, and thirty-eight

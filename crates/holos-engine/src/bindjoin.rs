@@ -135,7 +135,11 @@ pub struct Limits<'a> {
 }
 
 /// A consumer of finished rows, in projection order. See [`Plan::evaluate_each`].
-pub type Sink<'a> = dyn FnMut(Vec<Option<TermId>>) -> Result<(), ViewError> + 'a;
+///
+/// Borrowed rather than owned: the row lives in a buffer the join reuses, so a sink that
+/// keeps only some of what it sees — the top-k heap keeps `k` of millions — copies only
+/// those, and the rest cost no allocation at all.
+pub type Sink<'a> = dyn FnMut(&[Option<TermId>]) -> Result<(), ViewError> + 'a;
 
 /// Rows this path will hold in memory before handing the query back to the evaluator.
 ///
@@ -160,6 +164,12 @@ struct Run<'a> {
     /// once per row: constructing one registers the whole custom-function table.
     evaluator: spareval::QueryEvaluator,
     out: Vec<Vec<Option<TermId>>>,
+    /// The row handed to the sink, reused from one row to the next.
+    ///
+    /// Only the sink path uses it: a sink borrows the row and keeps what it wants, so one
+    /// buffer serves every row. The collecting path still builds an owned row, because it
+    /// keeps every one of them and a buffer would only add a copy.
+    row_buffer: Vec<Option<TermId>>,
     /// Where a finished row goes instead of `out`, for a caller that consumes rows as they
     /// are produced — the top-k heap — and so needs neither the rows held nor the row
     /// budget that bounds holding them.
@@ -1252,6 +1262,7 @@ impl Plan {
         let mut run = Run {
             evaluator: crate::Engine::evaluator(),
             out: Vec::new(),
+            row_buffer: Vec::new(),
             sink,
             seen: rustc_hash::FxHashSet::default(),
             skipped: 0,
@@ -1353,19 +1364,7 @@ impl Plan {
         }
         let Some(index) = Self::cheapest(view, stats, todo, bindings) else {
             run.completions += 1;
-            let row = self.project(bindings);
-            if self.distinct && !run.seen.insert(row.clone()) {
-                return Ok(());
-            }
-            if run.skipped < self.offset {
-                run.skipped += 1;
-                return Ok(());
-            }
-            match &mut run.sink {
-                Some(sink) => sink(row)?,
-                None => run.out.push(row),
-            }
-            return Ok(());
+            return self.emit(bindings, run);
         };
 
         // Everything except the chosen entry, which is what the next depth still has to do.
@@ -1598,7 +1597,7 @@ impl Plan {
             if run.done() {
                 break;
             }
-            let mut added = Vec::new();
+            let mut added = Added::default();
             // The graph is bound first, so an incompatible one costs nothing else.
             let graph_ok = match (&pattern.scope, quad.graph_name) {
                 (Scope::Variable(v), Some(g)) => bind_variable(v, g, bindings, &mut added),
@@ -1612,13 +1611,13 @@ impl Plan {
                 || !bind_predicate(&triple.predicate, quad.predicate, bindings, &mut added)
                 || !bind(&triple.object, quad.object, bindings, &mut added)
             {
-                for variable in added {
+                for variable in added.iter() {
                     bindings.remove(variable);
                 }
                 continue;
             }
             self.step(view, stats, rest, pending, bindings, run)?;
-            for variable in added {
+            for variable in added.iter() {
                 bindings.remove(variable);
             }
             if run.abandoned {
@@ -1656,7 +1655,7 @@ impl Plan {
             if run.done() {
                 break;
             }
-            let mut added: Vec<&'p Variable> = Vec::new();
+            let mut added = Added::default();
             let mut compatible = true;
             for (variable, term) in values.variables.iter().zip(row) {
                 // `UNDEF` binds nothing, which is exactly what leaving it out does.
@@ -1670,7 +1669,7 @@ impl Plan {
                         }
                     }
                     Slot::Missing => {
-                        for variable in added {
+                        for variable in added.iter() {
                             bindings.remove(variable);
                         }
                         run.abandoned = true;
@@ -1682,7 +1681,7 @@ impl Plan {
             if compatible {
                 self.step(view, stats, rest, pending, bindings, run)?;
             }
-            for variable in added {
+            for variable in added.iter() {
                 bindings.remove(variable);
             }
             if run.abandoned {
@@ -1756,11 +1755,69 @@ impl Plan {
         Ok(Some((subject, predicate, object)))
     }
 
+    /// A row that satisfied every pattern: deduplicated, skipped past the offset, and
+    /// handed on.
+    ///
+    /// The two halves differ in one thing only — whether the row is borrowed from a reused
+    /// buffer or owned — and that is what keeps a scan free of an allocation per row. A
+    /// sink borrows, because it keeps only what it wants; the collecting path owns, because
+    /// it keeps everything and a buffer would only add a copy.
+    fn emit(
+        &self,
+        bindings: &FxHashMap<&Variable, TermId>,
+        run: &mut Run<'_>,
+    ) -> Result<(), ViewError> {
+        // Destructured so the sink and the buffer it reads can be borrowed at once.
+        let Run {
+            sink,
+            row_buffer,
+            seen,
+            skipped,
+            out,
+            ..
+        } = run;
+        if let Some(sink) = sink {
+            self.project_into(bindings, row_buffer);
+            // `DISTINCT` has to own what it remembers, so it is the one shape that still
+            // allocates per row. No sink asks for it today — the fragment peels a `DISTINCT`
+            // above the projection, and the sorts that use a sink have none — but the
+            // operator must stay correct if one ever does.
+            if self.distinct && !seen.insert(row_buffer.clone()) {
+                return Ok(());
+            }
+            if *skipped < self.offset {
+                *skipped += 1;
+                return Ok(());
+            }
+            return sink(row_buffer);
+        }
+        let row = self.project(bindings);
+        if self.distinct && !seen.insert(row.clone()) {
+            return Ok(());
+        }
+        if *skipped < self.offset {
+            *skipped += 1;
+            return Ok(());
+        }
+        out.push(row);
+        Ok(())
+    }
+
     fn project(&self, bindings: &FxHashMap<&Variable, TermId>) -> Vec<Option<TermId>> {
         self.variables
             .iter()
             .map(|v| bindings.get(v).copied())
             .collect()
+    }
+
+    /// [`Plan::project`] into a buffer that is reused for the next row.
+    fn project_into(
+        &self,
+        bindings: &FxHashMap<&Variable, TermId>,
+        out: &mut Vec<Option<TermId>>,
+    ) {
+        out.clear();
+        out.extend(self.variables.iter().map(|v| bindings.get(v).copied()));
     }
 
     /// Filter indices that belong to an optional rather than to the query as a whole.
@@ -1837,11 +1894,47 @@ fn lookup(view: &DatasetView<'_>, term: oxrdf::TermRef<'_>) -> Result<Slot, View
 ///
 /// A conflict is how a repeated variable within one pattern (`?s ?p ?s`) is enforced: the
 /// second occurrence finds the first already bound to something else and rejects the row.
+/// The variables one candidate quad bound, to be undone when it is done with.
+///
+/// At most four — graph, subject, predicate, object — so it lives on the stack. This was a
+/// `Vec`, which meant one heap allocation per *candidate quad*: on the 48.4-million-row
+/// scan the profile was taken over, forty-eight million allocations of four pointers, and
+/// the join cost as much again as the index scan under it.
+///
+/// A `VALUES` row can bind more than four, so there is a `Vec` behind them — but it is
+/// untouched until a fifth arrives, and no scan ever gets there.
+#[derive(Default)]
+struct Added<'p> {
+    inline: [Option<&'p Variable>; 4],
+    len: usize,
+    beyond: Vec<&'p Variable>,
+}
+
+impl<'p> Added<'p> {
+    /// Records a variable that was bound.
+    fn push(&mut self, variable: &'p Variable) {
+        if self.len < self.inline.len() {
+            self.inline[self.len] = Some(variable);
+            self.len += 1;
+        } else {
+            self.beyond.push(variable);
+        }
+    }
+
+    /// What to remove from the bindings, in no particular order.
+    fn iter(&self) -> impl Iterator<Item = &'p Variable> + '_ {
+        self.inline[..self.len]
+            .iter()
+            .filter_map(|slot| *slot)
+            .chain(self.beyond.iter().copied())
+    }
+}
+
 fn bind<'p>(
     term: &'p TermPattern,
     actual: TermId,
     bindings: &mut FxHashMap<&'p Variable, TermId>,
-    added: &mut Vec<&'p Variable>,
+    added: &mut Added<'p>,
 ) -> bool {
     let TermPattern::Variable(v) = term else {
         return true;
@@ -1864,7 +1957,7 @@ fn bind_variable<'p>(
     variable: &'p Variable,
     id: TermId,
     bindings: &mut FxHashMap<&'p Variable, TermId>,
-    added: &mut Vec<&'p Variable>,
+    added: &mut Added<'p>,
 ) -> bool {
     match bindings.get(variable) {
         Some(existing) => *existing == id,
@@ -1880,7 +1973,7 @@ fn bind_predicate<'p>(
     predicate: &'p spargebra::term::NamedNodePattern,
     actual: TermId,
     bindings: &mut FxHashMap<&'p Variable, TermId>,
-    added: &mut Vec<&'p Variable>,
+    added: &mut Added<'p>,
 ) -> bool {
     let spargebra::term::NamedNodePattern::Variable(v) = predicate else {
         return true;
