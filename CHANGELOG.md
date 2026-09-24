@@ -126,7 +126,7 @@ neither could reach it.
   sort key with `EXISTS` or `RAND()` — goes to the evaluator unchanged. The order is
   SPARQL's, held to the evaluator's own by a test that sorts a mixed bag of every kind of
   term both ways. The query above, 48.4 million rows on the predicate, answers in **42 s**,
-  of which the scan alone is 21; `SELECT ?s ?o … ORDER BY ?o LIMIT 3` in 41 s. On an
+  and `SELECT ?s ?o … ORDER BY ?o LIMIT 3` in 41 s. On an
   in-memory store of two million dates the heap is **17.6×** faster than the evaluator's
   sort (`holos-bench`'s `topk`).
 - **A decode cache on the view.** Every path that turns an id into a term — the

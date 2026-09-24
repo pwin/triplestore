@@ -30,10 +30,15 @@
 //! per row; the columns of the rows that survive are decoded at the end. Where it is not,
 //! the evaluator's rows arrive decoded in full. On the query above — 48.4 million rows on
 //! the predicate, over a 654-million-quad store on a USB disk — the evaluator's rows took
-//! 264 s before the view's decode cache and 43 s with it; the id path takes 42 s, of which
-//! the scan alone is 21. With `?s` projected as well, the evaluator's rows could not finish
-//! inside a five-minute limit and the id path took 41 s, since `?s` is decoded three times
-//! rather than 48 million.
+//! 264 s before the view's decode cache and 43 s with it; the id path takes 42 s. With `?s`
+//! projected as well, the evaluator's rows could not finish inside a five-minute limit and
+//! the id path took 41 s, since `?s` is decoded three times rather than 48 million.
+//!
+//! How much of that 42 s is the disk is **not** established. `SELECT (COUNT(*) …)` over the
+//! same predicate takes 21 s, which is tempting to subtract and wrong to: a `Group` is not
+//! in [`crate::bindjoin`]'s fragment, so that query is scanned by the evaluator and this one
+//! by the join, and the two are different paths over different index orders. Attributing the
+//! rest to the operator would need a profile of one of them, not a subtraction across both.
 //!
 //! # Ordering
 //!
