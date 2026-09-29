@@ -431,6 +431,54 @@ implementation and a hand-written one for a single known shape: choosing the nex
 from statistics at each step, hashed bindings, decoding through the dictionary. That is a
 tuning problem rather than a missing operator, and a much less urgent one.
 
+### 3f. Tuning RocksDB's read path: two negatives, and one core of eight
+
+`cargo run --release -p holos-bench --bin scanread -- <store> <predicate>` sweeps the
+read-time options against a real store. One process, one open handle, the same scan at each
+setting, each arm run forwards and backwards and the two averaged so drift over the run lands
+on the arms evenly, and a discarded warming pass first.
+
+On `E:/store14`, 48.4M rows on the predicate:
+
+| readahead | checksums verified | checksums skipped |
+|---|---:|---:|
+| adaptive (RocksDB's own) | 10.68 s | 10.53 s |
+| 1 MiB | **10.50 s** | 10.95 s |
+| 8 MiB | 10.68 s | 10.69 s |
+
+An earlier sweep took readahead to 16 MiB with asynchronous prefetch on and off: every arm
+landed between 10.37 s and 10.89 s. **Nothing moves.** The spread across every setting is
+about 1.3%, and a single arm varies by up to 0.5 s between its forward and reverse runs — so
+the differences are smaller than the noise, and the best-looking value changes between
+sweeps, which is what noise looks like.
+
+The explanation came from sampling the process rather than from the sweep. During the index
+scan, CPU use is **exactly 1.00 core, every one-second sample**:
+
+```
+cores busy, one sample per second during the index scan:
+1  1.02  1  1  1  0.98  1  1.02      mean: 1.00 cores
+```
+
+The scan never waits for the disk. There is no I/O stall for readahead to hide, which is why
+readahead does nothing, and the CPU is not going into checksums either, which is why turning
+them off does nothing. At 4.6 M rows/s the scan is 217 ns a row of RocksDB iterator work —
+squarely normal for the engine, and not something its options will change.
+
+**So the read-path options are not the lever, and the headroom is the other seven cores.**
+One thread scans; eight are available. A predicate's slice of an index is a contiguous key
+range, so it can be cut into as many ranges as there are cores and scanned in parallel — and
+the operators above it already have the right shape for it, since a heap per thread merged at
+the end is the same answer as one heap, and `spill::Sorted` merges runs regardless of which
+thread wrote them. That is engine work rather than a RocksDB setting, and it is where the
+next measurable gain is.
+
+What the sweep leaves behind is three knobs — `set_scan_readahead`, `set_scan_async_io` and
+`set_scan_verify_checksums` — all defaulted to current behaviour, because the measurement
+gave no reason to change any default. They exist so the same sweep can be run on storage that
+is not this: a spinning disk or a network volume, where a read costs enough for readahead to
+have something to hide, would be the case to re-measure.
+
 ### 3e. Where the time actually goes, and two allocations that were half the operator
 
 `cargo run --release -p holos-bench --bin topkprofile -- <store> <predicate> <k>` takes the

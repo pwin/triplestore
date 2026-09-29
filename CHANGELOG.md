@@ -3,6 +3,34 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.15.0 — unreleased
+
+### Tuning RocksDB's read path found nothing, and found out why
+
+Measured rather than assumed, and reported as the negative it is. `holos-bench` gains
+`scanread`, which sweeps the read-time options against a real store: one open handle, the
+same scan at each setting, each arm run forwards and backwards and averaged, a discarded
+warming pass first.
+
+Iterator readahead from adaptive to 16 MiB, asynchronous prefetch on and off, per-block
+checksums verified and skipped — **every arm landed within about 1.3%**, smaller than the
+0.5 s a single arm varies between its forward and reverse runs, and the best-looking setting
+moved between sweeps. Nothing there is worth a default change, so none was made.
+
+Sampling the process explained it: during the index scan CPU use is **exactly 1.00 core,
+every sample**. The scan never waits for the disk, so there is no stall for readahead to
+hide, and the time is not in checksums either. At 4.6 M rows/s it is 217 ns a row of RocksDB
+iterator work, which is normal for the engine and not something its options will change.
+
+The headroom is the other seven cores: one thread scans, eight are available, and a
+predicate's slice of an index is a contiguous key range that could be cut and scanned in
+parallel. That is engine work, not a setting. `BENCHMARKS.md` §3f has the numbers.
+
+Three knobs stay behind — `set_scan_readahead`, `set_scan_async_io`,
+`set_scan_verify_checksums` — all defaulted to current behaviour, so that the same sweep can
+be run on storage where a read costs more: a spinning disk or a network volume is the case
+this platform is not.
+
 ## 0.14.0 — 2026-09-24
 
 ### Spilling has a disk ceiling, not only a memory budget

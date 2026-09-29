@@ -82,6 +82,28 @@ const INLINE_KEY_MAX: usize = 512;
 const KEY_EXACT: u8 = 0;
 const KEY_HASHED: u8 = 1;
 
+/// Bytes `RocksDB` reads ahead of a scanning iterator, by default.
+///
+/// # Why this is set at all
+///
+/// `RocksDB`'s adaptive readahead for an iterator starts small and doubles to a cap, which
+/// suits a local NVMe where a read costs microseconds and hurts a device where it costs
+/// milliseconds. This store's reference platform is the latter: a Samsung PM871 mSATA SSD
+/// behind a Realtek USB bridge, where every disk-bound phase of a load is limited by the
+/// link rather than by the flash. A scan of one predicate's slice of an index is the most
+/// sequential access this store ever makes, and it is what readahead is for.
+///
+/// Zero leaves `RocksDB` to its own devices. See `holos-bench`'s `scanread`, which sweeps it
+/// against a real store and is where this number comes from.
+pub const DEFAULT_SCAN_READAHEAD: usize = 0;
+
+/// Whether a scanning iterator prefetches asynchronously, by default.
+///
+/// Only does anything alongside [`DEFAULT_SCAN_READAHEAD`]: it lets RocksDB issue the next
+/// readahead while the current block is being handed out, which is worth more the longer a
+/// read takes. Measured with the readahead sweep rather than assumed.
+pub const DEFAULT_SCAN_ASYNC_IO: bool = false;
+
 /// Quads and terms in a RocksDB database.
 #[derive(Debug)]
 pub struct RocksStorage {
@@ -111,6 +133,12 @@ pub struct RocksStorage {
     dict_spill_bytes: usize,
     /// How large a filter a load keeps over the terms it has interned. See `seen`.
     seen_bytes: usize,
+    /// Bytes `RocksDB` reads ahead of an iterator. Zero leaves it to `RocksDB`.
+    scan_readahead: usize,
+    /// Whether an iterator prefetches asynchronously. Needs `scan_readahead`.
+    scan_async_io: bool,
+    /// Whether a scan verifies each block's checksum as it reads it.
+    scan_verify_checksums: bool,
     /// How many times the current or most recent bulk load spilled.
     spills: usize,
 }
@@ -632,6 +660,9 @@ impl RocksStorage {
             index_file_rows: INDEX_FILE_ROWS,
             dict_spill_bytes: dictsort::SPILL_BYTES,
             seen_bytes: seen::DEFAULT_BYTES,
+            scan_readahead: DEFAULT_SCAN_READAHEAD,
+            scan_async_io: DEFAULT_SCAN_ASYNC_IO,
+            scan_verify_checksums: true,
             spills: 0,
         })
     }
@@ -687,6 +718,43 @@ impl RocksStorage {
     /// disables it, which is how the load ran before it existed.
     pub fn set_seen_bytes(&mut self, bytes: usize) {
         self.seen_bytes = bytes;
+    }
+
+    /// Sets how far `RocksDB` reads ahead of a scanning iterator, in bytes. Zero leaves it
+    /// to `RocksDB`'s own adaptive readahead.
+    ///
+    /// See [`DEFAULT_SCAN_READAHEAD`] for why this is worth setting and where the default
+    /// came from. `holos-bench`'s `scanread` sweeps it against a real store.
+    pub fn set_scan_readahead(&mut self, bytes: usize) {
+        self.scan_readahead = bytes;
+    }
+
+    /// Sets whether a scanning iterator prefetches asynchronously. Does nothing unless
+    /// [`Self::set_scan_readahead`] is non-zero.
+    pub fn set_scan_async_io(&mut self, enabled: bool) {
+        self.scan_async_io = enabled;
+    }
+
+    /// Sets whether a scan verifies each block's checksum. Off is faster on a CPU-bound
+    /// scan and gives up `RocksDB`'s detection of a corrupt block, so it is not a default.
+    pub fn set_scan_verify_checksums(&mut self, enabled: bool) {
+        self.scan_verify_checksums = enabled;
+    }
+
+    /// Read options for an iteration, carrying whatever readahead is configured.
+    ///
+    /// Every scan goes through this rather than `ReadOptions::default`, so a change here
+    /// reaches the index orders and the dictionary alike and none of them can be forgotten.
+    fn scan_opts(&self) -> ReadOptions {
+        let mut opts = ReadOptions::default();
+        if self.scan_readahead > 0 {
+            opts.set_readahead_size(self.scan_readahead);
+            opts.set_async_io(self.scan_async_io);
+        }
+        if !self.scan_verify_checksums {
+            opts.set_verify_checksums(false);
+        }
+        opts
     }
 
     /// Starts a bulk load: writes are buffered into large batches and the write-ahead
@@ -1508,7 +1576,7 @@ impl RocksStorage {
         lower.extend_from_slice(&put_id(span.first));
         let mut upper = key(prefix);
         upper.extend_from_slice(&put_id(span.last));
-        let mut opts = ReadOptions::default();
+        let mut opts = self.scan_opts();
         if prefix.is_empty() {
             opts.set_total_order_seek(true);
         }
@@ -1530,7 +1598,7 @@ impl RocksStorage {
     fn scan_order(&self, order: &'static str, prefix: &[TermId]) -> Result<RowScan<'_>> {
         let lower = key(prefix);
         let upper = prefix_upper_bound(&lower);
-        let mut opts = ReadOptions::default();
+        let mut opts = self.scan_opts();
         if lower.is_empty() {
             // Without a bound prefix the iterator must not be constrained by the
             // column family's prefix extractor.
@@ -1756,7 +1824,7 @@ impl Storage for RocksStorage {
             return Ok(());
         }
 
-        let mut opts = ReadOptions::default();
+        let mut opts = self.scan_opts();
         opts.set_iterate_lower_bound(put_id(TermId::new(tag, from as u64)).to_vec());
         opts.set_iterate_upper_bound(put_id(TermId::new(tag, to as u64)).to_vec());
         for item in self
