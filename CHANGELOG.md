@@ -5,6 +5,49 @@ them are in `BENCHMARKS.md` and are runnable.
 
 ## 0.15.0 — unreleased
 
+### A closure property path is walked from the end that is bound
+
+`BENCHMARKS.md` §3 recorded a query returning **five rows in 25 seconds** — 36,000× slower
+than an inverse closure over the same holarchy that returned 68× more rows. The cause was in
+the report all along: when a closure's left side is a *variable*, a zero-length path makes
+every term in the store a candidate start, so the cost tracks the dataset rather than the few
+nodes actually walked. `<person> :memberOf/:partOf* ?u` is exactly that shape.
+
+New `holos_engine::reach` walks a closure from a seed set: a frontier, a visited set, and a
+round that expands only what the last round reached — semi-naïve, so each node is expanded
+once rather than every round re-deriving the lot. `bindjoin` gains a closure item ordered
+*after* everything that might bind an end, which is the whole trick: evaluate `:memberOf`
+first and the closure is anchored, so a walk over every term in the store becomes a walk of
+three edges. Either end will do, since which one is bound decides the direction.
+
+| | walk | evaluator |
+|---|---:|---:|
+| `memberOf/partOf*`, 500k quads | **0.0002 s** | 0.774 s |
+| `memberOf/partOf*`, 2M quads | **0.0003 s** | 1.358 s |
+| `unit340 partOf+`, anchored already | 0.0001 s | 0.0001 s |
+
+**3,870× at 500k quads, and the walk does not move as the store quadruples** — it costs what
+the component costs, not what the dataset costs. The anchored shapes are unchanged, which is
+the other half: no regression where there was nothing to fix.
+
+What it declines, intact, to `spareval`: a closure with neither end bound, and a closure over
+a compound path such as `(:p/:q)*` or `(:p|:q)+`, which would need a pattern evaluated per hop
+rather than an index read.
+
+Two semantics worth stating, because both are easy to get wrong and one of them was, until a
+test said so. `:p+` is **not** `:p*` without the start: over a cycle the start is reachable
+from itself, so `<f> :p+ ?x` over `f → g → f` answers both. And an arbitrary-length path is a
+question of connectivity (§9.3), so a node reachable two ways is one row — which makes the
+visited set the semantics rather than an optimisation that happens to terminate cycles. Thirty
+differential cases check the walk against the evaluator, and a separate test asserts the
+fragment *accepts* these shapes, because a differential test passes trivially against a walk
+that never runs.
+
+`reach` is deliberately its own module rather than part of the join: a closure is a fixpoint
+over one predicate and a recursive rule is a fixpoint over a rule body, and the frontier and
+visited set are the same machinery. The Datalog work to come reuses it rather than
+reimplementing it.
+
 ### Tuning RocksDB's read path found nothing, and found out why
 
 Measured rather than assumed, and reported as the negative it is. `holos-bench` gains

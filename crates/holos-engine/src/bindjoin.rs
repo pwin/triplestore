@@ -341,6 +341,28 @@ pub enum Item {
     Values(ValuesItem),
     /// `OPTIONAL { .. }`, evaluated after everything required.
     Optional(Box<OptionalItem>),
+    /// A closure property path — `:p*`, `:p+`, `:p?` — walked from whichever end is bound.
+    Closure(ClosureItem),
+}
+
+/// A closure property path over one predicate.
+///
+/// Only one predicate, possibly inverted: `:p*`, `^:p+`, `:p?`. A closure over a *compound*
+/// path — `(:p/:q)*`, `(:p|:q)+` — is refused, because the walk would have to evaluate a
+/// pattern per hop rather than read an index, and the cheap thing this does would become a
+/// different and much slower thing.
+pub struct ClosureItem {
+    /// The subject end, as written.
+    subject: TermPattern,
+    /// The object end, as written.
+    object: TermPattern,
+    /// The predicate the walk crosses.
+    predicate: NamedNode,
+    /// Whether the inner path is `^:p` rather than `:p`.
+    inverse: bool,
+    /// How many edges a path may cross.
+    hops: crate::reach::Hops,
+    scope: Scope,
 }
 
 /// The rows of a `VALUES` clause.
@@ -361,6 +383,7 @@ enum Todo<'p> {
     Union(&'p [Vec<PatternItem>]),
     Values(&'p ValuesItem),
     Optional(&'p OptionalItem),
+    Closure(&'p ClosureItem),
 }
 
 impl<'p> From<&'p Item> for Todo<'p> {
@@ -370,6 +393,7 @@ impl<'p> From<&'p Item> for Todo<'p> {
             Item::Union(branches) => Todo::Union(branches),
             Item::Values(values) => Todo::Values(values),
             Item::Optional(optional) => Todo::Optional(optional),
+            Item::Closure(closure) => Todo::Closure(closure),
         }
     }
 }
@@ -614,9 +638,9 @@ fn collect(
         }
 
         // An alternative property path is a union of the branches, which this already has a
-        // shape for. The closure paths — `*`, `+`, `?` — and a negated set are refused: they
-        // need a traversal to a fixpoint that this operator does not have, and approximating
-        // one would answer a different query.
+        // shape for. A closure — `*`, `+`, `?` — over one predicate becomes a walk instead,
+        // anchored at whichever end another item binds; see `closure_item` and `reach`. A
+        // closure over a compound path, and a negated property set, are still refused.
         //
         // Sequence and inverse paths never arrive here: the parser desugars `:p/:q` into a
         // BGP joined on a blank node and `^:p` into a swapped pattern, so both are ordinary
@@ -626,6 +650,21 @@ fn collect(
             path,
             object,
         } => {
+            // A closure is a walk rather than a union of patterns, so it is recognised first
+            // and becomes an item of its own.
+            if let Some(closure) = closure_item(path, subject, object, scope) {
+                let mut bound = Bound::default();
+                for end in [&closure.subject, &closure.object] {
+                    if let TermPattern::Variable(v) = end {
+                        if !bound.certain.contains(v) {
+                            bound.certain.push(v.clone());
+                        }
+                    }
+                }
+                bound.possible.clone_from(&bound.certain);
+                items.push(Item::Closure(closure));
+                return Some(bound);
+            }
             let mut branches = Vec::new();
             path_alternatives(path, subject, object, scope, &mut branches)?;
             let mut bound = Bound::default();
@@ -872,10 +911,47 @@ fn collect_outside(items: &[Item], skip: &OptionalItem, out: &mut Vec<Variable>)
     }
 }
 
+/// Whether every closure has an end something else could bind: a constant, or a variable
+/// another item mentions.
+fn closures_can_be_anchored(items: &[Item]) -> bool {
+    let closures: Vec<usize> = (0..items.len())
+        .filter(|i| matches!(items[*i], Item::Closure(_)))
+        .collect();
+    for at in closures {
+        let Item::Closure(closure) = &items[at] else {
+            continue;
+        };
+        let mut elsewhere = Vec::new();
+        for (other, item) in items.iter().enumerate() {
+            if other != at {
+                variables_of_items(std::slice::from_ref(item), &mut elsewhere);
+            }
+        }
+        let anchorable = |term: &TermPattern| match term {
+            TermPattern::NamedNode(_) | TermPattern::Literal(_) => true,
+            TermPattern::Variable(v) => elsewhere.contains(v),
+            TermPattern::BlankNode(_) | TermPattern::Triple(_) => false,
+        };
+        if !anchorable(&closure.subject) && !anchorable(&closure.object) {
+            return false;
+        }
+    }
+    true
+}
+
 fn variables_of_items(items: &[Item], out: &mut Vec<Variable>) {
     for item in items {
         match item {
             Item::Pattern(pattern) => variables_of_pattern(pattern, out),
+            Item::Closure(closure) => {
+                for end in [&closure.subject, &closure.object] {
+                    if let TermPattern::Variable(v) = end {
+                        if !out.contains(v) {
+                            out.push(v.clone());
+                        }
+                    }
+                }
+            }
             Item::Union(branches) => {
                 for branch in branches {
                     for pattern in branch {
@@ -891,8 +967,8 @@ fn variables_of_items(items: &[Item], out: &mut Vec<Variable>) {
 
 /// Flattens an alternative property path into union branches.
 ///
-/// Only `a|b` and a bare predicate. Everything else — `*`, `+`, `?`, a negated set — needs a
-/// fixpoint traversal, and is refused rather than approximated.
+/// Only `a|b` and a bare predicate. A closure is handled by `closure_item` before this is
+/// asked; a negated property set is refused rather than approximated.
 fn path_alternatives(
     path: &PropertyPathExpression,
     subject: &TermPattern,
@@ -930,6 +1006,49 @@ fn path_alternatives(
         }
         _ => None,
     }
+}
+
+/// Recognises a closure over one predicate, or `None` for a path this does not walk.
+///
+/// The ends are normalised the way `path_alternatives` normalises them: a blank node becomes
+/// a variable, because a blank node in a pattern *is* a variable that is not projected. A
+/// literal or a triple term as the subject cannot match anything a walk could start from.
+fn closure_item(
+    path: &PropertyPathExpression,
+    subject: &TermPattern,
+    object: &TermPattern,
+    scope: &Scope,
+) -> Option<ClosureItem> {
+    use crate::reach::Hops;
+    let (inner, hops) = match path {
+        PropertyPathExpression::ZeroOrMore(inner) => (inner, Hops::ZeroOrMore),
+        PropertyPathExpression::OneOrMore(inner) => (inner, Hops::OneOrMore),
+        PropertyPathExpression::ZeroOrOne(inner) => (inner, Hops::ZeroOrOne),
+        _ => return None,
+    };
+    let (predicate, inverse) = match inner.as_ref() {
+        PropertyPathExpression::NamedNode(p) => (p.clone(), false),
+        PropertyPathExpression::Reverse(deeper) => match deeper.as_ref() {
+            PropertyPathExpression::NamedNode(p) => (p.clone(), true),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let end = |term: &TermPattern| -> Option<TermPattern> {
+        match term {
+            TermPattern::BlankNode(b) => Some(blank_as_variable(b.as_str()).into()),
+            TermPattern::Triple(_) => None,
+            other => Some(other.clone()),
+        }
+    };
+    Some(ClosureItem {
+        subject: end(subject)?,
+        object: end(object)?,
+        predicate,
+        inverse,
+        hops,
+        scope: scope.clone(),
+    })
 }
 
 /// Flattens nested `UNION`s into a list of alternatives, each of which must be a plain BGP.
@@ -1162,6 +1281,15 @@ fn finish(
     }
     // Optionals are evaluated last, which is only sound for a well-designed pattern.
     if !well_designed(&items, &filters) {
+        return None;
+    }
+    // A closure no other item can anchor is refused here rather than discovered at
+    // evaluation. `probe_closure` abandons the run in that case, which is correct but does
+    // it after building a plan and starting to evaluate — and `?s :p+ ?o` on its own can
+    // never be anchored, so nothing is lost by seeing it now. The runtime check stays as the
+    // backstop for what this cannot see: two closures sharing a variable and nothing else
+    // pass here and still have no end to start from.
+    if !closures_can_be_anchored(&items) {
         return None;
     }
     Some(Plan {
@@ -1412,6 +1540,10 @@ impl Plan {
             // the optional produced may still be dropped by `DISTINCT` or `OFFSET` — and a
             // match that was deduplicated is still a match. Getting that backwards would
             // emit the *unbound* row as well as the bound one.
+            Todo::Closure(closure) => {
+                self.probe_closure(view, stats, closure, &rest, pending, bindings, run)?;
+            }
+
             Todo::Optional(optional) => {
                 // `MINUS` asks the same question and acts on the opposite answer, so its right
                 // side runs *alone* rather than with the rest appended: a match must not emit
@@ -1628,6 +1760,197 @@ impl Plan {
                     break;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// One closure property path, walked from whichever end is bound.
+    ///
+    /// # Why this may abandon the plan
+    ///
+    /// A closure with *neither* end bound is the expensive shape: a zero-length path makes
+    /// every term in the store a candidate start, so the cost stops being proportional to the
+    /// component being walked and becomes proportional to the dataset. `BENCHMARKS.md` §3
+    /// measured that as 25 seconds for five rows. `estimate_todo` orders a closure after
+    /// everything that might bind an end, so by the time this runs an end usually is bound —
+    /// and when it is not, this hands the whole query back rather than doing slowly what
+    /// `spareval` already does. That is the same bargain the rest of the fragment makes:
+    /// answer the shapes this is good at, decline the rest intact.
+    #[allow(clippy::too_many_arguments)]
+    fn probe_closure<'p>(
+        &'p self,
+        view: &DatasetView<'_>,
+        stats: Option<&Statistics>,
+        closure: &'p ClosureItem,
+        rest: &[Todo<'p>],
+        pending: &[usize],
+        bindings: &mut FxHashMap<&'p Variable, TermId>,
+        run: &mut Run<'_>,
+    ) -> Result<(), ViewError> {
+        // Which end to walk from, and which end the walk's answers bind.
+        let resolve = |term: &TermPattern| -> Result<Slot, ViewError> {
+            match term {
+                TermPattern::Variable(v) => Ok(match bindings.get(v) {
+                    Some(id) => Slot::Fixed(*id),
+                    None => Slot::Any,
+                }),
+                TermPattern::NamedNode(n) => lookup(view, oxrdf::Term::from(n.clone()).as_ref()),
+                TermPattern::Literal(l) => lookup(view, oxrdf::Term::from(l.clone()).as_ref()),
+                TermPattern::BlankNode(_) | TermPattern::Triple(_) => Ok(Slot::Any),
+            }
+        };
+        let (subject, object) = (resolve(&closure.subject)?, resolve(&closure.object)?);
+
+        // A constant the dictionary never saw cannot start or end a path. `*` is the one
+        // exception worth naming: `<absent> :p* ?o` has the zero-length solution binding `?o`
+        // to `<absent>` itself, and the term has no id to bind it to. Declining keeps that
+        // correct rather than quietly dropping the row.
+        if matches!(subject, Slot::Missing) || matches!(object, Slot::Missing) {
+            run.abandoned = true;
+            return Ok(());
+        }
+
+        let predicate =
+            match lookup(view, oxrdf::Term::from(closure.predicate.clone()).as_ref())? {
+                Slot::Fixed(id) => id,
+                // A predicate the store has never seen crosses no edges, so only the
+                // zero-length case can answer — and that is `Hops::includes_seed`, handled by
+                // the walk below with an empty edge set. But with no id there is nothing to
+                // scan, so the answer is the seed alone.
+                Slot::Missing | Slot::Any => {
+                    return self.closure_zero_only(
+                        view, stats, closure, &subject, &object, rest, pending, bindings, run,
+                    );
+                }
+            };
+
+        let graph = match &closure.scope {
+            Scope::Default => Some(None),
+            Scope::Named(g) => match lookup(view, oxrdf::Term::from(g.clone()).as_ref())? {
+                Slot::Missing => return Ok(()),
+                Slot::Fixed(id) => Some(Some(id)),
+                Slot::Any => None,
+            },
+            Scope::Variable(v) => bindings.get(v).map(|id| Some(*id)),
+        };
+
+        // Prefer the subject end, and fall back to the object end. Neither bound is the shape
+        // this declines.
+        let (seed, from_subject) = match (&subject, &object) {
+            (Slot::Fixed(s), _) => (*s, true),
+            (_, Slot::Fixed(o)) => (*o, false),
+            _ => {
+                run.abandoned = true;
+                return Ok(());
+            }
+        };
+        let direction = crate::reach::Direction::of(from_subject, closure.inverse);
+        let far_end = if from_subject {
+            &closure.object
+        } else {
+            &closure.subject
+        };
+        let far_slot = if from_subject { &object } else { &subject };
+
+        // Collected rather than streamed, because the walk borrows the view for as long as it
+        // runs and the recursion below binds and scans through the same view. A component's
+        // worth of ids is what this holds, against the row budget the caller already applies.
+        let mut reached = Vec::new();
+        crate::reach::reachable(
+            view,
+            predicate,
+            direction,
+            closure.hops,
+            graph.as_ref().map(Option::as_ref),
+            [seed],
+            |node| {
+                // Both ends bound is a reachability test: stop at the first hit.
+                if let Slot::Fixed(target) = far_slot {
+                    if node == *target {
+                        reached.push(node);
+                        return Ok(false);
+                    }
+                    return Ok(true);
+                }
+                reached.push(node);
+                Ok(true)
+            },
+        )?;
+
+        for node in reached {
+            if run.done() {
+                break;
+            }
+            let mut added = Added::default();
+            let ok = match far_end {
+                TermPattern::Variable(v) => bind_variable(v, node, bindings, &mut added),
+                // A constant far end matched by the walk above needs no binding.
+                _ => true,
+            };
+            if ok {
+                self.step(view, stats, rest, pending, bindings, run)?;
+            }
+            for variable in added.iter() {
+                bindings.remove(variable);
+            }
+            if run.abandoned {
+                break;
+            }
+            if let Some(limit) = self.limit {
+                if run.out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The zero-length case alone, for a closure whose predicate the store has never seen.
+    ///
+    /// `:p*` and `:p?` still answer: a path of no edges connects a term to itself. `:p+`
+    /// answers nothing, because it needs an edge and there are none.
+    #[allow(clippy::too_many_arguments)]
+    fn closure_zero_only<'p>(
+        &'p self,
+        view: &DatasetView<'_>,
+        stats: Option<&Statistics>,
+        closure: &'p ClosureItem,
+        subject: &Slot,
+        object: &Slot,
+        rest: &[Todo<'p>],
+        pending: &[usize],
+        bindings: &mut FxHashMap<&'p Variable, TermId>,
+        run: &mut Run<'_>,
+    ) -> Result<(), ViewError> {
+        if !matches!(closure.hops, crate::reach::Hops::ZeroOrMore | crate::reach::Hops::ZeroOrOne)
+        {
+            return Ok(());
+        }
+        let (seed, far_end, far_slot) = match (subject, object) {
+            (Slot::Fixed(s), _) => (*s, &closure.object, object),
+            (_, Slot::Fixed(o)) => (*o, &closure.subject, subject),
+            _ => {
+                run.abandoned = true;
+                return Ok(());
+            }
+        };
+        // The zero-length path binds the far end to the seed, or, where the far end is also
+        // bound, holds only when the two are the same term.
+        if let Slot::Fixed(target) = far_slot {
+            if *target != seed {
+                return Ok(());
+            }
+        }
+        let mut added = Added::default();
+        let ok = match far_end {
+            TermPattern::Variable(v) => bind_variable(v, seed, bindings, &mut added),
+            _ => true,
+        };
+        if ok {
+            self.step(view, stats, rest, pending, bindings, run)?;
+        }
+        for variable in added.iter() {
+            bindings.remove(variable);
         }
         Ok(())
     }
@@ -2001,6 +2324,20 @@ fn bind_predicate<'p>(
 /// Rough on purpose: this decides an order, and a wrong order is slow rather than wrong. A
 /// `VALUES` is the one exact number here, which is why a handful of candidate geometries
 /// reliably sorts ahead of a scan — the behaviour the spatial index exists to produce.
+/// Whether a closure has an end the walk can start from: a constant, or a variable some
+/// earlier pattern has already bound.
+fn closure_seeds_bound(
+    closure: &ClosureItem,
+    bindings: &FxHashMap<&Variable, TermId>,
+) -> bool {
+    let anchored = |term: &TermPattern| match term {
+        TermPattern::Variable(v) => bindings.contains_key(v),
+        TermPattern::NamedNode(_) | TermPattern::Literal(_) => true,
+        TermPattern::BlankNode(_) | TermPattern::Triple(_) => false,
+    };
+    anchored(&closure.subject) || anchored(&closure.object)
+}
+
 fn estimate_todo(
     todo: &Todo<'_>,
     view: &DatasetView<'_>,
@@ -2021,6 +2358,20 @@ fn estimate_todo(
             })
             .sum(),
         Todo::Values(values) => values.rows.len() as f64,
+        // A closure is cheap from a bound end and proportional to the store from an unbound
+        // one, so the estimate is the boundness rather than a row count: ordered after every
+        // pattern that could bind an end, and ahead of nothing. A closure still unbound when
+        // its turn comes abandons the plan — see `probe_closure` — so this ordering is what
+        // decides whether the operator answers the query at all, not merely how fast.
+        Todo::Closure(closure) => {
+            if closure_seeds_bound(closure, bindings) {
+                // Anchored: a walk of the edges that exist. Cheaper than any scan, because
+                // it reads only the component it starts in.
+                1.0
+            } else {
+                f64::MAX
+            }
+        }
         // `cheapest` filters optionals out before asking, so this is not reached today.
         // Kept, and kept as `INFINITY`, because the two agree: were the filter ever removed
         // the estimate would still sort every optional last and preserve source order among

@@ -28,6 +28,7 @@ pub mod geo_ext;
 pub mod memory;
 pub mod options;
 pub mod range;
+pub mod reach;
 pub mod service;
 pub mod source;
 pub mod spatial;

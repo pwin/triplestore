@@ -334,6 +334,31 @@ term.
 >
 > Measured **1.7× faster** at 750k quads and **1.5×** at 7.5M, for identical answers.
 >
+### 3a. The closure is walked now, and the advice above is mostly obsolete
+
+`holos_engine::reach` walks a closure over a single predicate from whichever end is bound, and
+`bindjoin` orders a closure after everything that might bind an end — so the sequence that was
+slow is anchored by the time the walk runs. `cargo run --release -p holos-bench --bin pathwalk`
+measures both arms in one process over one store, forcing the old path with
+`without_bind_join`:
+
+| | walk | evaluator | ratio |
+|---|---:|---:|---:|
+| `memberOf/partOf*`, 500k quads | **0.0002 s** | 0.774 s | **3,870×** |
+| `memberOf/partOf*`, 1M quads | 0.0003 s | 0.639 s | 2,371× |
+| `memberOf/partOf*`, 2M quads | **0.0003 s** | 1.358 s | **5,096×** |
+| `unit340 partOf+` (was already fast) | 0.0001 s | 0.0001 s | 0.9× |
+| `unit0 ^partOf+` (was already fast) | 0.0003 s | 0.0004 s | 1.3× |
+
+The row that matters is the third against the first: **the walk does not move** as the store
+grows from 500k to 2M quads, because it costs what the component costs — three edges — while
+the evaluator's cost tracks the dataset. The anchored shapes are unchanged, which is the other
+half of the result: no regression where there was nothing to fix.
+
+The rewrite advice below still applies to what the walk declines — a closure over a compound
+path such as `(:p/:q)*`, and a closure with neither end bound, which hands the query back to
+`spareval` intact rather than doing slowly what it already does.
+
 > Repeating the anchor is not optional. Writing the second branch as `{ BIND(?leaf AS ?u) }`
 > looks equivalent and is not — a `UNION` branch does not see `?leaf` from outside the group,
 > so the `BIND` yields nothing and the row for the leaf itself is silently dropped. That form

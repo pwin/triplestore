@@ -227,8 +227,13 @@ fn an_alternative_path_is_a_union() {
     );
 }
 
-/// The closure paths need a fixpoint traversal this operator does not have. Refused, and the
-/// answers still have to be right.
+/// A closure with *neither* end bound goes to the evaluator, and the answers still have to be
+/// right.
+///
+/// The walk in `holos_engine::reach` needs somewhere to start, and a closure whose two ends
+/// are both unbound variables has none: every term in the store would be a candidate, which
+/// is the cost the walk exists to avoid. So these are refused when the plan is assembled —
+/// `closure_paths.rs` covers the anchored shapes the walk does answer.
 #[test]
 fn closure_paths_are_answered_by_the_evaluator() {
     for (sparql, label) in [

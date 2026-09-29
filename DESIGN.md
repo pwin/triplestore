@@ -370,9 +370,23 @@ so matching the evaluator's sequence means matching its tie-breaking — until a
 evaluator's by a test that sorts every kind of term both ways; the bind join still declines a
 sort, and the heap takes it from there (§16).
 
-The refusals that are pending work rather than principle: closure paths (`*`, `+`, `?`) need a
-fixpoint traversal; a subquery hiding a variable needs that variable renamed before splicing;
-a nested `GRAPH` needs the inner-overrides-outer rule.
+**A closure property path is walked from whichever end is bound.** `:p*`, `:p+` and `:p?` over
+a single predicate — possibly inverted — are an item of their own, ordered after everything
+that might bind an end, and answered by `reach.rs`: a frontier, a visited set, and a round that
+expands only what the last round reached. Which end is bound decides the direction, so a bound
+object is as good as a bound subject, and a closure with *neither* end bound hands the query
+back to `spareval` rather than doing slowly what it already does.
+
+That ordering is the whole trick. `<person> :memberOf/:partOf* ?u` is parsed as a `:memberOf`
+pattern joined to a closure, and evaluating the pattern first leaves the closure anchored —
+which turns a walk over every term in the store into a walk of three edges. Measured at
+**3,870×** on 500k quads, and the walk stays at 0.3 ms while the dataset goes to two million
+where the evaluator's cost doubles (`BENCHMARKS.md` §3a).
+
+The refusals that remain, pending work rather than principle: a closure over a *compound* path
+(`(:p/:q)*`, `(:p|:q)+`) would need a pattern evaluated per hop rather than an index read; a
+subquery hiding a variable needs that variable renamed before splicing; a nested `GRAPH` needs
+the inner-overrides-outer rule.
 
 **Filters are borrowed, not reimplemented.** The predicate is evaluated by `spareval`'s own
 expression evaluator through this engine's function registry, so `FILTER` semantics here are
