@@ -42,6 +42,10 @@ on:
         description: "Publish both packages to npm (run this against a tag)"
         type: boolean
         default: false
+      check_credential:
+        description: "Authenticate to npm and stop, publishing nothing"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -115,7 +119,7 @@ jobs:
   npm:
     name: publish to npm
     needs: [build]
-    if: inputs.publish_to_npm
+    if: inputs.publish_to_npm || inputs.check_credential
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -131,6 +135,7 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+        if: inputs.publish_to_npm
         with:
           targets: wasm32-unknown-unknown
       - uses: actions/setup-node@v7
@@ -147,7 +152,9 @@ jobs:
           npm install -g npm@11
           npm --version
 
+      # Only needed to build the packages, so a credential check does not wait for it.
       - name: Install wasm-pack
+        if: inputs.publish_to_npm
         run: |
           set -o pipefail
           for attempt in 1 2 3; do
@@ -160,6 +167,32 @@ jobs:
           done
           wasm-pack --version
 
+      # A dead credential is the failure mode worth preparing for, because it does not
+      # announce itself: npm answers a publish with `E404 Not Found - PUT`, which is how the
+      # registry says "no write access" without revealing whether the package exists -- so a
+      # broken token reads like a missing package. Asking who we are first turns that into a
+      # sentence naming the real problem.
+      #
+      # This is also what `check_credential` dispatches for on its own: a way to find out
+      # that publishing will work *before* there is a version riding on it, which matters
+      # because an npm version cannot be re-published if the run fails halfway.
+      #
+      # Absent token is not a failure: trusted publishing needs none, and npm 11.5.1+ prefers
+      # OIDC when the package has a publisher configured.
+      - name: Check the credential can authenticate
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "no NPM_TOKEN set; relying on trusted publishing (OIDC)"
+            exit 0
+          fi
+          echo "authenticated to npm as: $(npm whoami)"
+
+      - name: Nothing further, this was a credential check
+        if: inputs.check_credential && !inputs.publish_to_npm
+        run: echo "credential verified; publishing nothing because check_credential was set"
+
       # The version published comes from Cargo.toml, and npm has no disposable rehearsal
       # registry, so it must tie to a commit anyone can find again.
       #
@@ -170,6 +203,7 @@ jobs:
       # is always older. CI configuration may differ from the tag, because it is not
       # shipped.
       - name: Check the ref suits a publish
+        if: inputs.publish_to_npm
         run: |
           VERSION="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
           TAG="v$VERSION"
@@ -185,11 +219,13 @@ jobs:
           echo "publishing $VERSION; the shippable tree matches $TAG"
 
       - name: Build both packages
+        if: inputs.publish_to_npm
         run: node crates/holos-wasm/build.mjs
 
       # Run before publishing, not after. A module that cannot answer a query is not worth
       # an npm version that can never be reused.
       - name: Smoke-test the node package
+        if: inputs.publish_to_npm
         run: node crates/holos-wasm/tests/smoke.cjs
 
       # Trusted publishing: npm exchanges the OIDC token minted by `id-token: write` above
@@ -205,6 +241,7 @@ jobs:
       # so public by default, but the flag means a later move to a scope does not silently
       # publish a private package instead.
       - name: Publish
+        if: inputs.publish_to_npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
