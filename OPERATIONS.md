@@ -515,6 +515,60 @@ Two entailments are true and cannot be written down, so they are not:
 `ex:age rdfs:range xsd:integer` with `ex:alice ex:age 30` entails that 30 is an integer, and a
 triple term denotes a proposition. RDF has no subject position for a literal or a triple term.
 
+### Recursive rules: `holos rules`
+
+Datalog, written as SPARQL. A rule is a `CONSTRUCT` — head and body, which is what a Horn rule
+is — and a rule document is a shared prologue followed by one or more of them, each starting
+with `CONSTRUCT` at the beginning of a line. A `#` comment above a rule names it, which is what
+appears in diagnostics.
+
+```sparql
+PREFIX ex: <http://example.com/>
+
+# every parent is an ancestor
+CONSTRUCT { ?x ex:ancestorOf ?y }
+WHERE     { ?x ex:parentOf ?y }
+
+# and an ancestor's ancestor is one too
+CONSTRUCT { ?x ex:ancestorOf ?z }
+WHERE     { ?x ex:parentOf ?y . ?y ex:ancestorOf ?z }
+```
+
+```sh
+holos rules --store ./var/store --rules ancestors.rq
+holos rules --store ./var/store --rules r.rq --derived-graph <IRI> --max-derived 1000000 \
+            --max-rounds 64
+```
+
+Rules run to a **fixpoint**: each round evaluates every rule and adds what is new, and when a
+round adds nothing the answer is complete. A rule body reads the assertions *and* the
+derivations, so a rule fires on what another rule derived — that is what makes it recursive.
+Derived facts go into `<https://holos.dev/ns#derived>` unless you name another graph, for the
+same reasons `entail` uses one: `DROP GRAPH` undoes it exactly, and a reader can tell an
+inference from something somebody asserted.
+
+**Prefer a property path to a recursive rule where one fits.** `{ ?x ex:parentOf+ ?z }` is
+walked by the closure operator in one round; the two-rule form above reaches the same answer
+in five. Same ten facts, far less work.
+
+**What a rule may not do**, each refused before anything runs:
+
+| Refused | Why |
+|---|---|
+| `MINUS`, `EXISTS`, `NOT EXISTS` | Negation needs the rules *stratified*. Without that, `p :- not q` and `q :- not p` have two equally good answers and iteration picks whichever it reaches first |
+| A blank node in the template | It is a fresh node every round, so the rule derives something new for ever |
+| `BNODE`, `UUID`, `STRUUID`, `RAND`, `NOW` | The same, plus a body whose answer changes between rounds has no fixpoint to reach |
+| `SERVICE` | A remote endpoint is not part of the fixpoint and cannot be re-read consistently |
+
+Everything monotone is allowed: joins, `UNION`, `OPTIONAL`, `FILTER`, property paths and
+aggregation.
+
+`--max-derived` (default 10,000,000) and `--max-rounds` (default 64) are bounds on a mistake
+rather than tuning knobs. Passing either is an **error**, and deliberately so: the facts
+derived up to that point are sound, but the set is incomplete, and an incomplete
+materialisation is indistinguishable from a complete one to every later query. A rule set
+still deriving after sixty-four rounds is usually one whose head repeats its body.
+
 ### Spatial index upkeep: `POST /maintenance/purge`
 
 The spatial index tracks the **dictionary**, which never forgets. That is what lets it catch

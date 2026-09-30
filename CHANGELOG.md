@@ -5,6 +5,54 @@ them are in `BENCHMARKS.md` and are runnable.
 
 ## 0.15.0 — unreleased
 
+### Recursive rules, run to a fixpoint: Datalog written as SPARQL
+
+`holos rules --rules <FILE>`. A rule is a `CONSTRUCT` — head and body, which is what a Horn
+rule is — and a document is a shared prologue then one or more of them, each starting with
+`CONSTRUCT` at the beginning of a line, named by the `#` comment above it.
+
+Writing rules in SPARQL rather than in a language of their own is why `rules.rs` is small:
+`spargebra` parses them, `spareval` and `bindjoin` evaluate them, the dataset view applies
+access policy to every read a rule makes, and the statistics reorder each body. `DESIGN.md` §4
+says the front end is reused rather than rewritten, and a second rule language would have meant
+a second parser, a second evaluator and a second set of bugs. SWRL's DL-safe Horn subset maps
+onto the same shape, so it is a surface syntax over this rather than another engine.
+
+Rules run to a fixpoint, each round adding what is new, and a body reads the assertions *and*
+the derivations so a rule fires on what another derived. Derived facts go into
+`<https://holos.dev/ns#derived>`, for the reasons `entail` already uses a graph of its own.
+
+**The previous piece pays off here.** A transitive rule written as a property path is walked by
+the closure operator in a single round: the two-rule ancestor form above reaches its fixpoint in
+**5 rounds**, and `CONSTRUCT { ?x ex:ancestorOf ?z } WHERE { ?x ex:parentOf+ ?z }` in **2** —
+one to derive, one to find nothing new. Same ten facts.
+
+Four things are refused before anything runs, and none is a limitation of the evaluator — each
+would break a property the fixpoint depends on. **Negation** (`MINUS`, `EXISTS`) needs the rules
+stratified, and without that `p :- not q` with `q :- not p` has two equally good answers;
+refusing is the alternative to answering non-deterministically and saying nothing about it. **A
+blank node in the template** is a fresh node every round, so the rule derives for ever — value
+invention is exactly what Datalog leaves out in order to terminate. **`BNODE`, `UUID`,
+`STRUUID`, `RAND`, `NOW`** are the same by another route, plus a body whose answer changes
+between rounds has no fixpoint. **`SERVICE`** is not part of the fixpoint at all. Everything
+monotone is allowed: joins, `UNION`, `OPTIONAL`, `FILTER`, paths, aggregation.
+
+`--max-derived` and `--max-rounds` bound a mistake, and passing either is an error rather than a
+truncated answer: the facts derived so far are sound but the set is incomplete, and an
+incomplete materialisation looks exactly like a complete one to every later query.
+
+Iteration is **naïve** — a round re-derives what earlier rounds derived and discards the
+duplicates, which the store's `insert` reports for free by returning whether the quad was new.
+Semi-naïve iteration, restricting a round to bindings touching the previous round's delta, is
+the standard improvement and wants a measurement rather than a principle; the module says what
+it would take.
+
+One thing worth recording because it cost a debugging round: the obvious way to let a body see
+both assertions and derivations is `union_default_graph`, and it is wrong. That is the union of
+the *named* graphs and deliberately excludes the store's own default graph, so every body
+matched nothing and every rule derived nothing. `QueryOptions` warns about it in as many words.
+The right knob is `default_graphs`, set to the default graph and the derived graph together.
+
 ### A closure property path is walked from the end that is bound
 
 `BENCHMARKS.md` §3 recorded a query returning **five rows in 25 seconds** — 36,000× slower

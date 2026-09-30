@@ -34,6 +34,8 @@ USAGE
     holos backup   --store <DIR> --to <DIR>
     holos compact  --store <DIR> --to <DIR>
     holos entail   --store <DIR> [--entail-graph <IRI>] [--entail-budget <N>]
+    holos rules    --store <DIR> --rules <FILE> [--derived-graph <IRI>] [--max-derived <N>]
+                   [--max-rounds <N>]
 
 DATA
     --data <FILE>            Load a file. Repeatable. Format is taken from the extension:
@@ -205,6 +207,7 @@ fn main() -> Result<()> {
         "backup" => backup(&engine, &opts),
         "compact" => compact(&engine, &opts),
         "entail" => entail(&mut engine, &opts),
+        "rules" => rules(&mut engine, &opts),
         other => bail!("unknown command `{other}`\n\n{USAGE}"),
     }
 }
@@ -625,6 +628,56 @@ fn compact(engine: &Engine, opts: &Options) -> Result<()> {
 /// the trade rather than an oversight.
 ///
 /// Running it twice adds nothing the second time.
+/// Runs a rule set to a fixpoint, adding what it derives to a graph of its own.
+fn rules(engine: &mut Engine, opts: &Options) -> Result<()> {
+    let Some(path) = &opts.rules else {
+        bail!("rules needs --rules <FILE>\n\n{USAGE}");
+    };
+    let mut text = String::new();
+    File::open(path)
+        .with_context(|| format!("opening {path}"))?
+        .read_to_string(&mut text)?;
+
+    let set = holos_engine::rules::RuleSet::parse(&text, opts.base.as_deref())?;
+    let iri = opts
+        .derived_graph
+        .as_deref()
+        .unwrap_or(holos_engine::rules::DEFAULT_GRAPH_IRI);
+    let graph = oxrdf::NamedNode::new(iri)?;
+    let budget = if opts.max_derived == 0 {
+        holos_engine::rules::DEFAULT_BUDGET
+    } else {
+        opts.max_derived
+    };
+    let max_rounds = if opts.max_rounds == 0 {
+        holos_engine::rules::DEFAULT_ROUNDS
+    } else {
+        opts.max_rounds
+    };
+
+    println!("{} rule(s) from {path}:", set.len());
+    for name in set.names() {
+        println!("  {name}");
+    }
+
+    let mut session = opts.session(engine)?;
+    let before = engine.store().len();
+    let report = holos_engine::rules::materialise(
+        engine,
+        &mut session,
+        &set,
+        &graph,
+        budget,
+        max_rounds,
+    )?;
+    engine.store_mut().flush()?;
+
+    println!("\nderived {} fact(s) into <{iri}>", report.added);
+    println!("  rounds  {}", report.rounds);
+    println!("  store   {before} -> {} quads", engine.store().len());
+    Ok(())
+}
+
 fn entail(engine: &mut Engine, opts: &Options) -> Result<()> {
     let iri = opts
         .entail_graph
@@ -942,6 +995,14 @@ struct Options {
     spill_bytes: Option<usize>,
     /// Scratch one query may write while spilling. `None` keeps the engine's own default.
     max_spill_disk: Option<usize>,
+    /// `--rules`: the rule document to run.
+    rules: Option<String>,
+    /// `--derived-graph`: where derived facts go.
+    derived_graph: Option<String>,
+    /// `--max-derived`: facts a rule set may derive. Zero keeps the engine's default.
+    max_derived: usize,
+    /// `--max-rounds`: rounds a fixpoint may take. Zero keeps the engine's default.
+    max_rounds: usize,
     /// Rows a blocking operator may be *estimated* to buffer before the query is refused.
     ///
     /// `None` means the built-in default, for the same reason as `spill_bytes` above.
@@ -1047,6 +1108,10 @@ impl Options {
                 "--named-graph" => o.named_graphs.push(value(&mut i)?),
                 "--union-default-graph" => o.union_default_graph = true,
                 "--timeout" => o.timeout = Some(value(&mut i)?.parse()?),
+                "--rules" => o.rules = Some(value(&mut i)?),
+                "--derived-graph" => o.derived_graph = Some(value(&mut i)?),
+                "--max-derived" => o.max_derived = value(&mut i)?.parse()?,
+                "--max-rounds" => o.max_rounds = value(&mut i)?.parse()?,
                 "--max-spill-disk" => {
                     let gigabytes: f64 = value(&mut i)?.parse()?;
                     #[allow(
