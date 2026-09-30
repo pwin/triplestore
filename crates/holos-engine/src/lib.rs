@@ -916,7 +916,7 @@ impl Engine {
             Err(e) => (Outcome::Denied, e.to_string()),
         };
         audit.record(&holos_security::AccessEvent {
-            at: SystemTime::now(),
+            at: now(),
             principal: principal.id.clone(),
             action: Action::Query(query.to_owned()),
             mode: Modes::READ,
@@ -937,11 +937,32 @@ impl Engine {
 /// Large enough that channel traffic is nothing per quad; small enough that a parse error
 /// surfaces within a few thousand quads of where it is, and that the queue holds megabytes
 /// rather than gigabytes.
+/// The wall clock, where there is one.
+///
+/// `SystemTime::now()` panics on `wasm32-unknown-unknown`. An audit record with a wrong
+/// timestamp would be worse than one with an obviously absent timestamp, so the wasm arm
+/// returns the epoch: it cannot be mistaken for a real time, and the record — who asked
+/// for what, and whether it was allowed — still carries everything an audit is for.
+#[cfg(not(target_arch = "wasm32"))]
+fn now() -> SystemTime {
+    SystemTime::now()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now() -> SystemTime {
+    SystemTime::UNIX_EPOCH
+}
+
+// Both describe the handover between the parse thread and the interning thread, so both are
+// meaningless where there is only one thread. `cfg`-ed rather than `allow(dead_code)`-ed so
+// that an unused one on a native build is still a warning worth reading.
+#[cfg(not(target_arch = "wasm32"))]
 const PARSE_BATCH: usize = 8_192;
 
 /// Batches the parse thread may run ahead by. Four of `PARSE_BATCH` is about a hundred
 /// thousand quads of slack — enough to absorb a slow flush on the loading side without the
 /// parser stalling, and a few megabytes at most.
+#[cfg(not(target_arch = "wasm32"))]
 const PARSE_QUEUE: usize = 4;
 
 /// Parses on one thread and applies `each` on the calling thread.
@@ -956,6 +977,28 @@ const PARSE_QUEUE: usize = 4;
 /// rather than filling memory. An error on either side ends the load: a parse error is sent
 /// down the channel and returned; an insert error drops the receiver, the next `send` fails,
 /// and the parse thread returns. The scope joins it before this returns.
+/// On `wasm32` there is one thread, so the pipeline above is a serial loop: parse a quad,
+/// intern it, repeat. That is what a load was before the parse thread was split off, and it
+/// is the same answer in the same order — only without the overlap, which is a throughput
+/// choice and not a semantic one. A scoped `spawn` on `wasm32-unknown-unknown` compiles and
+/// then panics at runtime, so this has to be a `cfg` rather than something the binding
+/// avoids calling.
+#[cfg(target_arch = "wasm32")]
+fn load_parsed<R: Read + Send>(
+    parser: RdfParser,
+    reader: R,
+    mut each: impl FnMut(oxrdf::Quad) -> Result<bool, EngineError>,
+) -> Result<usize, EngineError> {
+    let mut n = 0;
+    for quad in parser.for_reader(reader) {
+        if each(quad?)? {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn load_parsed<R: Read + Send>(
     parser: RdfParser,
     reader: R,

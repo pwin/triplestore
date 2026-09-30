@@ -633,14 +633,37 @@ becomes a per-holon retention policy rather than a schema decision.
 
 ## 10. L6 — Interfaces
 
-> **Partly built.** `holos-server` serves the SPARQL 1.2 Protocol over HTTP with a MatGUI
+> **Built.** `holos-server` serves the SPARQL 1.2 Protocol over HTTP with a MatGUI
 > console at `/`, the Graph Store Protocol at `/graph`, and SPARQL 1.1 Update at `/update`.
 > Both W3C protocol suites pass in full (34/34 and 13/13). PyO3 bindings are built and
-> packaged as `holosdb`. **WASM is not built.**
+> packaged as `holosdb`. WASM is built as `holos-wasm` and **not yet published to npm**.
 
 Embedded Rust API first; then SPARQL 1.2 Protocol + Graph Store Protocol over HTTP (the
 Fuseki-equivalent); then PyO3 and WASM bindings, following the pattern both Oxigraph and
 SHACL_Engine already use.
+
+### WASM, and what a browser cannot be given
+
+`crates/holos-wasm` compiles the engine for `wasm32-unknown-unknown` and exposes the Python
+bindings' surface to JavaScript: build a store, load RDF from a string, ask a SPARQL query.
+Its README carries the detail; two things belong here.
+
+**The compile-time surface was almost nothing, and that is the trap.** One `getrandom` error
+for the whole engine. `std::thread::spawn`, `Instant::now` and `SystemTime::now` all compile
+for that target and then panic when called, so a green cross-compile proves very little —
+which is why the four places that needed `cfg` were found by running the module, not by
+building it, and why `crates/holos-wasm/tests/smoke.cjs` is a node script rather than a
+`cargo test`.
+
+**Four capabilities are withheld, each because the host lacks something rather than because
+the engine does.** No persistence (RocksDB does not build for wasm32, and the in-memory
+store is the default backend anyway); no file paths, so a load costs memory proportional to
+the document; no spilling `ORDER BY`, so a large sort exhausts the module instead of reaching
+for disk; and no query timeout or memory ceiling, because §16a's watchdog is a thread
+sampling a clock and this target has neither. The last is the one worth revisiting: a
+cooperative deadline checked in the row loop, with the clock routed through the host, would
+restore it. Until then `QueryOptions::guard` returns `None` there and the binding exposes no
+way to ask, so nobody can set a limit and believe it is being honoured.
 
 ### What the HTTP layer inherits for free
 
@@ -721,7 +744,7 @@ the measurement.
 | **P3** | Hypertrie hot tier + WCO multi-join + hybrid planner | Wins on cyclic and join-heavy queries without regressing star and chain queries; memory overhead measured and within budget. **Gated on P2's planner**, not just its statistics — §13 Q2 compares against a *well-planned* binary join, which does not exist yet. |
 | **P4** ✅ | SHACL subsystem on native indexes + incremental revalidation | *Done.* **98/98** W3C SHACL 1.0 Core and **138/138** SHACL 1.2 Core, through both validators (§15). Both revalidate a delta: the native one at **161×** a full pass, the adapted one at **0.08 ms against 150 ms** to prepare and validate at 250,000 quads. SPARQL constraints, SHACL-AF rules and node expressions are the adapted engine's; the native evaluator refuses them rather than dropping them. |
 | **P5** ◐ | Holon layer: versioned partitions, event log, IVM projections, time travel | *Walking skeleton built.* Scene, boundary, event log and the tick all work, validated incrementally at 41× a full pass (§16). Boundary rules fire to a fixpoint per tick, and the whole tick is one atomic commit — both were owed here and both are done. Owes: isolation (needs §6.1's MVCC), incrementally maintained projections, and time travel. |
-| **P6** ◐ | HTTP protocol server, PyO3/WASM bindings, text + vector module | *Server built* — SPARQL 1.2 Protocol (**34/34**), Graph Store Protocol (**13/13**), SPARQL Update, YASGUI console, PyO3 bindings, policy enforced per request (§10). Owes WASM and the text/vector module. |
+| **P6** ◐ | HTTP protocol server, PyO3/WASM bindings, text + vector module | *Server and both bindings built* — SPARQL 1.2 Protocol (**34/34**), Graph Store Protocol (**13/13**), SPARQL Update, YASGUI console, PyO3 bindings, WASM bindings (`crates/holos-wasm`, unpublished), policy enforced per request (§10). Owes the text/vector module. |
 
 P0–P2 is a conventional, low-risk, well-understood engine. P3–P5 is the research content. Structure
 the work so that abandoning P3 or P5 still leaves a usable product — that is the main insurance

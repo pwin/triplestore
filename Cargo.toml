@@ -14,6 +14,7 @@ members = [
     "crates/holos-server",
     "crates/holos-conformance",
     "crates/holos-python",
+    "crates/holos-wasm",
     "crates/holos-bench",
 ]
 

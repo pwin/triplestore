@@ -29,6 +29,15 @@ rustc-hash.workspace = true
 rstar.workspace = true
 oxsdatatypes.workspace = true
 
+# UUID()/STRUUID() seed their generator from the wall clock and the process id, and neither
+# exists on wasm32-unknown-unknown -- both panic. There, the host's entropy is asked for
+# instead, through the same getrandom that `rand` already reaches for oxrdf's blank node
+# identifiers. The `wasm_js` feature is necessary but not sufficient: the workspace
+# .cargo/config.toml carries the `getrandom_backend` cfg that is the other half, and
+# getrandom's own compile_error! says so. See `functions::seed`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
 [features]
 default = []
 # Lets the engine be tested over the persistent backend, which is the only one where a

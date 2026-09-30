@@ -305,8 +305,28 @@ impl Deadline {
 
     /// Starts a watchdog over whichever limits were given, or `None` if neither was.
     ///
+    /// There is no watchdog on `wasm32`, and a caller that asks for one gets `None`.
+    /// `std::thread::spawn` and `Instant::now()` both compile for
+    /// `wasm32-unknown-unknown` and then panic, so there is no thread to sample from and
+    /// no clock to sample against.
+    ///
+    /// That is a real reduction rather than a detail: in a wasm build a runaway query is
+    /// not cancelled, because pre-emption is the one thing a single-threaded host cannot
+    /// offer. What stands in for it is that nobody can ask — the wasm binding exposes no
+    /// timeout, so no caller can set one and believe it is being enforced. Bringing it
+    /// back means a cooperative deadline checked in the row loop, with the clock routed
+    /// through the host.
+    #[cfg(target_arch = "wasm32")]
+    #[must_use]
+    pub fn guard(_timeout: Option<Duration>, _memory_limit: Option<usize>) -> Option<Self> {
+        None
+    }
+
+    /// Starts a watchdog over whichever limits were given, or `None` if neither was.
+    ///
     /// One thread watches both, because they are the same job — sample, compare, cancel —
     /// and two threads per query to check two numbers would cost more than the numbers.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn guard(timeout: Option<Duration>, memory_limit: Option<usize>) -> Option<Self> {
         if timeout.is_none() && memory_limit.is_none() {

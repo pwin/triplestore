@@ -441,16 +441,41 @@ fn spif_name(a: &[Term]) -> Option<Term> {
     string_out(split_iri(&text(a.first()?)?).1.to_owned())
 }
 
+/// The seed `pseudo_uuid` mixes, per platform.
+///
+/// Native: the wall clock and the process id, which distinguishes two processes started in
+/// the same nanosecond.
+///
+/// `wasm32`: neither is available — `SystemTime::now()` and `std::process::id()` both panic
+/// on `wasm32-unknown-unknown` — so the host's own entropy is asked for instead, through the
+/// same `getrandom` the RDF term layer already reaches for blank node identifiers. A failure
+/// there falls back to the address of a stack local, which varies per call and is a poorer
+/// seed than entropy but a better one than a constant.
+#[cfg(not(target_arch = "wasm32"))]
+fn seed() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    nanos as u64 ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn seed() -> u64 {
+    let mut bytes = [0_u8; 8];
+    if getrandom::fill(&mut bytes).is_ok() {
+        return u64::from_le_bytes(bytes);
+    }
+    let here = 0_u8;
+    (&here as *const u8 as usize as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
 /// A version-4-shaped identifier from system entropy.
 ///
 /// No `uuid` dependency for this one use; the shape and the variability are what matter,
 /// and it is documented as pseudo-random rather than claimed to be a conforming UUID.
 fn pseudo_uuid() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let mut state = nanos as u64 ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut state = seed();
     let mut next = || {
         state ^= state << 13;
         state ^= state >> 7;
