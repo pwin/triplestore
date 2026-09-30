@@ -3,7 +3,7 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## 0.15.0 — unreleased
+## 0.15.0 — 2026-09-30
 
 ### Recursive rules, run to a fixpoint: Datalog written as SPARQL
 
