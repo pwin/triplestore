@@ -3,6 +3,47 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.17.0 — 2026-09-30
+
+### The wasm binding gets the surface its consumers need
+
+Three additions and one breaking change, each traced to a caller rather than added to round
+the API out. The VS Code extension ran oxigraph in three places after 0.16.0 moved its
+portable checks to holosdb; this is what those three needed.
+
+| | |
+|---|---|
+| `update(sparql, base)` | `{inserted, deleted, graphsCreated, graphsDropped}`. All-or-nothing: a refused write leaves the store exactly as it was. |
+| `dump(format)` | Everything the store holds, as a document. |
+| `queryRdf(query, format, base)` | A CONSTRUCT or DESCRIBE serialised, for when a caller wants a document rather than terms. |
+| `query(...)` | **SELECT now yields terms, not strings.** |
+
+**SELECT returning terms is the breaking change.** They were N-Triples strings, which made
+every consumer parse term syntax to reach a value, and no RDF library in JS accepts a bare
+term string as input. `{termType, value}`, plus `language` and `datatype` on a literal, is
+what rdf-js specifies and what oxigraph returns, so a term can go straight to n3 or be
+compared field by field. A blank node's `value` is the bare label without `_:` — and it is
+this engine's label, not the one in whatever document was loaded, because a parser may rename
+blank nodes and this one does.
+
+CONSTRUCT stays N-Triples strings deliberately: it is the one serialisation every JS RDF
+library parses without first agreeing on a term model, and a graph is usually wanted as a
+graph. `dump` is a document rather than a quad iterator for the same reason — crossing the
+boundary once with a document beats crossing it once per quad.
+
+Surveying the callers before building corrected two things previously claimed here: the
+extension's competency-question runner needed *nothing* (it reads `typeof result ===
+'boolean'` and `result.length`, so 0.16.0 already served it), and its repair engine needed
+`update` and store enumeration rather than the term shapes attributed to it.
+
+One documented claim the tests refuted: Turtle and N-Triples do **not** flatten named graphs.
+oxrdfio refuses the quad — "Only quads in the default graph can be serialized to a RDF graph
+format" — which is the better behaviour, since flattening would move data between graphs while
+reporting success. `dump` now names `nquads` and `trig` in that error instead of passing
+oxrdfio's wording through.
+
+`crates/holos-wasm/tests/smoke.cjs` goes from 10 assertions to 18.
+
 ## 0.16.0 — 2026-09-30
 
 ### The engine compiles to WebAssembly
