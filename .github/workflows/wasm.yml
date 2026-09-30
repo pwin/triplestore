@@ -1,0 +1,214 @@
+# The WebAssembly packages: `holos-wasm` (ESM, for bundlers) and `holos-wasm-node`
+# (CommonJS, for `require()`).
+#
+# Separate from `release.yml` and `python.yml` for the reason `release.yml`'s own header
+# gives: that workflow needs `contents: write` to create a release, this one needs
+# `id-token: write` to publish, and a workflow holding both is a wider blast radius than
+# either job needs. All three can run on the same tag and none waits on the others.
+#
+# **Publishing is deliberately not triggered by the tag.** An npm version cannot be
+# re-published, and unpublish is only allowed for 72 hours and only while nothing depends on
+# it — so the irreversible step is a deliberate dispatch, and the tag only builds and tests.
+# Same reasoning as `python.yml`'s PyPI gate.
+#
+# Two packages come out of one crate because wasm-pack's two targets are not
+# interchangeable, and because wasm-pack names both after the crate — publishing them
+# unpatched would be the same name twice, a collision rather than two packages.
+# `crates/holos-wasm/build.mjs` is what renames them, and is also what puts the licence
+# files in `files` so a package claiming "MIT OR Apache-2.0" does not ship without either
+# text.
+name: wasm
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [develop, main]
+    paths:
+      - "crates/holos-wasm/**"
+      - "crates/holos-engine/**"
+      - "crates/holos-store/**"
+      - ".cargo/config.toml"
+      - ".github/workflows/wasm.yml"
+  pull_request:
+    paths:
+      - "crates/holos-wasm/**"
+      - "crates/holos-engine/**"
+      - "crates/holos-store/**"
+      - ".cargo/config.toml"
+      - ".github/workflows/wasm.yml"
+  workflow_dispatch:
+    inputs:
+      publish_to_npm:
+        description: "Publish both packages to npm (run this against a tag)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------------
+  # Build the module and prove it answers queries.
+  #
+  # The smoke test is the point of this job, not the build. `std::thread::spawn`,
+  # `Instant::now` and `SystemTime::now` all compile for wasm32-unknown-unknown and then
+  # panic when called, so a green cross-compile says almost nothing about whether the module
+  # works — see `crates/holos-wasm/README.md`.
+  # ---------------------------------------------------------------------------------
+  build:
+    name: build and smoke-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+
+      # `curl … | sh` takes its exit status from `sh`, not from `curl`, so a failed download
+      # leaves `sh` reading empty input and exiting 0 — the step passes with wasm-pack not
+      # installed and the failure surfaces later as `ENOENT: spawnSync wasm-pack`.
+      # `pipefail` makes the download's failure the step's failure; the retries cover it
+      # being transient; the version check refuses to continue on anything that got this far
+      # without producing a usable binary.
+      - name: Install wasm-pack
+        run: |
+          set -o pipefail
+          for attempt in 1 2 3; do
+            if curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh; then
+              break
+            fi
+            echo "wasm-pack install attempt $attempt failed"
+            [ "$attempt" = 3 ] && exit 1
+            sleep 5
+          done
+          wasm-pack --version
+
+      - name: Build both packages
+        run: node crates/holos-wasm/build.mjs
+
+      - name: Smoke-test the node package
+        run: node crates/holos-wasm/tests/smoke.cjs
+
+      # So a failed publish can be diagnosed from what the build actually produced, and so a
+      # reviewer can install the tarball without a Rust toolchain.
+      - name: Keep the packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-packages
+          path: |
+            crates/holos-wasm/pkg-node/
+            crates/holos-wasm/pkg-bundler/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------------
+  # Publish. Dispatch-only, and refuses unless the tree matches a tag for its version.
+  # ---------------------------------------------------------------------------------
+  npm:
+    name: publish to npm
+    needs: [build]
+    if: inputs.publish_to_npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Both halves of authentication depend on this. npm exchanges the OIDC token minted
+      # here for publish rights, and records a signed link from each tarball back to this
+      # workflow run and commit — worth having for a package whose payload is a 4 MB binary
+      # nobody can read.
+      id-token: write
+    steps:
+      # Full history and tags: the guard below compares this tree against the tag for its
+      # version, which a shallow clone cannot see.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # Trusted publishing landed in npm 11.5.1 and Node 20 ships npm 10, which has no idea
+      # OIDC exists: it looks for a token, finds none, and fails with ENEEDAUTH rather than
+      # anything mentioning OIDC. Pinned to a major rather than `latest` because npm 12
+      # requires Node 22 and this runner is on 20.
+      - name: Use an npm that can do trusted publishing
+        run: |
+          npm install -g npm@11
+          npm --version
+
+      - name: Install wasm-pack
+        run: |
+          set -o pipefail
+          for attempt in 1 2 3; do
+            if curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh; then
+              break
+            fi
+            echo "wasm-pack install attempt $attempt failed"
+            [ "$attempt" = 3 ] && exit 1
+            sleep 5
+          done
+          wasm-pack --version
+
+      # The version published comes from Cargo.toml, and npm has no disposable rehearsal
+      # registry, so it must tie to a commit anyone can find again.
+      #
+      # Stated as "a tag for this version exists and the shippable tree matches it" rather
+      # than "the ref must be a tag". The latter is a proxy for the real rule and a trap: a
+      # dispatch runs the workflow file *from the ref it is given*, so a fix to this job
+      # could only be used by a tag cut after the fix — and the tag needing to be published
+      # is always older. CI configuration may differ from the tag, because it is not
+      # shipped.
+      - name: Check the ref suits a publish
+        run: |
+          VERSION="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          TAG="v$VERSION"
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Cargo.toml says $VERSION but there is no tag $TAG"
+            exit 1
+          fi
+          if ! git diff --quiet "$TAG" HEAD -- crates Cargo.toml Cargo.lock .cargo; then
+            echo "::error::What this ref would publish differs from $TAG:"
+            git diff --stat "$TAG" HEAD -- crates Cargo.toml Cargo.lock .cargo
+            exit 1
+          fi
+          echo "publishing $VERSION; the shippable tree matches $TAG"
+
+      - name: Build both packages
+        run: node crates/holos-wasm/build.mjs
+
+      # Run before publishing, not after. A module that cannot answer a query is not worth
+      # an npm version that can never be reused.
+      - name: Smoke-test the node package
+        run: node crates/holos-wasm/tests/smoke.cjs
+
+      # Trusted publishing: npm exchanges the OIDC token minted by `id-token: write` above
+      # for publish rights, so there is no stored credential to leak or rotate. It needs a
+      # publisher configured on npmjs.com for *each* package (repository `pwin/triplestore`,
+      # workflow `wasm.yml`). NODE_AUTH_TOKEN is the fallback for while that is being set
+      # up, and for the very first publish of a name that does not exist yet: npm 11.5.1+
+      # uses OIDC when the package has a trusted publisher and the token otherwise, so this
+      # publishes either way rather than depending on which is in place first. Once a run
+      # reports trusted publishing, the `env:` block and the secret can go.
+      #
+      # `--access public` is explicit rather than relied upon: these names are unscoped and
+      # so public by default, but the flag means a later move to a scope does not silently
+      # publish a private package instead.
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for dir in pkg-bundler pkg-node; do
+            echo "=== $dir ==="
+            (cd "crates/holos-wasm/$dir" && npm publish --access public)
+          done

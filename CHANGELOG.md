@@ -3,6 +3,57 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.16.0 — 2026-09-30
+
+### The engine compiles to WebAssembly
+
+`crates/holos-wasm` exposes the Python bindings' surface to JavaScript — build a store, load
+RDF from a string, ask a SPARQL query — and `build.mjs` produces the two npm packages one
+crate has to become: `holos-wasm` for bundlers, `holos-wasm-node` for `require()`. A
+`CONSTRUCT` comes back as N-Triples strings, the same mapping `holosdb` uses, because it is
+the one serialisation every RDF library in JS can parse without first agreeing on a term
+model.
+
+**The compile-time surface was one error, and that is the trap rather than the good news.**
+`cargo check --target wasm32-unknown-unknown` failed only on getrandom. Everything else
+compiled — because `std::thread::spawn`, `Instant::now` and `SystemTime::now` all compile for
+that target and then panic when called. A green cross-compile proves almost nothing, so the
+four places needing `cfg` were found by running the module rather than by building it:
+
+| Where | Native | wasm32 |
+|---|---|---|
+| `load_parsed` | scoped parse thread, bounded channel | serial parse→intern loop, same answer and order |
+| `QueryOptions::guard` | watchdog thread sampling a clock | `None` — there is no thread and no clock |
+| `functions::seed` | wall clock ⊕ process id | `getrandom`, else a stack address |
+| audit event `at:` | `SystemTime::now()` | `UNIX_EPOCH`, which cannot be mistaken for a real time |
+
+Everything else that could not cross — `tempfile`, the sort threads, the read-path clocks —
+lives in `holos-store/src/rocks/`, already behind the opt-in `rocksdb` feature, so a default
+build is memory-only and simply does not contain it.
+
+**Four capabilities are withheld, each because the host lacks something rather than because
+the engine does:** no persistence, no file paths (so a load costs memory proportional to the
+document), no spilling `ORDER BY`, and no query timeout or memory ceiling. The last is the one
+worth revisiting — a cooperative deadline checked in the row loop would restore it. Until
+then the binding exposes no way to ask for one, so nobody can set a limit and believe it is
+being honoured.
+
+Two build-time halves come from outside the crate and are easy to lose. `getrandom` needs the
+`wasm_js` feature *and* the `getrandom_backend` cfg, which is what `.cargo/config.toml` is
+for — scoped to the wasm target so no native build is touched; getrandom's own
+`compile_error!` says the feature alone is insufficient. `oxsdatatypes` needs its `js`
+feature or `NOW()` panics rather than returning something wrong.
+
+`crates/holos-wasm/tests/smoke.cjs` is a node script rather than a `cargo test` for the
+reason above. Three of its ten assertions are the load-bearing ones: `STRUUID()` returning
+different values twice proves the entropy source is live rather than constant, `NOW()`
+returning a plausible `dateTime` proves the clock feature is on, and bare `STR(?blank)`
+dropping its row while the `IF(isBlank(…))` form keeps both proves the engine is conformant
+here — which is what keeps that guard load-bearing in the 29 shipped checks that rely on it.
+
+Measured: 4.2 MB per module. `cargo build --workspace` covers the crate on native too,
+because it is also an `rlib`, and `holos-engine`'s own 361 tests are unchanged at 0 failed.
+
 ## 0.15.0 — 2026-09-30
 
 ### Recursive rules, run to a fixpoint: Datalog written as SPARQL
