@@ -30,17 +30,48 @@ const holos = require('./pkg-node/holos_wasm.js');
 const store = new holos.Store();
 store.loadTurtle('<urn:a> <urn:p> "x" .', undefined);
 
-store.query('ASK { ?s ?p ?o }', undefined);            // boolean
-store.query('SELECT ?s WHERE { ?s ?p ?o }', undefined); // [{ s: '<urn:a>' }]
+store.query('ASK { ?s ?p ?o }', undefined);              // true
+store.query('SELECT ?s WHERE { ?s ?p ?o }', undefined);  // [{ s: { termType: 'NamedNode',
+                                                         //         value: 'urn:a' } }]
 store.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', undefined);
-                                                        // ['<urn:a> <urn:p> "x"']
+                                                         // ['<urn:a> <urn:p> "x"']
+store.queryRdf('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', 'turtle', undefined);
+                                                         // '<urn:a> <urn:p> "x" .
+'
+store.update('INSERT DATA { <urn:b> <urn:p> "y" }', undefined);
+                                    // { inserted: 1, deleted: 0, graphsCreated: 0, … }
+store.dump('nquads');                // everything the store holds
 ```
 
-A CONSTRUCT comes back as N-Triples strings, one per triple, with no trailing separator.
-That is the same mapping `holos-python` uses, and N-Triples specifically because it is the
-one serialisation every RDF library in JS can parse without first agreeing on a term model.
+| What you get back | From |
+|---|---|
+| `true` / `false` | ASK |
+| terms in rdf-js shape — `{termType, value}`, plus `language` and `datatype` on a literal | SELECT |
+| N-Triples strings, one per triple, no trailing separator | CONSTRUCT, DESCRIBE |
+| a document in the format you asked for | `queryRdf` |
+| `{inserted, deleted, graphsCreated, graphsDropped}` | `update` |
+
+**SELECT returns terms, not strings, since 0.17.0.** They used to be N-Triples strings,
+which made every consumer parse term syntax to reach a value, and no RDF library in JS
+accepts a bare term string as input. `{termType, value}` is what rdf-js specifies and what
+oxigraph returns, so a term can go straight to n3 or be compared field by field. A blank
+node's `value` is the bare label, without `_:` — and it is this engine's label, not the one
+in whatever document was loaded, because a parser may rename blank nodes and this one does.
+
+CONSTRUCT stays N-Triples strings deliberately: it is the one serialisation every RDF
+library in JS parses without first agreeing on a term model, and a graph is usually wanted
+as a graph. `queryRdf` is there when a *document* is wanted instead — a preview pane showing
+Turtle, or a payload for something that parses RDF but does not speak these shapes.
+
 An unbound variable is left *off* a SELECT row rather than set to `null`: RDF has no null,
 and "no value here" is a different fact from "the value null".
+
+`dump` is a document rather than a quad iterator, because crossing the boundary once with a
+document beats crossing it once per quad and every JS RDF library can parse what comes back.
+Use `nquads` or `trig` for a store with named graphs: Turtle and N-Triples have nowhere to
+put a graph name, and the serialiser **refuses** such a quad rather than writing it into the
+default graph. That is the right choice — flattening would move data between graphs while
+reporting success — and the error names the formats that work.
 
 ## What this build cannot do
 

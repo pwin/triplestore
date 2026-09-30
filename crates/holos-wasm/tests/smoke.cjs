@@ -126,8 +126,8 @@ check('walks a transitive property path', () => {
 // wasm32. It asks the host for entropy instead, so two calls differing is the evidence that
 // the getrandom backend is wired up rather than silently returning a constant.
 check('STRUUID() varies, so the wasm entropy source is live', () => {
-  const one = store.query('SELECT (STRUUID() AS ?u) WHERE {}', undefined)[0].u;
-  const two = store.query('SELECT (STRUUID() AS ?u) WHERE {}', undefined)[0].u;
+  const one = store.query('SELECT (STRUUID() AS ?u) WHERE {}', undefined)[0].u.value;
+  const two = store.query('SELECT (STRUUID() AS ?u) WHERE {}', undefined)[0].u.value;
   assert.notStrictEqual(one, two, 'the same UUID twice means the seed is constant');
 });
 
@@ -136,7 +136,9 @@ check('STRUUID() varies, so the wasm entropy source is live', () => {
 // than returning a wrong answer, so any real year proves the feature is on.
 check('NOW() returns a real time, so the wasm clock is wired up', () => {
   const t = store.query('SELECT (NOW() AS ?t) WHERE {}', undefined)[0].t;
-  assert.ok(/^"20\d\d-/.test(t), `not a plausible dateTime: ${t}`);
+  assert.strictEqual(t.termType, 'Literal');
+  assert.strictEqual(t.datatype.value, 'http://www.w3.org/2001/XMLSchema#dateTime');
+  assert.ok(/^20\d\d-/.test(t.value), `not a plausible dateTime: ${t.value}`);
 });
 
 check('reports a bad query as an Error rather than panicking', () => {
@@ -147,6 +149,110 @@ check('reports a bad query as an Error rather than panicking', () => {
 
 check('refuses an unknown format by name', () => {
   assert.throws(() => store.load('<a> <b> <c> .', 'jsonl', undefined), /unknown RDF format/);
+});
+
+// ---------------------------------------------------------------------------------
+// The surface added in 0.17.0, and what each piece exists for.
+//
+// Each was added because a consumer needed it, not to round the API out: the VS Code
+// extension's repair engine applies a SPARQL Update and then enumerates the store to diff
+// it, and its Query Workbench preview wants a Turtle document rather than terms.
+// ---------------------------------------------------------------------------------
+
+check('SELECT returns terms in rdf-js shape, not strings', () => {
+  const rows = store.query(
+    'SELECT ?s ?l WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?l }', undefined);
+  const iri = rows.find((r) => r.s.termType === 'NamedNode');
+  assert.ok(iri, 'expected at least one IRI subject');
+  assert.ok(iri.s.value.startsWith('https://'), iri.s.value);
+
+  // A language-tagged literal carries both fields rdf-js specifies.
+  const tagged = rows.map((r) => r.l).find((l) => l.language === 'en');
+  assert.ok(tagged, 'expected a language-tagged label');
+  assert.strictEqual(tagged.termType, 'Literal');
+  assert.strictEqual(
+    tagged.datatype.value, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString');
+
+  // An untagged one reports language "" rather than omitting the field, also per rdf-js.
+  const plain = rows.map((r) => r.l).find((l) => l.value === 'Chassis');
+  assert.strictEqual(plain.language, '');
+  assert.strictEqual(plain.datatype.value, 'http://www.w3.org/2001/XMLSchema#string');
+});
+
+check('a blank node term carries its bare label, without the _: prefix', () => {
+  const rows = store.query(
+    'SELECT ?x WHERE { ?x a <http://www.w3.org/2002/07/owl#Restriction> }', undefined);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].x.termType, 'BlankNode');
+  assert.ok(!rows[0].x.value.startsWith('_:'), rows[0].x.value);
+});
+
+check('queryRdf serialises a CONSTRUCT as a document', () => {
+  const turtle = store.queryRdf(
+    'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', 'turtle', undefined);
+  assert.strictEqual(typeof turtle, 'string');
+  assert.ok(turtle.includes('label') || turtle.includes('Class'), turtle.slice(0, 200));
+  const nt = store.queryRdf('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', 'ntriples', undefined);
+  const lines = nt.split('\n').filter((l) => l.trim());
+  assert.ok(lines.length > 0 && lines.every((l) => l.trim().endsWith('.')), 'not N-Triples');
+});
+
+check('queryRdf refuses a SELECT rather than returning an empty document', () => {
+  assert.throws(
+    () => store.queryRdf('SELECT ?s WHERE { ?s ?p ?o }', 'turtle', undefined),
+    /CONSTRUCT or DESCRIBE/);
+});
+
+check('dump round-trips through a second store', () => {
+  const nq = store.dump('nquads');
+  const copy = new holos.Store();
+  try {
+    assert.strictEqual(copy.load(nq, 'nquads', undefined), store.size);
+    assert.strictEqual(copy.size, store.size);
+  } finally {
+    copy.free?.();
+  }
+});
+
+check('dump keeps a named graph, and refuses a format that cannot carry one', () => {
+  const s2 = new holos.Store();
+  try {
+    s2.load('<urn:g> { <urn:a> <urn:p> <urn:b> }', 'trig', undefined);
+    assert.ok(s2.dump('nquads').includes('<urn:g>'), 'N-Quads dropped the graph name');
+    // Turtle has nowhere to put a graph name, and the serialiser refuses rather than
+    // writing the quad into the default graph. That is the right choice -- flattening would
+    // move data between graphs and report success -- so the test pins the refusal, and that
+    // the message says which formats do work.
+    assert.throws(() => s2.dump('turtle'), /nquads or trig/);
+  } finally {
+    s2.free?.();
+  }
+});
+
+check('update inserts and deletes, and reports what changed', () => {
+  const s2 = new holos.Store();
+  try {
+    const out = s2.update('INSERT DATA { <urn:a> <urn:p> "x" . <urn:b> <urn:p> "y" }', undefined);
+    assert.strictEqual(out.inserted, 2);
+    assert.strictEqual(out.deleted, 0);
+    assert.strictEqual(s2.size, 2);
+    const back = s2.update('DELETE WHERE { <urn:a> ?p ?o }', undefined);
+    assert.strictEqual(back.deleted, 1);
+    assert.strictEqual(s2.size, 1);
+  } finally {
+    s2.free?.();
+  }
+});
+
+check('a refused update leaves the store exactly as it was', () => {
+  const s2 = new holos.Store();
+  try {
+    s2.update('INSERT DATA { <urn:a> <urn:p> "x" }', undefined);
+    assert.throws(() => s2.update('INSERT DATA { not valid sparql', undefined));
+    assert.strictEqual(s2.size, 1, 'a failed update changed the store');
+  } finally {
+    s2.free?.();
+  }
 });
 
 console.log(failures === 0 ? '\nall checks passed' : `\n${failures} check(s) failed`);
