@@ -416,6 +416,29 @@ check('SELECT * names its variables alphabetically, not in the order the query m
   assert.deepStrictEqual(explicit.variables, ['zebra', 'apple']);
 });
 
+check('a triple term comes back decomposed, in the rdf-js shape', () => {
+  // The shape two consumers already assumed and did not get: the browser editor's results
+  // pane and the SPARQL_Course checking harness both read `.subject`, and both threw a
+  // TypeError on a query the course documents as running in the editor.
+  const t = new holos.Store();
+  // Object position: RDF 1.2 allows a triple term there and nowhere else.
+  t.load('<urn:who> <urn:said> <<( <urn:s> <urn:p> "x"@ar--rtl )>> .', 'nquads', undefined);
+  const [row] = t.query('SELECT ?st WHERE { ?who <urn:said> ?st }', undefined);
+  assert.strictEqual(row.st.termType, 'Quad');
+  // rdf-js gives a quad the empty string for its own value; the parts carry the content.
+  assert.strictEqual(row.st.value, '');
+  assert.deepStrictEqual(
+    { termType: row.st.subject.termType, value: row.st.subject.value },
+    { termType: 'NamedNode', value: 'urn:s' });
+  assert.strictEqual(row.st.predicate.value, 'urn:p');
+  assert.strictEqual(row.st.object.termType, 'Literal');
+  // Recursive, so a nested term keeps every field it would have on its own.
+  assert.strictEqual(row.st.object.direction, 'rtl');
+  assert.strictEqual(row.st.object.language, 'ar');
+  assert.strictEqual(row.st.graph.termType, 'DefaultGraph');
+  t.free();
+});
+
 check('explain returns a plan with statistics from the run', () => {
   const json = store.explain('SELECT ?s WHERE { ?s a <http://www.w3.org/2002/07/owl#Class> }', undefined);
   const plan = JSON.parse(json);

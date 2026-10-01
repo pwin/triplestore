@@ -85,11 +85,11 @@ fn failed(context: &str, error: &impl std::fmt::Display) -> JsValue {
 /// own and not the one in whatever document was loaded, because a parser may rename blank
 /// nodes and this one does.
 ///
-/// An RDF 1.2 triple term reports `termType: "Quad"` with its N-Triples rendering in
-/// `value`, rather than being decomposed into subject/predicate/object. Nothing that
-/// consumes this binding asks for one yet, and a half-built nested shape would mislead
-/// where a plain string does not; decomposing it is a change to make when something needs
-/// it.
+/// An RDF 1.2 triple term reports `termType: "Quad"` with `subject`, `predicate`, `object`
+/// and `graph` as terms in their own right, and `value` as the empty string -- the rdf-js
+/// shape, so it can be handed to a library that expects a quad. Until 0.20.0 it carried its
+/// N-Triples rendering in `value` and nothing else, on the grounds that no consumer asked;
+/// two did, and both threw reading `.subject` of `undefined`.
 fn term_to_js(term: &Term) -> JsValue {
     let object = js_sys::Object::new();
     let set = |key: &str, value: &JsValue| {
@@ -143,9 +143,36 @@ fn term_to_js(term: &Term) -> JsValue {
             );
             set("datatype", &datatype);
         }
-        other => {
+        Term::Triple(triple) => {
+            // rdf-js models a triple term as a Quad whose `value` is the empty string and
+            // whose parts are terms in their own right, which is what a consumer needs: the
+            // alternative was the whole `<<( ... )>>` rendering in `value`, and anything
+            // wanting the subject had to parse term syntax to reach it.
+            //
+            // Decomposed in 0.20.0 because something finally asked. The course's q64 selects
+            // a triple term, and both the browser editor's results pane and the course's own
+            // checking harness read `.subject` -- on an undefined, so each threw a TypeError
+            // on a query the course documents as running there.
             set("termType", &JsValue::from_str("Quad"));
-            set("value", &JsValue::from_str(&other.to_string()));
+            set("value", &JsValue::from_str(""));
+            set("subject", &term_to_js(&triple.subject.clone().into()));
+            set("predicate", &term_to_js(&triple.predicate.clone().into()));
+            set("object", &term_to_js(&triple.object));
+            // A triple term is not in a graph. rdf-js still wants the field, and a consumer
+            // that passes this to a library expecting a quad needs it to be the default graph
+            // rather than absent.
+            let graph = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(
+                &graph,
+                &JsValue::from_str("termType"),
+                &JsValue::from_str("DefaultGraph"),
+            );
+            let _ = js_sys::Reflect::set(
+                &graph,
+                &JsValue::from_str("value"),
+                &JsValue::from_str(""),
+            );
+            set("graph", &graph);
         }
     }
     object.into()

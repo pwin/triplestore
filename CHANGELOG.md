@@ -3,6 +3,37 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## Unreleased
+
+### A triple term in a result row is now decomposed
+
+`term_to_js` reported an RDF 1.2 triple term as `termType: "Quad"` with the whole
+`<<( ... )>>` rendering in `value` and nothing else. The comment above it said that was
+deliberate because no consumer asked for the parts, and that decomposing it was "a change to
+make when something needs it".
+
+Two things needed it, and had needed it since 0.17.0 put terms in result rows. The
+turtle-editor-viewer's results pane and the SPARQL_Course checking harness both encode a
+result term for the SPARQL 1.2 results JSON format, both have a `Quad` branch that reads
+`.subject`, and both therefore threw `TypeError: Cannot read properties of undefined` on the
+course's `q64` — a query whose own header documents it as running in the browser editor. The
+measurement that found it was re-running the course against the engine the editor now uses;
+neither codebase had a test that put a triple term through that path.
+
+So a triple term now carries `subject`, `predicate`, `object` and `graph` as terms in their
+own right, recursively, with `value` the empty string — the rdf-js shape, which means it can
+also be handed straight to a library that expects a quad. **`value` no longer carries the
+N-Triples rendering**, so a consumer that was reading it gets `""`; the parts are where the
+content is, and `formatResultTerm` in the viewer builds the `<<( ... )>>` text from them.
+
+`SELECT *` orders its variables alphabetically rather than as the query mentions them, which
+is now documented and pinned by a check rather than left to be discovered. The cause is
+upstream — `spargebra` collects the in-scope variables in pattern order and then sorts them,
+and does not record that the projection was `*` — so it cannot be corrected here without
+guessing which projections were written out in full.
+
+31 smoke checks, from 29.
+
 ## 0.19.0 — 2026-10-01
 
 ### Three gaps in the wasm binding, each found by a consumer needing it
