@@ -3,6 +3,39 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.19.0 — 2026-10-01
+
+### Three gaps in the wasm binding, each found by a consumer needing it
+
+Not an API review. Each of these was discovered by writing the code that wanted it, which is
+also why they are grouped: three releases for three small additions would have cost more than
+the additions.
+
+**A literal carries its base direction.** `direction` is `"ltr"`, `"rtl"` or `""` — the same
+"always present, empty when absent" convention as `language`, because a field that is sometimes
+missing makes every reader check before it can compare. Until now an RDF 1.2
+`rdf:dirLangString` arrived in a result row as a plain language-tagged string, and nothing
+caught it: the only test touching direction checked a *parsed* quad, where it is the parser's
+business and survives.
+
+**A SELECT result names its projected variables.** `.variables` on the array, in order, so
+`result.length` and `for (const row of result)` keep working. The rows cannot carry this — an
+unbound variable is absent from a row, so one unbound in *every* row is invisible, and a result
+with no rows has no columns at all, while `head.vars` in the SPARQL results JSON format must
+list every projected variable regardless. The turtle-editor-viewer was parsing the projection
+out of the query text with a regex for exactly this reason.
+
+**`explain` returns the query plan as JSON.** HOLOS has had this since the CLI's `--explain`; it
+was simply not reachable from a browser, so the editor could run a query far faster than a
+server and still not say how. It *evaluates*: the results are drained and discarded before the
+plan is written, because the statistics are gathered as rows flow through the operators and a
+plan serialised earlier reports zeroes everywhere. It costs a full run and answers what that run
+did rather than what the planner intended.
+
+`crates/holos-wasm/tests/smoke.cjs` goes from 23 assertions to 29. The ones worth having are the
+two the rows cannot show — a variable unbound in every row, and an empty result that still has
+columns — because those are the cases that make `.variables` necessary rather than convenient.
+
 ## 0.18.0 — 2026-10-01
 
 ### `SERVICE` works in the WebAssembly build, without a network client in it

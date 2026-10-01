@@ -46,10 +46,28 @@ store.dump('nquads');                // everything the store holds
 | What you get back | From |
 |---|---|
 | `true` / `false` | ASK |
-| terms in rdf-js shape — `{termType, value}`, plus `language` and `datatype` on a literal | SELECT |
+| terms in rdf-js shape — `{termType, value}`, plus `language`, `direction` and `datatype` on a literal; and `.variables` on the array | SELECT |
 | N-Triples strings, one per triple, no trailing separator | CONSTRUCT, DESCRIBE |
 | a document in the format you asked for | `queryRdf` |
 | `{inserted, deleted, graphsCreated, graphsDropped}` | `update` |
+| `{pending, result}`, the host fetching what is pending | `queryFederated` |
+| the plan as JSON, with statistics from the run | `explain` |
+
+A SELECT result carries **`.variables`**, the projected variables in order, as a property on the
+array — so `result.length` and `for (const row of result)` keep working. The rows cannot carry
+this: an unbound variable is absent from a row, so one unbound in *every* row is invisible, and
+a result with no rows has no columns at all — while `head.vars` in the SPARQL results JSON
+format must list every projected variable regardless. Without it a caller has to parse the
+projection out of the query text.
+
+A literal's **`direction`** is its RDF 1.2 base direction, `"ltr"`, `"rtl"` or `""` — the same
+"always present, empty when absent" convention as `language`, because a field that is sometimes
+missing makes every reader check before it can compare.
+
+**`explain` evaluates.** The results are drained and discarded before the plan is written,
+because the statistics are gathered as rows flow through the operators — a plan serialised
+before that reports zeroes everywhere. So it costs a full run and tells you what the run did,
+not what the planner intended.
 
 **SELECT returns terms, not strings, since 0.17.0.** They used to be N-Triples strings,
 which made every consumer parse term syntax to reach a value, and no RDF library in JS

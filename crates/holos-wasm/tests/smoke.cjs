@@ -354,5 +354,63 @@ check('queryFederated and query agree on result shape', () => {
   assert.deepStrictEqual(store.queryFederated(q, undefined).result, store.query(q, undefined));
 });
 
+// ---------------------------------------------------------------------------------
+// The three gaps 0.19.0 closed. Each was found by a consumer needing it, not by reading
+// the API over.
+// ---------------------------------------------------------------------------------
+
+check('a literal carries its RDF 1.2 base direction', () => {
+  const s2 = new holos.Store();
+  try {
+    s2.load('<urn:a> <urn:p> "hello"@ar--rtl .', 'ntriples', undefined);
+    const [row] = s2.query('SELECT ?o WHERE { ?s <urn:p> ?o }', undefined);
+    assert.strictEqual(row.o.direction, 'rtl');
+    assert.strictEqual(row.o.language, 'ar');
+    assert.strictEqual(
+      row.o.datatype.value, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#dirLangString');
+  } finally {
+    s2.free?.();
+  }
+});
+
+check('a literal with no direction reports "" rather than omitting the field', () => {
+  // The same convention as `language`: a field that is sometimes absent makes every reader
+  // check before it can compare.
+  const [row] = store.query(
+    'SELECT ?l WHERE { <https://example.org/w#Chassis> ' +
+    '<http://www.w3.org/2000/01/rdf-schema#label> ?l }', undefined);
+  assert.strictEqual(row.l.direction, '');
+});
+
+check('a SELECT result names its projected variables, in order', () => {
+  const rows = store.query('SELECT ?s ?l WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?l }', undefined);
+  assert.deepStrictEqual(rows.variables, ['s', 'l']);
+});
+
+check('a variable unbound in every row is still named', () => {
+  // The case the rows cannot show, and the reason this exists: `head.vars` must list every
+  // projected variable, and a caller reading only the rows would never see this one.
+  const rows = store.query(
+    'SELECT ?s ?nothing WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?l }', undefined);
+  assert.ok(rows.length > 0);
+  assert.deepStrictEqual(rows.variables, ['s', 'nothing']);
+  assert.ok(rows.every((r) => !('nothing' in r)), 'an unbound variable should be absent from a row');
+});
+
+check('an empty SELECT still has columns', () => {
+  const rows = store.query('SELECT ?a ?b WHERE { ?a <urn:nothing> ?b }', undefined);
+  assert.strictEqual(rows.length, 0);
+  assert.deepStrictEqual(rows.variables, ['a', 'b']);
+});
+
+check('explain returns a plan with statistics from the run', () => {
+  const json = store.explain('SELECT ?s WHERE { ?s a <http://www.w3.org/2002/07/owl#Class> }', undefined);
+  const plan = JSON.parse(json);
+  assert.ok(typeof plan === 'object' && plan !== null, json.slice(0, 200));
+  // Statistics are gathered as rows flow through, so an explanation written before the results
+  // were drained reports zeroes. Something non-zero here is the evidence they were.
+  assert.ok(JSON.stringify(plan).length > 20, json);
+});
+
 console.log(failures === 0 ? '\nall checks passed' : `\n${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

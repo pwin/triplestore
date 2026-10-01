@@ -115,6 +115,21 @@ fn term_to_js(term: &Term) -> JsValue {
                 "language",
                 &JsValue::from_str(literal.language().unwrap_or("")),
             );
+            // RDF 1.2's base direction, which rdf-js spells `direction` and leaves as "" when
+            // there is none -- the same convention as `language`, and the same reason: a field
+            // that is sometimes absent makes every reader check before it can compare.
+            //
+            // Omitted until 0.19.0, which meant an `rdf:dirLangString` arrived in a result row
+            // as a plain language-tagged string. Nothing caught it: the only test touching
+            // direction checked a *parsed* quad, where it is the parser's business and survives.
+            set(
+                "direction",
+                &JsValue::from_str(match literal.direction() {
+                    Some(oxrdf::BaseDirection::Ltr) => "ltr",
+                    Some(oxrdf::BaseDirection::Rtl) => "rtl",
+                    None => "",
+                }),
+            );
             let datatype = js_sys::Object::new();
             let _ = js_sys::Reflect::set(
                 &datatype,
@@ -228,6 +243,64 @@ impl Store {
             Engine::query(&view, query, base.as_deref()).map_err(|e| failed("querying", &e))?;
 
         Self::results_to_js(results)
+    }
+
+    /// The query plan, as JSON, with the statistics from actually running it.
+    ///
+    /// HOLOS has had this since the CLI's `--explain`; it was simply not reachable from here,
+    /// so a browser could run a query far faster than a server and still not say how.
+    ///
+    /// **It evaluates.** The results are drained and discarded, because an explanation
+    /// serialised before the results are consumed reports zeroes for every operator — the
+    /// statistics are gathered as rows flow through it. So this costs a full run and answers
+    /// what that run did, rather than what the planner intended.
+    ///
+    /// # Errors
+    ///
+    /// As `query`, plus the case where the engine returns no explanation at all, which would
+    /// mean the request for one was dropped on the way through.
+    pub fn explain(&self, query: &str, base: Option<String>) -> Result<String, JsValue> {
+        let session = Session::open(
+            self.engine.store(),
+            Principal::anonymous(),
+            Policy::permit_all(),
+        )
+        .map_err(|e| failed("opening a session", &e))?;
+        let view = self.engine.view(&session);
+
+        let mut options = holos_engine::QueryOptions::new().explaining();
+        if let Some(base) = base {
+            options = options.with_base_iri(base);
+        }
+        let (results, explanation) = Engine::query_with(&view, query, &options)
+            .map_err(|e| failed("querying", &e))?;
+
+        // Drained before the explanation is written, not after: see above.
+        match results {
+            QueryResults::Boolean(_) => {}
+            QueryResults::Graph(triples) => {
+                for triple in triples {
+                    triple.map_err(|e| failed("reading a result triple", &e))?;
+                }
+            }
+            QueryResults::Solutions(solutions) => {
+                for solution in solutions {
+                    solution.map_err(|e| failed("reading a solution", &e))?;
+                }
+            }
+        }
+
+        let Some(explanation) = explanation else {
+            return Err(JsError::new(
+                "the engine returned no explanation, which should not happen when one was asked                  for",
+            )
+            .into());
+        };
+        let mut out = Vec::new();
+        explanation
+            .write_in_json(&mut out)
+            .map_err(|e| failed("writing the explanation", &e))?;
+        String::from_utf8(out).map_err(|e| failed("the explanation was not UTF-8", &e))
     }
 
     /// Apply a SPARQL 1.1 Update, returning what changed:
@@ -347,6 +420,22 @@ impl Store {
                     }
                     out.push(&row);
                 }
+                // The projected variables, in order, on the array itself.
+                //
+                // Added in 0.19.0 because the rows cannot carry this. An unbound variable is
+                // absent from a row, so a variable unbound in *every* row is invisible, and a
+                // result with no rows has no columns at all -- while `head.vars` in the SPARQL
+                // results JSON format must list every projected variable either way. Without
+                // it a caller has to parse the projection out of the query text, which the
+                // turtle-editor-viewer was doing, with a regex, for exactly this reason.
+                //
+                // A property on the array rather than a wrapper object, so `result.length` and
+                // `for (const row of result)` keep working on what `query` already returned.
+                let variables = js_sys::Array::new();
+                for name in &names {
+                    variables.push(&JsValue::from_str(name));
+                }
+                js_sys::Reflect::set(&out, &JsValue::from_str("variables"), &variables)?;
                 Ok(out.into())
             }
         }
