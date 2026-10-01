@@ -60,6 +60,16 @@ a result with no rows has no columns at all — while `head.vars` in the SPARQL 
 format must list every projected variable regardless. Without it a caller has to parse the
 projection out of the query text.
 
+For an explicit projection the order is the one you wrote. For **`SELECT *` the order is
+alphabetical**, so `SELECT * WHERE { ?s ?p ?o }` names them `o`, `p`, `s`. SPARQL fixes no order
+for `head.vars`, so both are conformant, but the second is not the order a reader expects. The
+cause is one line in `spargebra`'s parser: it collects the in-scope variables in the order the
+pattern mentions them and then calls `pv.sort()`, and the fact that the projection was `*` is
+not kept in the parsed query — so this cannot be corrected here without guessing, because an
+explicit `SELECT ?apple ?zebra` that happens to name every variable is indistinguishable from a
+`*`, and reordering it would be worse than the problem. Fixing it means dropping that sort
+upstream.
+
 A literal's **`direction`** is its RDF 1.2 base direction, `"ltr"`, `"rtl"` or `""` — the same
 "always present, empty when absent" convention as `language`, because a field that is sometimes
 missing makes every reader check before it can compare.

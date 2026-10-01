@@ -403,6 +403,19 @@ check('an empty SELECT still has columns', () => {
   assert.deepStrictEqual(rows.variables, ['a', 'b']);
 });
 
+check('SELECT * names its variables alphabetically, not in the order the query mentions them', () => {
+  // Pinned because it is a divergence worth knowing rather than a bug here: spargebra collects
+  // the in-scope variables in pattern order and then sorts them, and does not record that the
+  // projection was `*`, so this binding cannot restore the author's order without guessing.
+  // An explicit projection keeps the order you wrote, which is the comparison that makes the
+  // point.
+  const star = store.query('SELECT * WHERE { ?zebra <urn:holos-test:p> ?apple }', undefined);
+  assert.deepStrictEqual(star.variables, ['apple', 'zebra']);
+  const explicit = store.query(
+    'SELECT ?zebra ?apple WHERE { ?zebra <urn:holos-test:p> ?apple }', undefined);
+  assert.deepStrictEqual(explicit.variables, ['zebra', 'apple']);
+});
+
 check('explain returns a plan with statistics from the run', () => {
   const json = store.explain('SELECT ?s WHERE { ?s a <http://www.w3.org/2002/07/owl#Class> }', undefined);
   const plan = JSON.parse(json);
