@@ -255,5 +255,104 @@ check('a refused update leaves the store exactly as it was', () => {
   }
 });
 
+// ---------------------------------------------------------------------------------
+// SERVICE, answered from the host rather than from the network.
+//
+// The module has no network client, so these assertions need no endpoint and reach nothing.
+// That is the design rather than a convenience of the test: a SERVICE IRI the host has not
+// answered is simply unanswered, so there is no request for anyone to point anywhere.
+// ---------------------------------------------------------------------------------
+
+/** A SPARQL Results JSON document, as an endpoint would return one. */
+function resultsJson(vars, rows) {
+  return JSON.stringify({
+    head: { vars },
+    results: { bindings: rows },
+  });
+}
+
+check('a SERVICE nobody has answered is reported, not fetched and not failed', () => {
+  const s2 = new holos.Store();
+  try {
+    s2.update('INSERT DATA { <urn:a> <urn:p> "x" }', undefined);
+    const pass = s2.queryFederated(
+      'SELECT * WHERE { <urn:a> <urn:p> ?o SERVICE <https://endpoint.invalid/sparql> { ?s ?p2 ?o2 } }',
+      undefined);
+    assert.strictEqual(pass.pending.length, 1, JSON.stringify(pass.pending));
+    assert.strictEqual(pass.pending[0].endpoint, 'https://endpoint.invalid/sparql');
+    // The pending entry carries a query the host can POST as it stands -- not a pattern.
+    assert.match(pass.pending[0].query, /SELECT/i);
+    assert.match(pass.pending[0].query, /WHERE/i);
+  } finally {
+    s2.free?.();
+  }
+});
+
+check('an answered SERVICE joins with the local data', () => {
+  const s2 = new holos.Store();
+  try {
+    s2.load('<urn:a> <urn:name> "Hay" .', 'ntriples', undefined);
+    const query =
+      'SELECT ?name ?pop WHERE { <urn:a> <urn:name> ?name '
+      + 'SERVICE <https://remote.example/sparql> { ?town <urn:pop> ?pop } }';
+
+    const first = s2.queryFederated(query, undefined);
+    assert.strictEqual(first.pending.length, 1);
+    // The unanswered SERVICE contributed nothing, so the join lost its rows -- which is why a
+    // pass with anything pending must be discarded rather than shown.
+    assert.strictEqual(first.result.length, 0);
+
+    s2.cacheService(
+      first.pending[0].endpoint,
+      first.pending[0].query,
+      resultsJson(['town', 'pop'], [
+        { town: { type: 'uri', value: 'urn:hay' }, pop: { type: 'literal', value: '1500' } },
+      ]),
+    );
+
+    const second = s2.queryFederated(query, undefined);
+    assert.strictEqual(second.pending.length, 0, 'asked again for something it was given');
+    assert.strictEqual(second.result.length, 1);
+    assert.strictEqual(second.result[0].name.value, 'Hay');
+    assert.strictEqual(second.result[0].pop.value, '1500');
+  } finally {
+    s2.free?.();
+  }
+});
+
+check('the cache key is the exact query string the pending entry carried', () => {
+  const s2 = new holos.Store();
+  try {
+    const query = 'SELECT * WHERE { SERVICE <https://remote.example/sparql> { ?s <urn:p> ?o } }';
+    const first = s2.queryFederated(query, undefined);
+    assert.strictEqual(first.pending.length, 1);
+
+    // A reformatted query is a different question. Caching under one must not answer the other,
+    // because silently matching a near-miss would serve one endpoint's answer for another.
+    s2.cacheService(first.pending[0].endpoint, `${first.pending[0].query} `,
+      resultsJson(['s', 'o'], []));
+    assert.strictEqual(s2.queryFederated(query, undefined).pending.length, 1,
+      'a whitespace-different key was treated as a hit');
+
+    s2.cacheService(first.pending[0].endpoint, first.pending[0].query,
+      resultsJson(['s', 'o'], []));
+    assert.strictEqual(s2.queryFederated(query, undefined).pending.length, 0);
+  } finally {
+    s2.free?.();
+  }
+});
+
+check('a query with no SERVICE reports nothing pending', () => {
+  const pass = store.queryFederated(
+    'SELECT ?s WHERE { ?s a <http://www.w3.org/2002/07/owl#Class> }', undefined);
+  assert.strictEqual(pass.pending.length, 0);
+  assert.strictEqual(pass.result.length, 3);
+});
+
+check('queryFederated and query agree on result shape', () => {
+  const q = 'SELECT ?s WHERE { ?s a <http://www.w3.org/2002/07/owl#Class> }';
+  assert.deepStrictEqual(store.queryFederated(q, undefined).result, store.query(q, undefined));
+});
+
 console.log(failures === 0 ? '\nall checks passed' : `\n${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

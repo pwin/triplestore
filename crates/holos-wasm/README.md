@@ -85,10 +85,69 @@ facilities.
 | **No file paths** | `std::fs` compiles for wasm32 and fails at runtime. RDF arrives as a string the host has already read, so a load costs memory proportional to the document — a browser tab is not where a 60 GB dump goes. |
 | **No spilling `ORDER BY`** | The external merge sort needs somewhere to put run files. A sort is bounded by memory here, and a large one exhausts the module rather than reaching for disk. |
 | **No timeout, no memory ceiling** | Both are enforced by a watchdog thread sampling a clock, and this target has neither. `QueryOptions::guard` returns `None`, and this crate exposes no way to ask — so nobody can set a limit and believe it is being honoured. |
+| **No network** | There is no HTTP client in here at all. `SERVICE` works, but only because the *host* fetches and hands the answer in — see below. |
 | **One thread** | A load parses and interns in one serial loop rather than overlapping them. Same answer, same order, less throughput. |
 
 Bringing the timeout back means a cooperative deadline checked in the row loop, with the
 clock routed through the host. That is the one reduction above that is worth revisiting.
+
+## `SERVICE`, without a network client
+
+`store.query()` cannot answer a `SERVICE` clause. `store.queryFederated()` can, by asking the
+host to do the fetching:
+
+```js
+for (let round = 0; round < 8; round += 1) {
+  const pass = store.queryFederated(query, undefined);
+  if (!pass.pending.length) return pass.result;
+  for (const { endpoint, query: ask } of pass.pending) {
+    // The host decides what may be called. Nothing in the wasm can reach the network.
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sparql-query',
+                 Accept: 'application/sparql-results+json' },
+      body: ask,
+    });
+    store.cacheService(endpoint, ask, await res.text());
+  }
+}
+throw new Error('SERVICE did not settle');
+```
+
+**A pass with anything `pending` has wrong results, and says so by having them.** The
+unanswered `SERVICE` contributed no rows, so the join above it lost rows too. Discard `result`
+whenever `pending` is non-empty rather than showing it.
+
+### Why it is shaped like this
+
+`spareval::DefaultServiceHandler::handle` is synchronous and `fetch` is not, and you cannot
+await a Promise from synchronous wasm. Three ways round that, and they commit you to different
+things:
+
+| | Cost |
+|---|---|
+| synchronous `XMLHttpRequest` | deprecated, warns in every browser, blocks the tab, may stop working |
+| a worker blocking on `Atomics.wait` | needs COOP/COEP cross-origin-isolation headers wherever the app is hosted, and breaks quietly if they are lost |
+| **asking twice** | the query is evaluated more than once |
+
+The third is what this does. It buys no deprecated API, no hosting requirement, and an
+allow-list that lives in the host — which is the part that matters. `holos-engine`'s own
+`service` module refuses remote `SERVICE` because on a *server* it is an SSRF primitive: a
+query from a stranger makes the server fetch an address of the stranger's choosing. That
+objection does not transfer here, and not because a browser is safer — because **this crate
+cannot make a request at all**. There is nothing to point anywhere. The fetch is the host's, in
+the user's own browser, with the user's own network position and CORS between them.
+
+### More than two rounds is normal
+
+A `SERVICE` whose pattern carries bindings from an earlier join only takes its final shape once
+that join has rows, and the first pass gives it none — so an answer can reveal a request that
+could not have been seen before. The same semi-naive iteration the rules engine uses. The cap
+belongs to the host, because only the host knows how long it will wait.
+
+The cache key is `(endpoint, query)` and the query is byte-exact: a reformatted query is a
+different question and will be asked again. That is deliberate — matching a near-miss would
+serve one endpoint's answer to another's question.
 
 ## Four things had to be cfg-ed for this target
 

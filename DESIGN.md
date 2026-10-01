@@ -436,7 +436,12 @@ straight to the evaluator. Roughly a thousand W3C queries appeared to cover this
 while executing none of it, and the most-used surface never received it.
 
 All three now share one `try_bind_join`, and a test compares their answers against the
-evaluator's so they cannot drift apart again. With the suites actually reaching it,
+evaluator's so they cannot drift apart again. A fourth was added in 0.18.0 —
+`Engine::query_prepared_with_handler`, which takes any `SERVICE` handler — and it is
+deliberately *not* on the fast path: a handler is only supplied for a query that has a
+`SERVICE` in it, and a `SERVICE` is outside the fragment the fast path accepts. Stated here
+rather than left implicit, because an entry point quietly skipping that path is the exact fault
+this section records. With the suites actually reaching it,
 `sparql10`, `sparql11` and `sparql12` are unchanged — the first real evidence the operator
 agrees with the evaluator on SPARQL nobody wrote for it.
 
@@ -660,7 +665,16 @@ the engine does.** No persistence (RocksDB does not build for wasm32, and the in
 store is the default backend anyway); no file paths, so a load costs memory proportional to
 the document; no spilling `ORDER BY`, so a large sort exhausts the module instead of reaching
 for disk; and no query timeout or memory ceiling, because §16a's watchdog is a thread
-sampling a clock and this target has neither. The last is the one worth revisiting: a
+sampling a clock and this target has neither.
+
+There is also no network client, and that one turned out not to be a limit. `SERVICE` works in
+the wasm build from 0.18.0 by asking the *host* to fetch: `queryFederated` reports the
+`(endpoint, query)` pairs it wants, the host fetches them and hands them back, and the query is
+re-run until nothing is outstanding — the same semi-naive iteration §9's rules engine uses, for
+the same reason, since an answer can reveal a request that could not have been seen before. It
+is also the better security position rather than a concession: §14's objection to remote
+`SERVICE` is that a *server* would fetch an address a stranger named, and a module that cannot
+make a request has nothing to point anywhere. The last is the one worth revisiting: a
 cooperative deadline checked in the row loop, with the clock routed through the host, would
 restore it. Until then `QueryOptions::guard` returns `None` there and the binding exposes no
 way to ask, so nobody can set a limit and believe it is being honoured.

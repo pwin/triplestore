@@ -3,6 +3,61 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## 0.18.0 — 2026-10-01
+
+### `SERVICE` works in the WebAssembly build, without a network client in it
+
+`store.queryFederated(query, base)` answers a federated query by asking the host to do the
+fetching. It returns `{pending, result}`: `pending` lists the `{endpoint, query}` pairs the
+engine wanted and this store had no answer for, and the host loops — fetch each with an
+ordinary `fetch`, hand it back with `store.cacheService(endpoint, query, resultsJson)`, run
+again — until nothing is pending. That pass's `result` is the answer.
+
+**A pass with anything pending has wrong results, and says so by having them.** The unanswered
+`SERVICE` contributed no rows, so the join above it lost rows too. A host shows `result` only
+when `pending` is empty.
+
+#### Why this shape rather than an HTTP client
+
+`spareval::DefaultServiceHandler::handle` is synchronous and `fetch` is not, and a Promise
+cannot be awaited from synchronous wasm. The alternatives each cost something worse:
+synchronous `XMLHttpRequest` is deprecated, warns in every browser, blocks the tab and may be
+removed; a worker blocking on `Atomics.wait` needs COOP/COEP cross-origin-isolation headers
+wherever the app is hosted and breaks quietly if they are lost. Asking twice costs repeated
+evaluation and nothing else.
+
+It also lands the security question in the right place. `holos-engine`'s `service` module
+refuses remote `SERVICE` because on a *server* it is an SSRF primitive — a query from a
+stranger makes the server fetch an address of the stranger's choosing. That objection does not
+transfer to the wasm build, and not because a browser is safer: **this crate cannot make a
+request at all**. There is nothing to point anywhere. The fetch is the host's, in the user's own
+browser, with the user's own network position and CORS in between, and the allow-list is the
+host's to enforce.
+
+More than two rounds is normal rather than a fault: a `SERVICE` whose pattern carries bindings
+from an earlier join only takes its final shape once that join has rows, and the first pass
+gives it none — the same semi-naive iteration §9's rules engine uses. The cap belongs to the
+host, because only the host knows how long it will wait. The cache key is `(endpoint, query)`
+with the query byte-exact, so a reformatted query is a different question; matching a near-miss
+would serve one endpoint's answer to another's.
+
+### A seam for any `SERVICE` handler
+
+`Engine::query_prepared_with_handler` takes any `spareval::DefaultServiceHandler`, where
+`query_prepared_with_services` takes `LocalServiceHandler` by name. That is the seam
+`service.rs` already said it defined and did not yet expose, and it is what lets a handler that
+answers over HTTP, out of a cache, or from a host function live outside this crate — so the
+policy decision about what may be called belongs to whoever builds one.
+`service::pattern_variables` is public for the same reason: a handler is given a *pattern*, and
+turning that into something an endpoint can answer means wrapping it in a `SELECT` of what it
+binds.
+
+`crates/holos-wasm/tests/smoke.cjs` goes from 18 assertions to 23. The five new ones cover the
+cases that would be easy to get wrong rather than the happy path: that an unanswered `SERVICE`
+is *reported* rather than fetched or failed, that a pending pass's results are empty and
+therefore must be discarded, that a whitespace-different cache key is still a miss, and that
+`queryFederated` and `query` agree on result shape.
+
 ## 0.17.0 — 2026-09-30
 
 ### The wasm binding gets the surface its consumers need

@@ -34,6 +34,8 @@
 //! instantiation, so a host cannot forget to.
 #![allow(clippy::needless_pass_by_value)]
 
+mod service;
+
 use holos_engine::Engine;
 use holos_security::{Policy, Principal, Session};
 use oxrdf::{GraphName, Quad, Term};
@@ -138,6 +140,9 @@ fn term_to_js(term: &Term) -> JsValue {
 #[wasm_bindgen]
 pub struct Store {
     engine: Engine,
+    /// Answers to `SERVICE` clauses, supplied by the host. See `service.rs` for why a cache
+    /// rather than a network client, and `queryFederated` for how the host fills it.
+    services: crate::service::CachingServiceHandler,
 }
 
 #[wasm_bindgen]
@@ -148,6 +153,7 @@ impl Store {
     pub fn new() -> Self {
         Self {
             engine: Engine::new(),
+            services: crate::service::CachingServiceHandler::new(),
         }
     }
 
@@ -221,39 +227,7 @@ impl Store {
         let results =
             Engine::query(&view, query, base.as_deref()).map_err(|e| failed("querying", &e))?;
 
-        match results {
-            QueryResults::Boolean(value) => Ok(JsValue::from_bool(value)),
-            QueryResults::Graph(triples) => {
-                let out = js_sys::Array::new();
-                for triple in triples {
-                    let triple = triple.map_err(|e| failed("reading a result triple", &e))?;
-                    out.push(&JsValue::from_str(&triple.to_string()));
-                }
-                Ok(out.into())
-            }
-            QueryResults::Solutions(solutions) => {
-                let names: Vec<String> = solutions
-                    .variables()
-                    .iter()
-                    .map(|v| v.as_str().to_owned())
-                    .collect();
-                let out = js_sys::Array::new();
-                for solution in solutions {
-                    let solution = solution.map_err(|e| failed("reading a solution", &e))?;
-                    let row = js_sys::Object::new();
-                    for name in &names {
-                        // An unbound variable is left off the object rather than set to
-                        // null. "This row has no value here" and "this row has the value
-                        // null" are different facts, and RDF has no null to mean the first.
-                        if let Some(term) = solution.get(name.as_str()) {
-                            js_sys::Reflect::set(&row, &JsValue::from_str(name), &term_to_js(term))?;
-                        }
-                    }
-                    out.push(&row);
-                }
-                Ok(out.into())
-            }
-        }
+        Self::results_to_js(results)
     }
 
     /// Apply a SPARQL 1.1 Update, returning what changed:
@@ -335,6 +309,138 @@ impl Store {
             .finish()
             .map_err(|e| failed("finishing the document", &e))?;
         String::from_utf8(bytes).map_err(|e| failed("the serialiser produced invalid UTF-8", &e))
+    }
+
+    /// Query results as the JavaScript values documented on [`Self::query`].
+    ///
+    /// Shared by `query` and `queryFederated` rather than written twice: the two have to
+    /// produce the same shapes or a host cannot move between them, and two copies of this
+    /// match is how they would stop.
+    fn results_to_js(results: QueryResults<'_>) -> Result<JsValue, JsValue> {
+        match results {
+            QueryResults::Boolean(value) => Ok(JsValue::from_bool(value)),
+            QueryResults::Graph(triples) => {
+                let out = js_sys::Array::new();
+                for triple in triples {
+                    let triple = triple.map_err(|e| failed("reading a result triple", &e))?;
+                    out.push(&JsValue::from_str(&triple.to_string()));
+                }
+                Ok(out.into())
+            }
+            QueryResults::Solutions(solutions) => {
+                let names: Vec<String> = solutions
+                    .variables()
+                    .iter()
+                    .map(|v| v.as_str().to_owned())
+                    .collect();
+                let out = js_sys::Array::new();
+                for solution in solutions {
+                    let solution = solution.map_err(|e| failed("reading a solution", &e))?;
+                    let row = js_sys::Object::new();
+                    for name in &names {
+                        // An unbound variable is left off the object rather than set to
+                        // null. "This row has no value here" and "this row has the value
+                        // null" are different facts, and RDF has no null to mean the first.
+                        if let Some(term) = solution.get(name.as_str()) {
+                            js_sys::Reflect::set(&row, &JsValue::from_str(name), &term_to_js(term))?;
+                        }
+                    }
+                    out.push(&row);
+                }
+                Ok(out.into())
+            }
+        }
+    }
+
+    /// Run a query that may contain `SERVICE`, one pass at a time.
+    ///
+    /// Returns `{pending: [{endpoint, query}, …]}` when the engine asked for an endpoint this
+    /// store has no answer for, and `{result: …}` -- shaped exactly as `query` returns -- when
+    /// it did not. The host fetches each pending query, hands it back with `cacheService`, and
+    /// calls this again:
+    ///
+    /// ```js
+    /// for (let round = 0; round < 8; round += 1) {
+    ///   const pass = store.queryFederated(q, undefined);
+    ///   if (!pass.pending.length) return pass.result;
+    ///   for (const { endpoint, query } of pass.pending) {
+    ///     // The host decides what may be called. Nothing in the wasm can reach the network.
+    ///     store.cacheService(endpoint, query, await fetchSparqlJson(endpoint, query));
+    ///   }
+    /// }
+    /// throw new Error('SERVICE did not settle');
+    /// ```
+    ///
+    /// **A pass with anything pending has wrong results, and says so by having them.** The
+    /// unanswered `SERVICE` contributed no rows, so the join above it lost rows too. Discard
+    /// `result` whenever `pending` is non-empty rather than showing it.
+    ///
+    /// More than two rounds are possible and not a fault: a `SERVICE` whose pattern carries
+    /// bindings from an earlier join only takes its final shape once that join has rows, so an
+    /// answer can reveal a request that could not have been seen before. The cap belongs to the
+    /// host because only the host knows how long it is prepared to wait.
+    ///
+    /// A query with no `SERVICE` never consults the handler, so `pending` is empty and this is
+    /// `query` with one more allocation.
+    #[wasm_bindgen(js_name = queryFederated)]
+    pub fn query_federated(&self, query: &str, base: Option<String>) -> Result<JsValue, JsValue> {
+        self.services.begin_pass();
+
+        let session = Session::open(
+            self.engine.store(),
+            Principal::anonymous(),
+            Policy::permit_all(),
+        )
+        .map_err(|e| failed("opening a session", &e))?;
+        let view = self.engine.view(&session);
+        // Parsed here rather than inside the engine, because the handler-taking entry point
+        // takes a parsed query -- it is the one place a caller supplies its own handler, so it
+        // cannot also be the one that hides the parse. Same construction holos-engine uses.
+        let mut parser = spargebra::SparqlParser::new();
+        if let Some(base) = base.as_deref() {
+            parser = parser
+                .with_base_iri(base)
+                .map_err(|e| failed("the base IRI is not an IRI", &e))?;
+        }
+        let parsed = parser
+            .parse_query(query)
+            .map_err(|e| failed("parsing the query", &e))?;
+        let results =
+            Engine::query_prepared_with_handler(&view, &parsed, self.services.clone())
+                .map_err(|e| failed("querying", &e))?;
+        let value = Self::results_to_js(results)?;
+
+        let pending = js_sys::Array::new();
+        for request in self.services.pending() {
+            let entry = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(
+                &entry,
+                &JsValue::from_str("endpoint"),
+                &JsValue::from_str(&request.endpoint),
+            );
+            let _ = js_sys::Reflect::set(
+                &entry,
+                &JsValue::from_str("query"),
+                &JsValue::from_str(&request.query),
+            );
+            pending.push(&entry);
+        }
+
+        let out = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&out, &JsValue::from_str("pending"), &pending);
+        let _ = js_sys::Reflect::set(&out, &JsValue::from_str("result"), &value);
+        Ok(out.into())
+    }
+
+    /// Give the store an endpoint's answer to one of `queryFederated`'s pending queries.
+    ///
+    /// `results` is SPARQL Results JSON, which is what an endpoint returns for
+    /// `Accept: application/sparql-results+json`. `query` must be the string the pending entry
+    /// carried, byte for byte: it is the cache key, so a reformatted query is a different
+    /// question and will be asked again.
+    #[wasm_bindgen(js_name = cacheService)]
+    pub fn cache_service(&self, endpoint: &str, query: &str, results: &str) {
+        self.services.cache(endpoint, query, results);
     }
 
     /// Everything the store holds, serialised in `format`.

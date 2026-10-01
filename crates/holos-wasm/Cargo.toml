@@ -20,6 +20,11 @@ crate-type = ["cdylib", "rlib"]
 # is the ordinary build rather than a special one.
 holos-engine.workspace = true
 holos-security.workspace = true
+# For the SERVICE handler: spargebra to turn a pattern back into a query, sparesults to read
+# the endpoint's SPARQL Results JSON. See src/service.rs.
+spargebra.workspace = true
+sparesults.workspace = true
+oxiri = "0.2"
 oxrdf.workspace = true
 oxrdfio.workspace = true
 spareval.workspace = true

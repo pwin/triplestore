@@ -308,6 +308,33 @@ impl Engine {
         Ok(evaluator.prepare(&parsed).execute(view)?)
     }
 
+    /// Runs a prepared query with an arbitrary `SERVICE` handler.
+    ///
+    /// The seam `service.rs` promises. [`query_prepared_with_services`] takes the local
+    /// handler by name, which is right for the conformance suites and useless to anything
+    /// that answers a `SERVICE` some other way -- over HTTP, out of a cache, from a host
+    /// function. This takes any handler, so the policy decision about *what* may be called
+    /// belongs to whoever builds one rather than to this crate.
+    ///
+    /// No bind-join fast path here, deliberately: a handler is only supplied when the query
+    /// has a `SERVICE` in it, and a `SERVICE` is outside the fragment that path accepts.
+    ///
+    /// # Errors
+    ///
+    /// Propagates evaluation failures, including whatever the handler returns for an
+    /// endpoint it will not or cannot answer.
+    pub fn query_prepared_with_handler<'a>(
+        view: &'a DatasetView<'a>,
+        query: &spargebra::Query,
+        handler: impl spareval::DefaultServiceHandler + 'static,
+    ) -> Result<QueryResults<'a>, EngineError> {
+        // The same topology rewrite the other entry points apply; see
+        // `query_prepared_with_services` for what skipping it cost.
+        let parsed = crate::topology::rewrite(query, None);
+        let evaluator = Self::evaluator().with_default_service_handler(handler);
+        Ok(evaluator.prepare(&parsed).execute(view)?)
+    }
+
     /// Inserts one quad, subject to the session's write policy.
     ///
     /// The quad's terms are interned *before* the decision so that a rule naming a

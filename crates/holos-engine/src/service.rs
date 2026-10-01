@@ -157,7 +157,11 @@ impl LocalServiceHandler {
 ///
 /// `GraphPattern` has no public accessor for this, so it is walked. Order has to be
 /// deterministic or the same query would project its columns differently between runs.
-fn pattern_variables(pattern: &GraphPattern) -> Vec<oxrdf::Variable> {
+///
+/// Public because any service handler needs it for the same reason this module does: the
+/// trait is handed a *pattern*, and turning that into something an endpoint can answer means
+/// wrapping it in a `SELECT` of what it binds. `holos-wasm`'s HTTP handler does exactly that.
+pub fn pattern_variables(pattern: &GraphPattern) -> Vec<oxrdf::Variable> {
     let mut out: Vec<oxrdf::Variable> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     collect_variables(pattern, &mut out, &mut seen);
