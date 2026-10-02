@@ -3,7 +3,7 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## Unreleased
+## 0.20.0 — 2026-10-02
 
 ### The bound join: a `SERVICE` is now told what it is being joined against
 
