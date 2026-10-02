@@ -883,6 +883,15 @@ impl Engine {
         if let Some(deadline) = &deadline {
             evaluator = evaluator.with_cancellation_token(deadline.token());
         }
+        if options.explain {
+            // Without this the explanation tree carries operator names and nothing else.
+            // `spareval` fills in each node's row count and duration only when the evaluator
+            // was told to compute them, so an explanation asked for without it reports the
+            // shape of the plan and none of what the plan did -- and every caller that drains
+            // the results first, as `--explain` and the wasm binding's `explain` both do, paid
+            // for a full evaluation to learn nothing from it.
+            evaluator = evaluator.compute_statistics();
+        }
 
         let mut prepared = evaluator.prepare(parsed);
 

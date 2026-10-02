@@ -439,13 +439,27 @@ check('a triple term comes back decomposed, in the rdf-js shape', () => {
   t.free();
 });
 
-check('explain returns a plan with statistics from the run', () => {
-  const json = store.explain('SELECT ?s WHERE { ?s a <http://www.w3.org/2002/07/owl#Class> }', undefined);
-  const plan = JSON.parse(json);
-  assert.ok(typeof plan === 'object' && plan !== null, json.slice(0, 200));
-  // Statistics are gathered as rows flow through, so an explanation written before the results
-  // were drained reports zeroes. Something non-zero here is the evidence they were.
-  assert.ok(JSON.stringify(plan).length > 20, json);
+check('explain returns a plan carrying the statistics from the run', () => {
+  const query = 'SELECT ?s WHERE { ?s a <http://www.w3.org/2002/07/owl#Class> }';
+  const rows = store.query(query, undefined);
+  const plan = JSON.parse(store.explain(query, undefined));
+  const root = plan.plan;
+  assert.ok(root && typeof root.name === 'string', JSON.stringify(plan).slice(0, 200));
+
+  // The claim this check exists for: `explain` drains the results before writing the plan,
+  // because the statistics are gathered as rows flow through the operators. What it used to
+  // assert was that the JSON came to more than 20 characters -- true of a plan with no
+  // statistics in it at all, which is what this returned until the evaluator was told to
+  // compute them. The root's count has to equal what the query actually returns.
+  assert.strictEqual(root['number of results'], rows.length);
+  assert.ok(typeof root['duration in seconds'] === 'number', JSON.stringify(root));
+
+  // Every operator, not only the root: the funnel from the bottom of the tree upwards is the
+  // reason to look at a plan at all.
+  (function walk(node) {
+    assert.ok(typeof node['number of results'] === 'number', `no count on ${node.name}`);
+    for (const child of node.children ?? []) walk(child);
+  })(root);
 });
 
 console.log(failures === 0 ? '\nall checks passed' : `\n${failures} check(s) failed`);

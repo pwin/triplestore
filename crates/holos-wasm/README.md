@@ -75,9 +75,12 @@ A literal's **`direction`** is its RDF 1.2 base direction, `"ltr"`, `"rtl"` or `
 missing makes every reader check before it can compare.
 
 **`explain` evaluates.** The results are drained and discarded before the plan is written,
-because the statistics are gathered as rows flow through the operators — a plan serialised
-before that reports zeroes everywhere. So it costs a full run and tells you what the run did,
-not what the planner intended.
+because the statistics are gathered as rows flow through the operators. So it costs a full run,
+and tells you what the run did rather than what the planner intended: every node carries its
+own `number of results` and `duration in seconds`, and reading the counts from the bottom up
+gives you the query's funnel. Until 0.20.0 the draining happened and the statistics did not
+arrive — the evaluator was never told to compute them, so the plan came back as a tree of
+operator names and the full run bought nothing.
 
 **SELECT returns terms, not strings, since 0.17.0.** They used to be N-Triples strings,
 which made every consumer parse term syntax to reach a value, and no RDF library in JS

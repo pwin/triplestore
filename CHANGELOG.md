@@ -34,6 +34,26 @@ guessing which projections were written out in full.
 
 31 smoke checks, from 29.
 
+### `explain` now has the statistics it was paying for
+
+`explain` drains the results before writing the plan, because the statistics are gathered as
+rows flow through the operators. The draining was there since 0.19.0. The statistics were not:
+`spareval` fills in each node's row count and duration only when the evaluator was built with
+`compute_statistics`, and HOLOS never asked, so both `holos query --explain` and the wasm
+binding's `explain` ran the whole query and then returned a tree of operator names with nothing
+measured on it.
+
+The smoke check for it asserted that the JSON came to more than 20 characters, which is true of
+a plan with no statistics at all. It now compares the root's count with what the same query
+returns and requires a count on every operator, which is the assertion that would have caught
+this.
+
+What it buys is the query's funnel. On the course's `build/plan.rq`: 444 labels in the data,
+355 of them longer than eight characters, 32 rows after the join to a shop, 9 after the
+Scottish towns are required. A step that barely narrows is work the engine did for nothing, and
+a step that widens is a join multiplying rows -- visible as a number rather than as a wrong
+total at the end.
+
 ## 0.19.0 — 2026-10-01
 
 ### Three gaps in the wasm binding, each found by a consumer needing it
