@@ -21,6 +21,7 @@
 
 pub mod admit;
 pub mod bindjoin;
+pub mod boundjoin;
 pub mod crs;
 pub mod entailment;
 pub mod functions;
@@ -308,6 +309,104 @@ impl Engine {
         Ok(evaluator.prepare(&parsed).execute(view)?)
     }
 
+    /// Pushes the keys a `SERVICE` will be joined against into the clause itself.
+    ///
+    /// The bound join. `spareval` calls a service handler once per solution arriving from the
+    /// left and does not tell it which solution, so a handler cannot see the keys; the only
+    /// place left to put them is the query, before evaluation. See [`crate::boundjoin`] for why
+    /// a generous probe is the safe direction to be wrong in.
+    ///
+    /// Returns the query unchanged when there is nothing to push -- no `SERVICE`, no variable
+    /// shared with a pattern it joins with, or a probe that leaves one of them unbound -- and
+    /// costs one extra evaluation of the local part when there is.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a failure of the probe, which is the query's own local part and so fails only
+    /// for reasons the real evaluation would have failed for too.
+    fn bind_services<'a>(
+        view: &'a DatasetView<'a>,
+        query: &spargebra::Query,
+    ) -> Result<spargebra::Query, EngineError> {
+        use crate::boundjoin;
+        use spargebra::term::GroundTerm;
+
+        let pattern = boundjoin::pattern_of(query);
+        let candidates = boundjoin::service_candidates(pattern);
+        if candidates.iter().all(Vec::is_empty) {
+            return Ok(query.clone());
+        }
+
+        // One probe for every clause rather than one each: the clauses overlap in practice --
+        // the shape this exists for is several `SERVICE`s joined to the same local pattern --
+        // and a column nobody wanted costs a column, where a second probe costs a second
+        // evaluation.
+        let mut projected: Vec<oxrdf::Variable> = Vec::new();
+        for clause in &candidates {
+            for variable in clause {
+                if !projected.contains(variable) {
+                    projected.push(variable.clone());
+                }
+            }
+        }
+
+        let probe = boundjoin::probe_query(query, projected.clone());
+        let mut rows: Vec<Vec<Option<GroundTerm>>> = Vec::new();
+        if let QueryResults::Solutions(solutions) =
+            Self::evaluator().prepare(&probe).execute(view)?
+        {
+            for solution in solutions {
+                let solution = solution?;
+                rows.push(
+                    projected
+                        .iter()
+                        .map(|variable| {
+                            // A blank node is not a `GroundTerm`, so it arrives here as unbound
+                            // and takes its variable out of the pushdown. Which is right for a
+                            // reason beyond the type: a blank-node label is scoped to the
+                            // document it was parsed from and names nothing at the far end.
+                            solution
+                                .get(variable)
+                                .and_then(|term| GroundTerm::try_from(term.clone()).ok())
+                        })
+                        .collect(),
+                );
+            }
+        }
+
+        let keys = candidates
+            .iter()
+            .map(|clause| {
+                if clause.is_empty() {
+                    return None;
+                }
+                // The probe's columns are the union; this clause wants its own, in its own order.
+                let columns: Vec<usize> = clause
+                    .iter()
+                    .filter_map(|variable| projected.iter().position(|p| p == variable))
+                    .collect();
+                if columns.len() != clause.len() {
+                    return None;
+                }
+                let projection: Vec<Vec<Option<GroundTerm>>> = rows
+                    .iter()
+                    .map(|row| {
+                        columns
+                            .iter()
+                            .map(|column| row.get(*column).cloned().flatten())
+                            .collect()
+                    })
+                    .collect();
+                boundjoin::keys_from_rows(clause, &projection)
+            })
+            .collect();
+
+        Ok(boundjoin::with_pattern(
+            query,
+            boundjoin::with_pushed_keys(pattern, keys),
+        ))
+    }
+
     /// Runs a prepared query with an arbitrary `SERVICE` handler.
     ///
     /// The seam `service.rs` promises. [`query_prepared_with_services`] takes the local
@@ -331,6 +430,10 @@ impl Engine {
         // The same topology rewrite the other entry points apply; see
         // `query_prepared_with_services` for what skipping it cost.
         let parsed = crate::topology::rewrite(query, None);
+        // The bound join, after the topology rewrite and not before: the probe has to see the
+        // query the engine will actually evaluate, or a geometry predicate would match nothing
+        // in the probe, report fewer keys than the real evaluation needs, and lose rows.
+        let parsed = Self::bind_services(view, &parsed)?;
         let evaluator = Self::evaluator().with_default_service_handler(handler);
         Ok(evaluator.prepare(&parsed).execute(view)?)
     }

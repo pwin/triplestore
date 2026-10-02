@@ -354,6 +354,41 @@ check('queryFederated and query agree on result shape', () => {
   assert.deepStrictEqual(store.queryFederated(q, undefined).result, store.query(q, undefined));
 });
 
+check('a federated query asks the endpoint about the keys it is joined against', () => {
+  // The bound join, from the host's side: what `pending` reports is what the page will POST, so
+  // if the keys are not in there the endpoint is being asked the unrestricted question.
+  const t = new holos.Store();
+  t.load([
+    '<urn:town:hay> <urn:sameAs> <urn:remote:hay> .',
+    '<urn:town:sedbergh> <urn:sameAs> <urn:remote:sedbergh> .',
+  ].join(String.fromCharCode(10)), 'nquads', undefined);
+
+  const query = 'SELECT ?town ?population WHERE {'
+    + ' ?town <urn:sameAs> ?dbp .'
+    + ' SERVICE <https://endpoint.example/sparql> { ?dbp <urn:population> ?population } }';
+  const pass = t.queryFederated(query, undefined);
+  assert.strictEqual(pass.pending.length, 1, JSON.stringify(pass.pending));
+  const asked = pass.pending[0].query;
+  assert.ok(asked.includes('VALUES'), asked);
+  assert.ok(asked.includes('urn:remote:hay'), asked);
+  assert.ok(asked.includes('urn:remote:sedbergh'), asked);
+  t.free();
+});
+
+check('a federated query with nothing to push asks as written', () => {
+  // No shared variable, so there are no keys. The clause has to go out unrestricted rather than
+  // with an empty block in it, which an endpoint would answer with nothing.
+  const t = new holos.Store();
+  t.load('<urn:town:hay> <urn:sameAs> <urn:remote:hay> .', 'nquads', undefined);
+  const pass = t.queryFederated(
+    'SELECT * WHERE { ?town <urn:sameAs> ?dbp .'
+    + ' SERVICE <https://endpoint.example/sparql> { ?other <urn:population> ?population } }',
+    undefined);
+  assert.strictEqual(pass.pending.length, 1, JSON.stringify(pass.pending));
+  assert.ok(!pass.pending[0].query.includes('VALUES'), pass.pending[0].query);
+  t.free();
+});
+
 // ---------------------------------------------------------------------------------
 // The three gaps 0.19.0 closed. Each was found by a consumer needing it, not by reading
 // the API over.

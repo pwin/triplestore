@@ -5,6 +5,45 @@ them are in `BENCHMARKS.md` and are runnable.
 
 ## Unreleased
 
+### The bound join: a `SERVICE` is now told what it is being joined against
+
+A federated query sent the endpoint the clause as written. For
+
+```sparql
+?town owl:sameAs ?dbp .
+SERVICE <https://dbpedia.org/sparql> { ?dbp dbo:populationTotal ?population }
+```
+
+that is `SELECT ?dbp ?population WHERE { ?dbp dbo:populationTotal ?population }` — every
+population DBpedia holds, capped at ten thousand rows, with the three towns the query was about
+not among the ten thousand chosen. Measured against the real endpoint: **nothing came back.**
+Correct query, correct engine, empty answer.
+
+`spareval` evaluates `SERVICE` as a nested loop and calls the handler once per solution arriving
+from the left, so the keys exist at the moment of the call — but `DefaultServiceHandler::handle`
+is given the endpoint, the pattern and the base IRI, and not the solution. A handler cannot see
+them. So this is a rewrite before evaluation (`holos_engine::boundjoin`): the query's local part
+is evaluated once with every `SERVICE` replaced by the empty pattern, and the keys it binds are
+joined into the clause as a `VALUES` block.
+
+Measured against DBpedia, with the course's own queries:
+
+| | before | after | Fuseki |
+|---|---|---|---|
+| `q105`, `SERVICE` in a join | 0 rows | **1 row** | 1 row |
+| `q106`, `SERVICE` in an `OPTIONAL` | 3 rows, no population | **3 rows, Sedbergh 2765** | same |
+| `q107`, `VALUES` written by hand | 4 rows | 4 rows | 4 rows |
+
+The way a bound join goes wrong is by sending too few keys, which drops rows silently rather
+than failing, so every rule errs towards sending more: a variable is pushed only when the probe
+bound it in *every* row, a blank node is never pushed, and above 1024 distinct tuples nothing is.
+A `SERVICE` whose keys come from another `SERVICE` is still sent unrestricted — the probe
+neutralises all of them at once — and the host-fetched loop still terminates without it.
+
+Seven tests, each checking both halves: that the clause arrived carrying the keys, and that the
+answer is identical to the same query evaluated without them. 33 smoke checks on the wasm build,
+from 31.
+
 ### A triple term in a result row is now decomposed
 
 `term_to_js` reported an RDF 1.2 triple term as `termType: "Quad"` with the whole

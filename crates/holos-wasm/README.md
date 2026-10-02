@@ -169,6 +169,30 @@ objection does not transfer here, and not because a browser is safer — because
 cannot make a request at all**. There is nothing to point anywhere. The fetch is the host's, in
 the user's own browser, with the user's own network position and CORS between them.
 
+### The keys go with the question
+
+A `SERVICE` is sent the keys it will be joined against, as a `VALUES` block. Without that, a
+clause like
+
+```sparql
+?town owl:sameAs ?dbp .
+SERVICE <https://dbpedia.org/sparql> { ?dbp dbo:populationTotal ?population }
+```
+
+asks the endpoint for *every* population it holds and then joins locally — and an endpoint that
+caps its answer, as DBpedia caps at ten thousand rows, will not have put the rows you wanted in
+the ten thousand it chose. Measured: the query above returned nothing before, and one row after,
+which is what Fuseki returns.
+
+So `pending` reports a query with the keys already in it. Nothing is required of the host: it
+POSTs what it is given, as before.
+
+The keys come from evaluating the query's local part first, which is an extra evaluation per
+pass. What is *not* pushed, because pushing too few keys would drop rows silently: a variable the
+local part leaves unbound in any row, a blank node, and anything above 1024 distinct tuples. A
+`SERVICE` whose keys come from another `SERVICE` is still sent unrestricted — the rounds below
+are what resolve a chain.
+
 ### More than two rounds is normal
 
 A `SERVICE` whose pattern carries bindings from an earlier join only takes its final shape once

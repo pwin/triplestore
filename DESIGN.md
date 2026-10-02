@@ -441,7 +441,10 @@ evaluator's so they cannot drift apart again. A fourth was added in 0.18.0 —
 deliberately *not* on the fast path: a handler is only supplied for a query that has a
 `SERVICE` in it, and a `SERVICE` is outside the fragment the fast path accepts. Stated here
 rather than left implicit, because an entry point quietly skipping that path is the exact fault
-this section records. With the suites actually reaching it,
+this section records. It carries an optimisation of its own instead, the bound join of
+`boundjoin`, which is the one that matters for a federated query: it evaluates the local part
+once to collect the keys a `SERVICE` will be joined against and sends them with the clause,
+turning a remote scan the endpoint may well truncate into a handful of lookups. With the suites actually reaching it,
 `sparql10`, `sparql11` and `sparql12` are unchanged — the first real evidence the operator
 agrees with the evaluator on SPARQL nobody wrote for it.
 
