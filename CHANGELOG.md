@@ -48,6 +48,19 @@ What is pinned, and why each case cannot change an answer:
   RDF 1.2 directional forms. The tag is used as the query spelled it, because the comparison is
   a string comparison and case matters. Neither half pins anything alone.
 
+A pin none of whose candidates the store holds matches nothing, and is given to the planner
+as one triple of an IRI the store lacks (`urn:holos:nothing`, checked absent) rather than as an
+empty `VALUES`. Both are empty when evaluated, but `sparopt` folds the empty `VALUES` upward
+until it meets a `Group`, and for a `Group` without keys that is the wrong answer: `COUNT(*)`
+with `FILTER(?c = ex:absent)` answered **no rows** instead of one saying 0. That is an upstream
+fold (`sparopt` 0.3.7, `GraphPattern::group`), and it also catches `{ FILTER(false) }` written
+by hand, which this does not change. Short strings escaped it only because they are inlined
+into an id, and so look present to the dictionary.
+
+The bind join now estimates a pattern with a constant the store lacks at zero rows, so it is
+taken first and ends the search. It used to count the constant as a free position, which sorted
+the pattern last, behind every scan it was about to make pointless.
+
 Only where a triple or path pattern binds the variable on every path through the filtered
 pattern. Joining with `VALUES` would keep a solution whose variable is unbound, which the
 filter rejects; and a variable bound by the store can only take terms the store holds, which is

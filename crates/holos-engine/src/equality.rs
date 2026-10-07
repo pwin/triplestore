@@ -72,9 +72,9 @@
 //! only by `VALUES`, `BIND` or a `SERVICE`; and any comparison other than the ones above. Each
 //! is left exactly as written.
 
-use oxrdf::{BaseDirection, Literal, TermRef};
+use oxrdf::{BaseDirection, Literal, NamedNode, TermRef};
 use spargebra::algebra::{Expression, Function, GraphPattern};
-use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, Variable};
+use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use std::collections::BTreeSet;
 
 /// `pattern` with every pinning filter given its constants as a `VALUES` join.
@@ -85,31 +85,10 @@ use std::collections::BTreeSet;
 pub fn rewrite(pattern: &GraphPattern, known: &dyn Fn(TermRef<'_>) -> bool) -> GraphPattern {
     let go = |p: &GraphPattern| Box::new(rewrite(p, known));
     match pattern {
-        GraphPattern::Filter { expr, inner } => {
-            let inner = rewrite(inner, known);
-            let pinned = pins_within(expr, &inner);
-            let mut out = inner;
-            for (variable, candidates) in pinned {
-                let mut rows: Vec<Vec<Option<GroundTerm>>> = Vec::new();
-                for candidate in candidates {
-                    let term: oxrdf::Term = candidate.clone().into();
-                    if known(term.as_ref()) {
-                        rows.push(vec![Some(candidate)]);
-                    }
-                }
-                out = GraphPattern::Join {
-                    left: Box::new(GraphPattern::Values {
-                        variables: vec![variable],
-                        bindings: rows,
-                    }),
-                    right: Box::new(out),
-                };
-            }
-            GraphPattern::Filter {
-                expr: expr.clone(),
-                inner: Box::new(out),
-            }
-        }
+        GraphPattern::Filter { expr, inner } => GraphPattern::Filter {
+            expr: expr.clone(),
+            inner: Box::new(pinned_input(expr, rewrite(inner, known), known)),
+        },
         GraphPattern::Bgp { .. } | GraphPattern::Path { .. } | GraphPattern::Values { .. } => {
             pattern.clone()
         }
@@ -178,6 +157,70 @@ pub fn rewrite(pattern: &GraphPattern, known: &dyn Fn(TermRef<'_>) -> bool) -> G
         // Left alone: what a remote endpoint holds is not what `known` answers for.
         GraphPattern::Service { .. } => pattern.clone(),
     }
+}
+
+/// A pattern with no solutions that an optimiser cannot see is empty.
+///
+/// One triple of an IRI the store does not hold. Evaluating it costs a dictionary lookup that
+/// fails; the bind join sorts it first and stops there, and the evaluator finds nothing to
+/// scan. What it is for is the one place an *obviously* empty pattern is wrong: `sparopt`
+/// (0.3.7, `GraphPattern::group`) folds a `Group` over a statically empty input to no rows,
+/// and for a `Group` without keys that is the wrong answer — `COUNT(*)` over nothing is one row
+/// saying 0.
+///
+/// `None` if the store does hold the IRI, which nothing should, and the caller then leaves the
+/// pattern as it was.
+pub(crate) fn nothing(known: &dyn Fn(TermRef<'_>) -> bool) -> Option<GraphPattern> {
+    let iri = NamedNode::new_unchecked("urn:holos:nothing");
+    if known(iri.as_ref().into()) {
+        return None;
+    }
+    Some(GraphPattern::Bgp {
+        patterns: vec![TriplePattern {
+            subject: iri.clone().into(),
+            predicate: iri.clone().into(),
+            object: iri.into(),
+        }],
+    })
+}
+
+/// `inner` joined with a `VALUES` for each variable `expr` pins in it.
+fn pinned_input(
+    expr: &Expression,
+    inner: GraphPattern,
+    known: &dyn Fn(TermRef<'_>) -> bool,
+) -> GraphPattern {
+    let pinned = pins_within(expr, &inner);
+    let mut out = inner;
+    for (variable, candidates) in pinned {
+        let mut rows: Vec<Vec<Option<GroundTerm>>> = Vec::new();
+        for candidate in candidates {
+            let term: oxrdf::Term = candidate.clone().into();
+            if known(term.as_ref()) {
+                rows.push(vec![Some(candidate)]);
+            }
+        }
+        // No candidate the store holds: nothing can match. Not an empty `VALUES`, which
+        // `sparopt` folds upward until it meets a `Group` — and a keyless one, `COUNT(*)`, then
+        // answers no rows where it owes one saying 0. [`nothing`] is just as empty when
+        // evaluated, and is not empty to look at.
+        let pin = if rows.is_empty() {
+            match nothing(known) {
+                Some(pattern) => pattern,
+                None => continue,
+            }
+        } else {
+            GraphPattern::Values {
+                variables: vec![variable],
+                bindings: rows,
+            }
+        };
+        out = GraphPattern::Join {
+            left: Box::new(pin),
+            right: Box::new(out),
+        };
+    }
+    out
 }
 
 /// Each variable `expr` pins that `inner` binds from the store, with every term the pin admits.
@@ -496,9 +539,13 @@ mod tests {
 
     #[test]
     fn an_empty_in_pins_to_nothing() {
-        assert_eq!(
-            pinned("SELECT * { ?s ex:code ?c FILTER(?c IN ()) }"),
-            vec!["?c="]
+        let rewritten = rewrite(
+            &pattern("SELECT * { ?s ex:code ?c FILTER(?c IN ()) }"),
+            &|_| false,
+        );
+        assert!(
+            format!("{rewritten:?}").contains("urn:holos:nothing"),
+            "{rewritten:?}"
         );
     }
 
@@ -549,13 +596,18 @@ mod tests {
     }
 
     #[test]
-    fn a_term_the_store_lacks_is_dropped_not_sent() {
+    fn a_pin_the_store_cannot_satisfy_joins_a_pattern_that_matches_nothing() {
+        // Not an empty VALUES: `sparopt` folds that through a keyless `Group` to no rows.
         let rewritten = rewrite(
             &pattern(r#"SELECT * { ?s ex:p ?v FILTER(?v = "absent") }"#),
             &|_| false,
         );
-        let mut out = Vec::new();
-        collect(&rewritten, &mut out);
-        assert_eq!(out, vec!["?v=".to_string()]);
+        let mut values = Vec::new();
+        collect(&rewritten, &mut values);
+        assert_eq!(values, Vec::<String>::new());
+        assert!(
+            format!("{rewritten:?}").contains("urn:holos:nothing"),
+            "{rewritten:?}"
+        );
     }
 }

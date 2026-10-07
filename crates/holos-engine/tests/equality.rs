@@ -181,6 +181,36 @@ fn a_constant_the_store_never_saw() {
     );
 }
 
+/// `COUNT(*)` over nothing is one row saying 0. An empty `VALUES` from a pin the store cannot
+/// satisfy made it no rows, because `sparopt` folds a statically empty input up through a
+/// keyless `Group`. A short string was spared only because it is inlined into an id, and so
+/// looks present; an IRI or a long string is not.
+#[test]
+fn counting_what_the_store_lacks_is_zero_not_nothing() {
+    for pin in [
+        "?c = ex:absent",
+        r#"?c = "a string long enough that it cannot be inlined into an id""#,
+        "?c IN ()",
+        "?c IN (ex:absent, ex:alsoAbsent)",
+        r#"lang(?c) = "cy" && str(?c) = "Glasgow""#,
+    ] {
+        let rows = agreed(&format!(
+            "SELECT (COUNT(*) AS ?n) WHERE {{ ?s ex:code ?c FILTER({pin}) }}"
+        ));
+        assert_eq!(rows.len(), 1, "{pin}: {rows:?}");
+        // And inside a subquery under a keyless count, where the group is further away.
+        let rows = agreed(&format!(
+            "SELECT (COUNT(*) AS ?n) WHERE {{ {{ SELECT ?s WHERE {{ ?s ex:code ?c FILTER({pin}) }} }} }}"
+        ));
+        assert_eq!(rows.len(), 1, "{pin}, in a subquery: {rows:?}");
+    }
+    // With a key, no input is no groups, and that is what an empty VALUES gives.
+    let rows = agreed(
+        "SELECT ?c (COUNT(*) AS ?n) WHERE { ?s ex:code ?c FILTER(?c = ex:absent) } GROUP BY ?c",
+    );
+    assert_eq!(rows, Vec::<String>::new());
+}
+
 #[test]
 fn an_optional_variable_is_left_to_the_filter() {
     let rows = agreed(

@@ -2388,24 +2388,38 @@ fn estimate(
     bindings: &FxHashMap<&Variable, TermId>,
     stats: Option<&Statistics>,
 ) -> f64 {
-    let resolved = |term: &TermPattern| -> Option<TermId> {
-        match term {
-            TermPattern::Variable(v) => bindings.get(v).copied(),
-            TermPattern::NamedNode(n) => view.store().lookup_term(n.as_ref().into()).ok().flatten(),
-            TermPattern::Literal(l) => view.store().lookup_term(l.as_ref().into()).ok().flatten(),
-            _ => None,
-        }
+    // A constant the store has never seen matches nothing, so the pattern is the cheapest step
+    // there is: taken first, it ends the search. Counting it as a free position instead sorted
+    // it last, behind every scan it was about to make pointless.
+    let mut absent = false;
+    let mut constant = |term: oxrdf::TermRef<'_>| -> Option<TermId> {
+        let id = view.store().lookup_term(term).ok().flatten();
+        absent |= id.is_none();
+        id
+    };
+    let subject = match &triple.subject {
+        TermPattern::Variable(v) => bindings.get(v).copied(),
+        TermPattern::NamedNode(n) => constant(n.as_ref().into()),
+        TermPattern::Literal(l) => constant(l.as_ref().into()),
+        _ => None,
     };
     let predicate = match &triple.predicate {
         spargebra::term::NamedNodePattern::Variable(v) => bindings.get(v).copied(),
-        spargebra::term::NamedNodePattern::NamedNode(n) => {
-            view.store().lookup_term(n.as_ref().into()).ok().flatten()
-        }
+        spargebra::term::NamedNodePattern::NamedNode(n) => constant(n.as_ref().into()),
     };
+    let object = match &triple.object {
+        TermPattern::Variable(v) => bindings.get(v).copied(),
+        TermPattern::NamedNode(n) => constant(n.as_ref().into()),
+        TermPattern::Literal(l) => constant(l.as_ref().into()),
+        _ => None,
+    };
+    if absent {
+        return 0.0;
+    }
     let pattern = holos_stats::Pattern {
-        subject: resolved(&triple.subject),
+        subject,
         predicate,
-        object: resolved(&triple.object),
+        object,
         subject_var: None,
     };
     match stats {
