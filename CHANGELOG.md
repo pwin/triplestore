@@ -72,6 +72,38 @@ and `spareval` over the parsed data with no rewrite — on data built from near 
 `"GB"^^ex:dt`, `ex:GB`, three spellings of 1, `"Glasgow"@en-gb`, `"glasgow"@en`. Pinning numbers,
 or counting an `OPTIONAL` variable as bound, each fails one of them.
 
+### `GROUP BY` takes its input from the bind join
+
+The bind join refuses aggregation, deliberately — SPARQL's aggregates have their own rules for
+errors, unbound values and numeric promotion, and a second `SUM` would be a second place to get
+them wrong — so a query with a `GROUP BY` went to the evaluator whole. On `GeoNames` the
+`GROUP BY` below, once admitted, took **49.5 s** for one group over one row.
+
+`holos_engine::group` now evaluates the pattern *under* the query's group through the bind join
+and puts its solutions in the pattern's place as a `VALUES` table. The grouping, the aggregates,
+`HAVING`, the projection and any ordering stay the evaluator's, unchanged; only where the input
+comes from has moved. A group's input is evaluated independently of everything above it, so
+its solutions computed alone are the same input. Measured on `GeoNames`, CLI, warm:
+
+| | before | after |
+|---|---:|---:|
+| `GROUP BY ?cc` with the Glasgow filters | 49.5 s | **0.24 s** |
+| `COUNT(*)` for a label the store lacks | 58.0 s | **0.25 s** |
+| `IN ("GI", "VA")` grouped, `ORDER BY … LIMIT` | — | 0.24 s |
+
+Only the query's own group, reached from the top through the solution modifiers — a subquery's
+group under `GRAPH ?g` is evaluated against a graph this does not see. Only where the bind join
+takes the input whole and within its row budget. Not where a row holds a blank node, which a
+`VALUES` table cannot carry. An empty input under a keyless group is given as the same
+`urn:holos:nothing` pattern as above, for the same reason.
+
+Fifteen tests answer each aggregate query through it with and without statistics, through the
+evaluator, and by `spareval` over the parsed data: integers, decimals and doubles summed
+together, a string where a number is summed, `COUNT(DISTINCT …)` and `COUNT` over an
+`OPTIONAL`, `HAVING`, `ORDER BY … LIMIT`, an empty input with and without a key, blank nodes,
+and a `UNION` of a pattern with itself. Deduplicating the table, or giving a keyless group an
+empty one, each fails a test.
+
 ### Admission control estimated every basic graph pattern as a cross product
 
 `--max-blocking-rows` refuses an `ORDER BY`, `DISTINCT` or keyed `GROUP BY` whose input is

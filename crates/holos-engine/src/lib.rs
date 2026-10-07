@@ -27,6 +27,7 @@ pub mod entailment;
 pub mod equality;
 pub mod functions;
 pub mod geo_ext;
+pub mod group;
 pub mod memory;
 pub mod options;
 pub mod range;
@@ -661,6 +662,27 @@ impl Engine {
         // an operator that skips the evaluator also skips the evaluator's deadline checks
         // unless it makes its own.
         let deadline = Deadline::guard(options.timeout, options.memory_limit);
+
+        // A `GROUP BY` whose input the bind join can produce gets that input as a `VALUES`
+        // table, and the evaluator then aggregates it without scanning anything. Before the
+        // top-k path, so `GROUP BY … ORDER BY … LIMIT` reaches it too. The same conditions as
+        // the bind join below, for the same reasons.
+        let parsed = if !options.skip_bind_join
+            && !options.touches_dataset()
+            && !options.explain
+            && options.substitutions.is_empty()
+        {
+            let token = deadline.as_ref().map(Deadline::token);
+            crate::group::materialised(
+                view,
+                &parsed,
+                options.reorder_with.as_deref(),
+                token.as_ref(),
+            )?
+            .unwrap_or(parsed)
+        } else {
+            parsed
+        };
 
         // `ORDER BY … LIMIT`, from a heap of the rows it returns rather than a sort of every
         // row. Before the bind join, which declines a sort anyway, and skipped for an
