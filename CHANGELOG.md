@@ -40,6 +40,10 @@ What is pinned, and why each case cannot change an answer:
   language-tagged string, an IRI or another datatype it is false or an error. A number or a
   date is *not* pinned, because `?v = 1` also holds for `"01"^^xsd:integer` and `1.0`.
 * **`sameTerm(?v, c)`**, for any constant.
+* **`?v IN (a, b, …)`**, when every element is one `=` would pin, as a `VALUES` row per distinct
+  element. On `GeoNames`, `?cc IN ("GI", "VA")` over populated places went from **99.4 s** to
+  **0.22 s**, the same eleven places. Deduplicated, because a term listed twice would otherwise
+  match every solution twice.
 * **`lang(?v) = "en" && str(?v) = "Glasgow"`**, the label idiom, as `"Glasgow"@en` and its two
   RDF 1.2 directional forms. The tag is used as the query spelled it, because the comparison is
   a string comparison and case matters. Neither half pins anything alone.

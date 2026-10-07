@@ -41,7 +41,9 @@
 //!    compares strings, and against a language-tagged string, an IRI or any other datatype it
 //!    is false or an error, which a filter treats alike. That is why a number or a date is not
 //!    taken — `?v = 1` also holds for `"01"^^xsd:integer` and `1.0`, and the candidates would
-//!    be unbounded. `sameTerm` is exact for any constant.
+//!    be unbounded. `sameTerm` is exact for any constant. `?v IN (a, b)` is `?v = a || ?v = b`,
+//!    so it admits the listed terms when each is one `=` would pin, deduplicated so that a
+//!    term listed twice still matches once.
 //! 2. **The variable is certainly bound, and by the store.** Joining with `VALUES` keeps a
 //!    solution whose `?v` is *unbound*, where the filter would have rejected it, so `?v` must
 //!    be bound on every path through `P` — and bound by a triple or path pattern, which only
@@ -278,6 +280,31 @@ fn pins(expr: &Expression) -> Vec<(Variable, Vec<GroundTerm>)> {
                     out.push((v.clone(), vec![term]));
                 }
             }
+            // `?v IN (a, b)` is `?v = a || ?v = b`, so it admits exactly the terms each `=`
+            // admits — every element must be one `=` pins, or the whole list is left alone.
+            // Deduplicated, because a candidate listed twice would match a solution twice.
+            Expression::In(a, list) => {
+                if let Expression::Variable(v) = a.as_ref() {
+                    let mut terms: Vec<GroundTerm> = Vec::with_capacity(list.len());
+                    let all = list.iter().all(|element| {
+                        let term = match element {
+                            Expression::NamedNode(n) => GroundTerm::NamedNode(n.clone()),
+                            Expression::Literal(l) => GroundTerm::Literal(l.clone()),
+                            _ => return false,
+                        };
+                        let Some(term) = equal_admits(term) else {
+                            return false;
+                        };
+                        if !terms.contains(&term) {
+                            terms.push(term);
+                        }
+                        true
+                    });
+                    if all {
+                        out.push((v.clone(), terms));
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -450,6 +477,29 @@ mod tests {
             );
             assert_eq!(pinned(&q), Vec::<String>::new(), "{constant}");
         }
+    }
+
+    #[test]
+    fn in_pins_each_listed_term_once() {
+        assert_eq!(
+            pinned(r#"SELECT * { ?s ex:code ?c FILTER(?c IN ("GB", ex:A, "GB")) }"#),
+            vec![r#"?c="GB",<http://example.com/A>"#]
+        );
+    }
+
+    #[test]
+    fn in_with_a_number_or_an_expression_pins_nothing() {
+        assert_unpinned(r#"SELECT * { ?s ex:code ?c FILTER(?c IN ("GB", 1)) }"#);
+        assert_unpinned(r#"SELECT * { ?s ex:code ?c FILTER(?c IN ("GB", ?other)) }"#);
+        assert_unpinned(r#"SELECT * { ?s ex:code ?c FILTER(?c NOT IN ("GB")) }"#);
+    }
+
+    #[test]
+    fn an_empty_in_pins_to_nothing() {
+        assert_eq!(
+            pinned("SELECT * { ?s ex:code ?c FILTER(?c IN ()) }"),
+            vec!["?c="]
+        );
     }
 
     #[test]

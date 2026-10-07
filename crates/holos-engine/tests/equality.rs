@@ -190,6 +190,32 @@ fn an_optional_variable_is_left_to_the_filter() {
 }
 
 #[test]
+fn in_matches_each_listed_term() {
+    let rows = agreed(r#"SELECT ?s WHERE { ?s ex:code ?c FILTER(?c IN ("GB", "gb", ex:GB)) }"#);
+    assert_eq!(rows.len(), 4, "{rows:?}");
+}
+
+#[test]
+fn a_term_listed_twice_still_matches_once() {
+    let rows = agreed(r#"SELECT ?s WHERE { ?s ex:code ?c FILTER(?c IN ("GB", "GB")) }"#);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+}
+
+#[test]
+fn in_with_a_number_still_matches_every_spelling() {
+    let rows = agreed(r#"SELECT ?s WHERE { ?s ex:code ?c FILTER(?c IN ("GB", 1)) }"#);
+    assert_eq!(rows.len(), 5, "{rows:?}");
+}
+
+#[test]
+fn an_empty_in_matches_nothing() {
+    assert_eq!(
+        agreed("SELECT ?s WHERE { ?s ex:code ?c FILTER(?c IN ()) }"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn a_disjunction_is_left_to_the_filter() {
     let rows = agreed(r#"SELECT ?s WHERE { ?s ex:code ?c FILTER(?c = "GB" || ?c = "gb") }"#);
     assert_eq!(rows.len(), 3, "{rows:?}");
