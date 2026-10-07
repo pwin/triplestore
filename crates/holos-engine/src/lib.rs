@@ -24,6 +24,7 @@ pub mod bindjoin;
 pub mod boundjoin;
 pub mod crs;
 pub mod entailment;
+pub mod equality;
 pub mod functions;
 pub mod geo_ext;
 pub mod memory;
@@ -640,6 +641,14 @@ impl Engine {
                 store: view.store(),
             });
         let parsed = crate::topology::rewrite(&parsed, routing);
+        // A filter that pins a variable to a constant, given to the planner as a binding.
+        // Before the reorder, so the statistics see the constant as bound.
+        let parsed = {
+            let store = view.store();
+            let known = |term: oxrdf::TermRef<'_>| matches!(store.lookup_term(term), Ok(Some(_)));
+            let pattern = crate::equality::rewrite(crate::boundjoin::pattern_of(&parsed), &known);
+            crate::boundjoin::with_pattern(&parsed, pattern)
+        };
         // Applied to the parsed algebra, before the evaluator's own optimiser runs on it.
         let parsed = match &options.reorder_with {
             None => parsed,

@@ -3,6 +3,58 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## Unreleased
+
+### A `FILTER` that names a constant is now used as one
+
+```sparql
+?place gn:featureClass gn:P ; gn:countryCode ?code ; gn:alternateName ?name .
+FILTER (?code = "GB")
+FILTER (lang(?name) = "en")
+FILTER (str(?name) = "Glasgow")
+```
+
+Neither planner could use those filters. Both order patterns by what is bound, and a variable
+a filter pins is not bound until some pattern has bound it, so this scanned every
+`gn:countryCode` (13.4 million) and every `gn:alternateName` (16.3 million) in a `GeoNames`
+store and kept one row: **306 s** through the evaluator, **131 s** through the bind join.
+Apache Jena 6.2.0 answers it in under 30 s.
+
+`holos_engine::equality` now gives the planner the constant as a one-row `VALUES` joined into
+the filtered pattern, which binds the variable before anything that mentions it runs. The
+filter itself stays. Measured on the same store, CLI, warm:
+
+| | old | new |
+|---|---:|---:|
+| `--reorder` | 86.3 s | **0.25 s** |
+| no statistics | — | 96.8 s |
+
+So it needs `--reorder`, which `OPERATIONS.md` already recommends. Without statistics the bind
+join ranks a pattern by how many of its positions are free, and once the constants are bound
+`gn:featureClass gn:P` and `gn:alternateName "Glasgow"@en` both have one, so it cannot tell five
+million rows from three.
+
+What is pinned, and why each case cannot change an answer:
+
+* **`?v = <iri>` and `?v = "plain string"`.** `=` holds for exactly that term: against a
+  language-tagged string, an IRI or another datatype it is false or an error. A number or a
+  date is *not* pinned, because `?v = 1` also holds for `"01"^^xsd:integer` and `1.0`.
+* **`sameTerm(?v, c)`**, for any constant.
+* **`lang(?v) = "en" && str(?v) = "Glasgow"`**, the label idiom, as `"Glasgow"@en` and its two
+  RDF 1.2 directional forms. The tag is used as the query spelled it, because the comparison is
+  a string comparison and case matters. Neither half pins anything alone.
+
+Only where a triple or path pattern binds the variable on every path through the filtered
+pattern. Joining with `VALUES` would keep a solution whose variable is unbound, which the
+filter rejects; and a variable bound by the store can only take terms the store holds, which is
+what lets a candidate the store lacks be dropped rather than sent. A variable bound in
+`OPTIONAL`, in one `UNION` branch, or by `VALUES`, `BIND` or `SERVICE` is left to the filter.
+
+Ten tests answer each query three ways — bind join with and without statistics, the evaluator,
+and `spareval` over the parsed data with no rewrite — on data built from near misses: `"GB"@en`,
+`"GB"^^ex:dt`, `ex:GB`, three spellings of 1, `"Glasgow"@en-gb`, `"glasgow"@en`. Pinning numbers,
+or counting an `OPTIONAL` variable as bound, each fails one of them.
+
 ## 0.20.0 — 2026-10-02
 
 ### The bound join: a `SERVICE` is now told what it is being joined against
