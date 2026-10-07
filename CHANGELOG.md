@@ -72,6 +72,30 @@ and `spareval` over the parsed data with no rewrite — on data built from near 
 `"GB"^^ex:dt`, `ex:GB`, three spellings of 1, `"Glasgow"@en-gb`, `"glasgow"@en`. Pinning numbers,
 or counting an `OPTIONAL` variable as bound, each fails one of them.
 
+### `SELECT DISTINCT ?p WHERE { ?s ?p ?o }` from the store's own predicate list
+
+The first question anyone asks of an unfamiliar store read every triple in it to keep a few
+dozen values. Admission saw a `DISTINCT` over the whole store, estimated it at the whole store,
+and sent it down the spilling path; on `GeoNames` that took **114.1 s** from the CLI, and a
+server answering it was found holding 13.7 GB.
+
+The store already keeps an exact, persisted count of every predicate, maintained on every
+write. Those counts are not the answer — they cover every graph, where the query asks about the
+default one, and they ignore policy, so returning them would name predicates used only in a
+named graph or only in triples the session may not read. They are the *candidates*:
+`holos_engine::distinct` confirms each by asking the session's own view for one visible quad
+with that predicate in the default graph, which is one seek per predicate through the same
+policy and graph filter the evaluator scans with. The confirmed list replaces the pattern as a
+`VALUES` table, and the evaluator does the `DISTINCT`, any `ORDER BY ?p` and any `LIMIT`. Before
+admission, which no longer sees a whole-store `DISTINCT`. **0.22 s** on `GeoNames`, the same 56
+predicates.
+
+Only that shape: one pattern, subject and object free and distinct, projecting the predicate
+alone, ordered — if at all — by the predicate. A constant, a repeated variable, a filter, a
+second pattern or `GRAPH` is left as written. Five tests run each query under four policies
+against the evaluator, including a denied predicate and a policy that fails rather than
+filters; returning the whole list unconfirmed, or swallowing the policy's error, fails them.
+
 ### `GROUP BY` takes its input from the bind join
 
 The bind join refuses aggregation, deliberately — SPARQL's aggregates have their own rules for

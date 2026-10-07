@@ -23,6 +23,7 @@ pub mod admit;
 pub mod bindjoin;
 pub mod boundjoin;
 pub mod crs;
+pub mod distinct;
 pub mod entailment;
 pub mod equality;
 pub mod functions;
@@ -586,6 +587,20 @@ impl Engine {
         }
         let parsed = parser.parse_query(query)?;
         crate::validate::check(&parsed)?;
+
+        // `SELECT DISTINCT ?p WHERE { ?s ?p ?o }` from the store's own predicate list, each
+        // confirmed visible through this view. Before admission, which would otherwise see a
+        // `DISTINCT` over the whole store and refuse or spill it. The same conditions as the
+        // bind join, for the same reasons.
+        let parsed = if !options.skip_bind_join
+            && !options.touches_dataset()
+            && !options.explain
+            && options.substitutions.is_empty()
+        {
+            crate::distinct::materialised(view, &parsed)?.unwrap_or(parsed)
+        } else {
+            parsed
+        };
 
         // One decision, made from one estimate: is a blocking operator too big to answer
         // the ordinary way, and if so can it be spilled or must it be refused?
