@@ -55,6 +55,35 @@ and `spareval` over the parsed data with no rewrite — on data built from near 
 `"GB"^^ex:dt`, `ex:GB`, three spellings of 1, `"Glasgow"@en-gb`, `"glasgow"@en`. Pinning numbers,
 or counting an `OPTIONAL` variable as bound, each fails one of them.
 
+### Admission control estimated every basic graph pattern as a cross product
+
+`--max-blocking-rows` refuses an `ORDER BY`, `DISTINCT` or keyed `GROUP BY` whose input is
+estimated over budget. The estimate handed every triple pattern to the statistics as
+unconnected to the others, and the statistics multiply unconnected patterns — so a star of three
+patterns was the product of three scans. On the `GeoNames` store,
+
+```sparql
+SELECT ?cc (COUNT(*) AS ?n) WHERE {
+  ?place gn:featureClass gn:P ; gn:countryCode ?cc ; gn:alternateName ?name .
+  FILTER(?cc = "GB") FILTER(lang(?name) = "en") FILTER(str(?name) = "Glasgow")
+} GROUP BY ?cc
+```
+
+was refused in a millisecond as "an estimated 18446744073709551615 rows" — `u64::MAX`, for one
+group over one row. The characteristic-set estimator the module's documentation credits with a
+q-error of 1.1 was never reached for more than one pattern.
+
+Now patterns sharing a subject variable are estimated as a star; stars and patterns connected by
+any shared variable are a join, estimated as their larger side, the rule `Join` already had; and
+only parts sharing no variable multiply. A constant the store lacks estimates zero rows, where it
+was treated as a wildcard. And a filter's pinned constants count as bound, using the same rule
+as the planner, so what is estimated is the query that will run — which is what admits the query
+above. It now answers, correctly, in 49.5 s: admitted, but still through the evaluator, because
+the bind join does not take aggregation. That is the next gap, not this one.
+
+Five tests with more than one pattern, where there had been none. Taking the larger part where
+unconnected parts should multiply, or ignoring the pins, each fails one.
+
 ## 0.20.0 — 2026-10-02
 
 ### The bound join: a `SERVICE` is now told what it is being joined against

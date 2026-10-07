@@ -85,12 +85,9 @@ pub fn rewrite(pattern: &GraphPattern, known: &dyn Fn(TermRef<'_>) -> bool) -> G
     match pattern {
         GraphPattern::Filter { expr, inner } => {
             let inner = rewrite(inner, known);
-            let bound = store_bound(&inner);
+            let pinned = pins_within(expr, &inner);
             let mut out = inner;
-            for (variable, candidates) in pins(expr) {
-                if !bound.contains(&variable) {
-                    continue;
-                }
+            for (variable, candidates) in pinned {
                 let mut rows: Vec<Vec<Option<GroundTerm>>> = Vec::new();
                 for candidate in candidates {
                     let term: oxrdf::Term = candidate.clone().into();
@@ -179,6 +176,21 @@ pub fn rewrite(pattern: &GraphPattern, known: &dyn Fn(TermRef<'_>) -> bool) -> G
         // Left alone: what a remote endpoint holds is not what `known` answers for.
         GraphPattern::Service { .. } => pattern.clone(),
     }
+}
+
+/// Each variable `expr` pins that `inner` binds from the store, with every term the pin admits.
+///
+/// The rewrite's rule, shared with [`crate::admit`] so that what is estimated as bound is what
+/// the planner will be given as bound.
+pub(crate) fn pins_within(
+    expr: &Expression,
+    inner: &GraphPattern,
+) -> Vec<(Variable, Vec<GroundTerm>)> {
+    let bound = store_bound(inner);
+    pins(expr)
+        .into_iter()
+        .filter(|(variable, _)| bound.contains(variable))
+        .collect()
 }
 
 /// The variables bound on every path through `pattern` by a triple or path pattern.

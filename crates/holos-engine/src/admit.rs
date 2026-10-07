@@ -63,10 +63,12 @@
 //! ceiling. So the budget defaults high — [`DEFAULT_BLOCKING_ROWS`] — and the refusal
 //! carries the estimate so that a wrong one is visible rather than mysterious.
 
+use holos_core::TermId;
 use holos_stats::{Pattern, Statistics};
 use holos_store::Store;
+use rustc_hash::FxHashMap;
 use spargebra::algebra::GraphPattern;
-use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
+use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern, Variable};
 
 /// How many rows a blocking operator may be estimated to buffer before it is refused.
 ///
@@ -135,7 +137,7 @@ impl Context<'_> {
         let mut note = |operator: &'static str, inner: &GraphPattern| {
             found.push(Blocking {
                 operator,
-                rows: self.rows(inner),
+                rows: self.rows(inner, &Pins::default()),
             });
         };
         match pattern {
@@ -163,7 +165,7 @@ impl Context<'_> {
         clippy::wildcard_enum_match_arm,
         reason = "a new spargebra pattern must compile here, and estimating it as zero                   admits the query rather than refusing one nothing understands"
     )]
-    fn rows(&self, pattern: &GraphPattern) -> u64 {
+    fn rows(&self, pattern: &GraphPattern, pins: &Pins) -> u64 {
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -179,41 +181,66 @@ impl Context<'_> {
         }
 
         match pattern {
-            GraphPattern::Bgp { patterns } => {
-                to_rows(self.stats.estimate_bgp(&self.encode(patterns)))
-            }
+            GraphPattern::Bgp { patterns } => to_rows(self.estimate_bgp(patterns, pins)),
 
             // A slice bounds what leaves it, and for `DISTINCT` it bounds the work too: an
             // engine may stop once it has k distinct rows. It does *not* bound an `ORDER BY`
             // under some other operator — only the shape `crate::topk` answers is spared,
             // and `over_budget` steps past that one before walking.
             GraphPattern::Slice { inner, length, .. } => match length {
-                Some(limit) => self.rows(inner).min(*limit as u64),
-                None => self.rows(inner),
+                Some(limit) => self.rows(inner, pins).min(*limit as u64),
+                None => self.rows(inner, pins),
             },
 
             // A join can be anywhere between the smaller side and the product. Taking the
             // larger side is the compromise: it never under-states a scan, and it does not
             // invent a cross product that the estimator has no basis for.
-            GraphPattern::Join { left, right } => self.rows(left).max(self.rows(right)),
+            GraphPattern::Join { left, right } => self.rows(left, pins).max(self.rows(right, pins)),
             // Both can only shrink the left side, never grow it.
             GraphPattern::LeftJoin { left, .. } | GraphPattern::Minus { left, .. } => {
-                self.rows(left)
+                self.rows(left, pins)
             }
-            GraphPattern::Union { left, right } => self.rows(left).saturating_add(self.rows(right)),
+            GraphPattern::Union { left, right } => {
+                self.rows(left, pins).saturating_add(self.rows(right, pins))
+            }
 
-            // A filter can only remove rows, and by how much is not knowable from these
-            // statistics. Passing the input through unchanged keeps the estimate an upper
-            // bound on what the operator above has to hold, which is the question asked.
-            GraphPattern::Filter { inner, .. }
-            | GraphPattern::Graph { inner, .. }
+            // A filter can only remove rows. By how much is not knowable from these statistics
+            // in general, so the input passes through as an upper bound — except where the
+            // filter pins a variable to a constant, which `crate::equality` will hand the
+            // planner as a binding. Estimating it as bound here is estimating the query that
+            // will actually run. A pin whose every candidate is missing from the store matches
+            // nothing at all.
+            GraphPattern::Filter { expr, inner } => {
+                let mut pins = pins.clone();
+                for (variable, candidates) in crate::equality::pins_within(expr, inner) {
+                    let known: Vec<TermId> = candidates
+                        .iter()
+                        .filter_map(|c| {
+                            let term: oxrdf::Term = c.clone().into();
+                            self.store.lookup_term(term.as_ref()).ok().flatten()
+                        })
+                        .collect();
+                    let Some(&id) = known.first() else {
+                        return 0;
+                    };
+                    pins.insert(
+                        variable,
+                        Pin {
+                            id,
+                            candidates: known.len(),
+                        },
+                    );
+                }
+                self.rows(inner, &pins)
+            }
+            GraphPattern::Graph { inner, .. }
             | GraphPattern::Extend { inner, .. }
             | GraphPattern::OrderBy { inner, .. }
             | GraphPattern::Project { inner, .. }
             | GraphPattern::Distinct { inner }
             | GraphPattern::Reduced { inner }
             | GraphPattern::Group { inner, .. }
-            | GraphPattern::Service { inner, .. } => self.rows(inner),
+            | GraphPattern::Service { inner, .. } => self.rows(inner, pins),
 
             // `VALUES` is its own row count.
             GraphPattern::Values { bindings, .. } => bindings.len() as u64,
@@ -225,34 +252,178 @@ impl Context<'_> {
         }
     }
 
-    /// The statistics' view of a basic graph pattern.
-    fn encode(&self, patterns: &[TriplePattern]) -> Vec<Pattern> {
-        let resolve = |t: &TermPattern| match t {
-            TermPattern::NamedNode(n) => self
-                .store
-                .lookup_term(oxrdf::TermRef::NamedNode(n.as_ref()))
-                .ok()
-                .flatten(),
-            TermPattern::Literal(l) => self
-                .store
-                .lookup_term(oxrdf::TermRef::Literal(l.as_ref()))
-                .ok()
-                .flatten(),
-            _ => None,
-        };
-        patterns
-            .iter()
-            .map(|p| {
-                let predicate = match &p.predicate {
-                    NamedNodePattern::NamedNode(n) => {
-                        self.store.lookup_term(n.as_ref().into()).ok().flatten()
+    /// Rows a basic graph pattern is estimated to produce.
+    ///
+    /// Patterns sharing a subject variable are a star, and estimated together by the
+    /// characteristic sets — the estimator measured at a q-error of 1.1. Stars and patterns
+    /// connected by a shared variable are a join, estimated as their larger side, which is the
+    /// rule `Join` gets above and errs the same way. Only parts sharing no variable at all
+    /// multiply, because only those are a cross product.
+    ///
+    /// Every pattern used to be handed over as unconnected, so a three-pattern star was the
+    /// product of three scans: on `GeoNames`, a `GROUP BY` over one row was refused as more
+    /// than 1.8×10¹⁹.
+    fn estimate_bgp(&self, patterns: &[TriplePattern], pins: &Pins) -> f64 {
+        // Each pattern as the statistics see it, with the free variables it joins on. A
+        // constant the store lacks matches nothing, and then neither does the whole pattern.
+        let mut used: Vec<&Variable> = Vec::new();
+        let mut subjects: Vec<String> = Vec::new();
+        let mut encoded: Vec<(Pattern, Vec<String>)> = Vec::with_capacity(patterns.len());
+        for triple in patterns {
+            let mut joins = Vec::new();
+            let subject = match self.position(&triple.subject, pins, &mut used, &mut joins) {
+                Position::Bound(id) => Some(id),
+                Position::Free => None,
+                Position::Absent => return 0.0,
+            };
+            let predicate = match &triple.predicate {
+                NamedNodePattern::NamedNode(n) => {
+                    let Some(id) = self.store.lookup_term(n.as_ref().into()).ok().flatten() else {
+                        return 0.0;
+                    };
+                    Some(id)
+                }
+                NamedNodePattern::Variable(v) => {
+                    if let Some((key, pin)) = pins.get_key_value(v) {
+                        used.push(key);
+                        Some(pin.id)
+                    } else {
+                        joins.push(format!("?{}", v.as_str()));
+                        None
                     }
-                    NamedNodePattern::Variable(_) => None,
-                };
-                Pattern::single(resolve(&p.subject), predicate, resolve(&p.object))
-            })
-            .collect()
+                }
+            };
+            let object = match self.position(&triple.object, pins, &mut used, &mut joins) {
+                Position::Bound(id) => Some(id),
+                Position::Free => None,
+                Position::Absent => return 0.0,
+            };
+            // A free subject with a bound predicate is one point of a star.
+            let star_key = match (&triple.subject, subject, predicate) {
+                (TermPattern::Variable(v), None, Some(_)) => Some(format!("?{}", v.as_str())),
+                (TermPattern::BlankNode(b), None, Some(_)) => Some(format!("_:{}", b.as_str())),
+                _ => None,
+            };
+            let pattern = match (star_key, predicate) {
+                (Some(key), Some(predicate)) => {
+                    let index = subjects.iter().position(|k| *k == key).unwrap_or_else(|| {
+                        subjects.push(key);
+                        subjects.len() - 1
+                    });
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "the number of subject variables in one basic graph pattern"
+                    )]
+                    Pattern::star(index as u32, predicate, object)
+                }
+                _ => Pattern::single(subject, predicate, object),
+            };
+            encoded.push((pattern, joins));
+        }
+
+        // Connected parts, by union-find over shared variables. A star's patterns share their
+        // subject, so a star is always within one part.
+        let mut parent: Vec<usize> = (0..encoded.len()).collect();
+        for a in 0..encoded.len() {
+            for b in (a + 1)..encoded.len() {
+                if encoded[a].1.iter().any(|v| encoded[b].1.contains(v)) {
+                    let (ra, rb) = (root(&mut parent, a), root(&mut parent, b));
+                    parent[rb] = ra;
+                }
+            }
+        }
+
+        // Within a part, the larger of its stars and loose patterns; across parts, the product.
+        let mut largest: FxHashMap<usize, f64> = FxHashMap::default();
+        let mut stars: FxHashMap<(usize, u32), Vec<Pattern>> = FxHashMap::default();
+        for (i, (pattern, _)) in encoded.iter().enumerate() {
+            let part = root(&mut parent, i);
+            let entry = largest.entry(part).or_insert(0.0);
+            match pattern.subject_var {
+                Some(var) => stars.entry((part, var)).or_default().push(*pattern),
+                None => *entry = entry.max(self.stats.estimate_pattern(pattern)),
+            }
+        }
+        for ((part, _), group) in &stars {
+            let entry = largest.entry(*part).or_insert(0.0);
+            *entry = entry.max(self.stats.estimate_star(group));
+        }
+        let mut estimate: f64 = largest.values().product();
+
+        // A pin with several candidates in the store is one estimate per candidate.
+        used.sort_unstable();
+        used.dedup();
+        for variable in used {
+            #[allow(clippy::cast_precision_loss, reason = "a handful of candidate terms")]
+            let candidates = pins[variable].candidates as f64;
+            estimate *= candidates;
+        }
+        estimate
     }
+
+    /// A subject or object as the statistics see it. Free variables and blank nodes are
+    /// recorded in `joins`.
+    fn position<'v>(
+        &self,
+        term: &'v TermPattern,
+        pins: &'v Pins,
+        used: &mut Vec<&'v Variable>,
+        joins: &mut Vec<String>,
+    ) -> Position {
+        let stored = |term: oxrdf::TermRef<'_>| match self.store.lookup_term(term) {
+            Ok(Some(id)) => Position::Bound(id),
+            _ => Position::Absent,
+        };
+        match term {
+            TermPattern::NamedNode(n) => stored(oxrdf::TermRef::NamedNode(n.as_ref())),
+            TermPattern::Literal(l) => stored(oxrdf::TermRef::Literal(l.as_ref())),
+            TermPattern::Variable(v) => {
+                if let Some((key, pin)) = pins.get_key_value(v) {
+                    used.push(key);
+                    Position::Bound(pin.id)
+                } else {
+                    joins.push(format!("?{}", v.as_str()));
+                    Position::Free
+                }
+            }
+            TermPattern::BlankNode(b) => {
+                joins.push(format!("_:{}", b.as_str()));
+                Position::Free
+            }
+            // A quoted triple pattern is not something these statistics describe.
+            TermPattern::Triple(_) => Position::Free,
+        }
+    }
+}
+
+/// A subject or object, as far as estimation is concerned.
+enum Position {
+    /// A store term, or a variable a filter pinned to one.
+    Bound(TermId),
+    /// A variable, a blank node, or a quoted triple pattern.
+    Free,
+    /// A constant the store lacks: the pattern matches nothing.
+    Absent,
+}
+
+/// The representative of `i`'s set, compressing the path on the way.
+fn root(parent: &mut [usize], mut i: usize) -> usize {
+    while parent[i] != i {
+        parent[i] = parent[parent[i]];
+        i = parent[i];
+    }
+    i
+}
+
+/// Variables a filter pins, with the term the estimate uses for each.
+type Pins = FxHashMap<Variable, Pin>;
+
+#[derive(Clone, Copy)]
+struct Pin {
+    /// One candidate the store holds; the estimate is per candidate.
+    id: TermId,
+    /// How many candidates the store holds.
+    candidates: usize,
 }
 
 /// Whether a `Group` has to hold rows, or can accumulate as they go past.

@@ -124,9 +124,8 @@ fn the_refusal_says_which_limit_would_help_an_order_by() {
 #[test]
 fn an_order_by_with_a_limit_is_admitted_whatever_its_input() {
     let engine = engine();
-    let query = format!(
-        "PREFIX ex: <{EX}> SELECT ?s ?o WHERE {{ ?s ex:p ?o }} ORDER BY DESC(?o) LIMIT 4"
-    );
+    let query =
+        format!("PREFIX ex: <{EX}> SELECT ?s ?o WHERE {{ ?s ex:p ?o }} ORDER BY DESC(?o) LIMIT 4");
     assert_eq!(
         run(&engine, &query, &capped(&engine, 10)).expect("four rows is not a runaway"),
         4
@@ -242,8 +241,7 @@ fn the_estimate_is_close_to_the_truth() {
 
     // Budget of zero, so whatever it estimated comes back. Spilling off, so this sort —
     // which has no LIMIT for the heap to use — is measured by its input.
-    let blocking =
-        admit::over_budget(&parsed, &stats, engine.store(), 0, false).expect("blocking");
+    let blocking = admit::over_budget(&parsed, &stats, engine.store(), 0, false).expect("blocking");
     assert_eq!(blocking.operator, "ORDER BY");
     #[allow(
         clippy::cast_precision_loss,
@@ -288,4 +286,97 @@ fn the_query_that_took_down_a_server_is_refused() {
         run(&engine, counted, &capped(&engine, 1)).expect("streams"),
         1
     );
+}
+
+// --- patterns with more than one triple ------------------------------------------------
+//
+// Until these existed every test above had one triple pattern, and the estimator was given
+// each pattern as unconnected to the others — so a star was estimated as the *product* of its
+// patterns. On a `GeoNames` store a three-pattern `GROUP BY` over one row was refused as
+// "an estimated 18446744073709551615 rows".
+
+/// Twenty thousand places: a code, which is "GB" for one in two hundred, and a name.
+fn places() -> Engine {
+    let mut turtle = format!("@prefix ex: <{EX}> .\n");
+    for i in 0..20_000 {
+        let code = if i % 200 == 0 {
+            "GB".to_string()
+        } else {
+            format!("C{}", i % 200)
+        };
+        turtle.push_str(&format!(
+            "ex:place{i} ex:code \"{code}\" ; ex:name \"n{i}\" .\n"
+        ));
+    }
+    let mut engine = Engine::new();
+    engine
+        .bulk_load(turtle.as_bytes(), oxrdfio::RdfFormat::Turtle, None)
+        .expect("load");
+    engine
+}
+
+/// The rare predicate's ten subjects, each with one `ex:p`: ten rows, not two hundred thousand.
+#[test]
+fn a_star_is_estimated_as_a_star_not_a_product() {
+    let engine = engine();
+    let query = format!(
+        "PREFIX ex: <{EX}> SELECT ?s ?o ?x WHERE {{ ?s ex:p ?o ; ex:rare ?x }} ORDER BY ?s"
+    );
+    assert_eq!(
+        run(&engine, &query, &capped(&engine, 1_000)).expect("ten rows is not a runaway"),
+        10
+    );
+}
+
+/// The shape that was refused on `GeoNames`: a filter pins the code, so the input is the
+/// hundred places coded "GB", not all twenty thousand.
+#[test]
+fn a_filter_pinning_a_constant_narrows_the_estimate() {
+    let engine = places();
+    let query = format!(
+        "PREFIX ex: <{EX}> SELECT ?c (COUNT(*) AS ?n) WHERE {{ ?s ex:code ?c ; ex:name ?m FILTER(?c = \"GB\") }} GROUP BY ?c"
+    );
+    assert_eq!(
+        run(&engine, &query, &capped(&engine, 1_000)).expect("a hundred rows"),
+        1
+    );
+}
+
+/// A constant the store has never seen matches nothing, so there is nothing to buffer.
+#[test]
+fn a_constant_the_store_lacks_estimates_nothing() {
+    let engine = places();
+    for query in [
+        format!("PREFIX ex: <{EX}> SELECT ?s ?c WHERE {{ ?s ex:code ?c ; ex:missing ?m }} ORDER BY ?s"),
+        format!("PREFIX ex: <{EX}> SELECT ?s ?c WHERE {{ ?s ex:code ?c FILTER(?c = \"XX\") }} ORDER BY ?s"),
+    ] {
+        assert_eq!(
+            run(&engine, &query, &capped(&engine, 1_000)).expect("matches nothing"),
+            0,
+            "{query}"
+        );
+    }
+}
+
+/// And the other direction: a star that really is large is still refused...
+#[test]
+fn a_large_star_is_still_refused() {
+    let engine = places();
+    let query = format!(
+        "PREFIX ex: <{EX}> SELECT ?s ?c ?m WHERE {{ ?s ex:code ?c ; ex:name ?m }} ORDER BY ?m"
+    );
+    let error = run(&engine, &query, &capped(&engine, 1_000)).expect_err("twenty thousand rows");
+    assert!(error.contains("ORDER BY"), "{error}");
+}
+
+/// ...and so is a real cross product, which two unconnected patterns are.
+#[test]
+fn unconnected_patterns_still_multiply() {
+    let engine = engine();
+    // 20,000 × 10 = 200,000 rows, with no variable shared between the two sides.
+    let query = format!(
+        "PREFIX ex: <{EX}> SELECT ?s ?t WHERE {{ ?s ex:p ?o . ?t ex:rare ?x }} ORDER BY ?s"
+    );
+    let error = run(&engine, &query, &capped(&engine, 100_000)).expect_err("a cross product");
+    assert!(error.contains("ORDER BY"), "{error}");
 }
