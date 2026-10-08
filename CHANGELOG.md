@@ -3,7 +3,7 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## Unreleased
+## 0.21.0 — 2026-10-08
 
 ### A `FILTER` that names a constant is now used as one
 
