@@ -116,6 +116,14 @@ pub fn over_budget(
         .max_by_key(|b| b.rows)
 }
 
+/// Rows `pattern` is estimated to produce: the estimate a blocking operator over it is judged
+/// by, filter pins included. For a caller deciding, before doing any work, whether an input is
+/// small enough to hold.
+#[must_use]
+pub fn input_rows(pattern: &GraphPattern, stats: &Statistics, store: &Store) -> u64 {
+    Context { stats, store }.rows(pattern, &Pins::default())
+}
+
 /// The graph pattern a query evaluates, whatever its result form.
 fn body(query: &spargebra::Query) -> &GraphPattern {
     match query {

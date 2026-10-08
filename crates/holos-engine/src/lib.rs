@@ -693,6 +693,7 @@ impl Engine {
                 &parsed,
                 options.reorder_with.as_deref(),
                 token.as_ref(),
+                crate::group::budget(options.memory_limit),
             )?
             .unwrap_or(parsed)
         } else {

@@ -117,7 +117,11 @@ its solutions computed alone are the same input. Measured on `GeoNames`, CLI, wa
 
 Only the query's own group, reached from the top through the solution modifiers — a subquery's
 group under `GRAPH ?g` is evaluated against a graph this does not see. Only where the bind join
-takes the input whole and within its row budget. Not where a row holds a blank node, which a
+takes the input whole and within a row budget — its own, or less under a memory ceiling, at a
+kilobyte a row — and, with statistics, not at all for an input *estimated* over it. That bound
+is what keeps `COUNT(*)` over a large input streaming through the evaluator with a counter: a
+table built first would have stopped at the ceiling, which the server's memory-ceiling test
+caught before this was released. Not where a row holds a blank node, which a
 `VALUES` table cannot carry. An empty input under a keyless group is given as the same
 `urn:holos:nothing` pattern as above, for the same reason.
 

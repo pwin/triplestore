@@ -131,7 +131,7 @@ fn materialised(body: &str) -> bool {
     let query = SparqlParser::new()
         .parse_query(&format!("{P} {body}"))
         .expect("parse");
-    holos_engine::group::materialised(&view, &query, None, None)
+    holos_engine::group::materialised(&view, &query, None, None, holos_engine::group::budget(None))
         .expect("store")
         .is_some()
 }
@@ -263,5 +263,39 @@ fn duplicate_input_rows_are_counted_twice() {
         rows.iter()
             .any(|r| r.starts_with("d=<http://example.com/d>") && r.contains("\"8\"")),
         "department d's four, twice: {rows:?}"
+    );
+}
+
+/// An input estimated over the budget is not built: with statistics the decision is made
+/// before any work, and the evaluator streams it instead.
+#[test]
+fn an_input_estimated_over_the_budget_is_left_to_the_evaluator() {
+    let engine = engine();
+    let stats = Statistics::build(engine.store(), GraphFilter::Default).expect("statistics");
+    let session = Session::unrestricted(engine.store()).expect("session");
+    let view = engine.view(&session);
+    let query = SparqlParser::new()
+        .parse_query(&format!(
+            "{P} SELECT ?d (COUNT(*) AS ?n) WHERE {{ ?p ex:dept ?d FILTER(?d != ex:e) }} GROUP BY ?d"
+        ))
+        .expect("parse");
+    let with = |budget| {
+        holos_engine::group::materialised(&view, &query, Some(&stats), None, budget)
+            .expect("store")
+            .is_some()
+    };
+    assert!(with(1_000), "eleven rows fit a thousand");
+    assert!(!with(3), "eleven rows do not fit three");
+}
+
+/// A memory ceiling lowers the budget, so the table can never be what trips it.
+#[test]
+fn the_budget_follows_the_memory_ceiling() {
+    use holos_engine::group::{budget, ROW_BYTES};
+    assert_eq!(budget(None), holos_engine::bindjoin::DEFAULT_ROW_BUDGET);
+    assert_eq!(budget(Some(8 * 1024 * 1024)), 8 * 1024 * 1024 / ROW_BYTES);
+    assert_eq!(
+        budget(Some(usize::MAX)),
+        holos_engine::bindjoin::DEFAULT_ROW_BUDGET
     );
 }

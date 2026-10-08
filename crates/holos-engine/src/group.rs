@@ -44,9 +44,12 @@
 //! * **Only the query's own group**, reached from the top through the solution modifiers,
 //!   `HAVING` and the projected expressions. A group in a subquery under `GRAPH ?g` is
 //!   evaluated against a graph this does not know, so subqueries are not reached.
-//! * **Only where the bind join takes `P` whole**, and only while it stays under its row
-//!   budget. Over the budget, or outside the fragment, the query goes to the evaluator exactly
-//!   as before.
+//! * **Only where the bind join takes `P` whole**, and only while it stays under a row budget:
+//!   the bind join's own, or less under a memory ceiling, at a kilobyte a row ([`budget`]).
+//!   With statistics, an input *estimated* over it is not attempted at all. Over the budget,
+//!   or outside the fragment, the query goes to the evaluator exactly as before — which
+//!   matters most for `COUNT(*)` over a large input, which the evaluator streams with a
+//!   counter, and which a table built first would have stopped at the ceiling.
 //! * **No blank nodes in the rows.** A `VALUES` table cannot hold one, so a row with a blank
 //!   node in it sends the query to the evaluator rather than being approximated.
 //! * **An empty input under a keyless aggregate is not an empty `VALUES`.** `COUNT(*)` over
@@ -57,6 +60,20 @@
 //! substitution, and no request for an explanation.
 
 use crate::bindjoin::{Limits, DEFAULT_ROW_BUDGET};
+
+/// What one materialised row is allowed to cost against a memory ceiling, deliberately high:
+/// a row of ids becomes a row of decoded terms, and both are held at once for a moment.
+pub const ROW_BYTES: usize = 1024;
+
+/// How many rows a group's input may be materialised to under `memory_limit` bytes — the bind
+/// join's own budget, or less where a ceiling is set, so that holding the input can never be
+/// what trips the ceiling a streaming `COUNT(*)` would have passed under.
+#[must_use]
+pub fn budget(memory_limit: Option<usize>) -> usize {
+    memory_limit.map_or(DEFAULT_ROW_BUDGET, |bytes| {
+        (bytes / ROW_BYTES).min(DEFAULT_ROW_BUDGET)
+    })
+}
 use crate::view::{DatasetView, ViewError};
 use holos_stats::Statistics;
 use spareval::CancellationToken;
@@ -75,6 +92,7 @@ pub fn materialised(
     query: &Query,
     stats: Option<&Statistics>,
     token: Option<&CancellationToken>,
+    budget: usize,
 ) -> Result<Option<Query>, ViewError> {
     let Query::Select { pattern, .. } = query else {
         return Ok(None);
@@ -82,6 +100,14 @@ pub fn materialised(
     let Some((inner, keyless)) = group_input(pattern) else {
         return Ok(None);
     };
+    // An input estimated over the budget would be built only to be thrown away — and a
+    // `COUNT(*)` over it streams through the evaluator in constant memory, so building it is
+    // the one thing that could make such a query fail.
+    if let Some(stats) = stats {
+        if crate::admit::input_rows(inner, stats, view.store()) > budget as u64 {
+            return Ok(None);
+        }
+    }
 
     let mut variables: Vec<Variable> = Vec::new();
     inner.on_in_scope_variable(|v| {
@@ -101,7 +127,7 @@ pub fn materialised(
         return Ok(None);
     };
     let limits = Limits {
-        rows: Some(DEFAULT_ROW_BUDGET),
+        rows: Some(budget),
         token,
     };
     let Some(rows) = plan.evaluate(view, stats, limits)? else {
