@@ -46,4 +46,6 @@ rocksdb = ["holos-store/rocksdb"]
 
 [dev-dependencies]
 flate2.workspace = true
+# The transient-graph tests validate for real: shapes are what that graph is for.
+holos-shacl.workspace = true
 tempfile.workspace = true

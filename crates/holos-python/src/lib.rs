@@ -646,11 +646,28 @@ impl PyStore {
 
     /// Validate against SHACL shapes loaded from a file.
     ///
+    /// The shapes are read alongside the data but not kept: nothing of them is in the store
+    /// afterwards, so validating twice gives the same answer twice.
+    ///
     /// `engine="adapted"` covers considerably more of SHACL; `engine="native"` reads the
     /// live store and is the only one that can revalidate a delta.
     #[pyo3(signature = (shapes, *, engine="adapted"))]
     fn validate(&self, py: Python<'_>, shapes: &str, engine: &str) -> PyResult<Py<PyAny>> {
-        let (conforms, count) = py.detach(|| validate_against(&self.engine, shapes, engine))?;
+        let (conforms, count, leftovers) =
+            py.detach(|| validate_against(&self.engine, shapes, engine))?;
+        for (graph, quads) in leftovers {
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                &std::ffi::CString::new(format!(
+                    "<{graph}> holds {quads} quads that an earlier Store.validate left in this \
+                     store; they are not read, and store.update(\"DROP GRAPH <{graph}>\") \
+                     removes them"
+                ))
+                .unwrap_or_default(),
+                1,
+            )?;
+        }
         let dict = PyDict::new(py);
         dict.set_item("conforms", conforms)?;
         dict.set_item("violations", count)?;
@@ -791,65 +808,68 @@ fn format_for_path(path: &str) -> PyResult<RdfFormat> {
     })
 }
 
+/// Whether the data conforms, how many results, and the shapes graphs an earlier version
+/// left in the store (see `Engine::leftover_shapes_graphs`).
+type Validated = (bool, usize, Vec<(String, usize)>);
+
 fn validate_against(
     engine: &Arc<RwLock<Option<Engine>>>,
     shapes_path: &str,
     which: &str,
-) -> PyResult<(bool, usize)> {
+) -> PyResult<Validated> {
     use holos_shacl::{CompiledShapes, Options as ShaclOptions};
     use holos_store::GraphFilter;
 
+    if !matches!(which, "adapted" | "vendored" | "native") {
+        return Err(PyValueError::new_err(format!(
+            "unknown engine {which:?}; expected \"native\" or \"adapted\""
+        )));
+    }
     let format = format_for_path(shapes_path)?;
-    let shapes_name = NamedNode::new_unchecked("urn:holos:python:shapes");
     let file = std::fs::File::open(shapes_path)
         .map_err(|e| PyIOError::new_err(format!("opening {shapes_path}: {e}")))?;
 
     let mut outer = engine.write().map_err(|_| poisoned())?;
     let guard = outer.as_mut().ok_or_else(closed)?;
+    let leftovers = guard
+        .leftover_shapes_graphs()
+        .map_err(|e| map_engine_error(&e))?;
 
-    // Shapes go into their own named graph so they are never mistaken for data — the data
-    // graph below stays the default graph, exactly as the command line does it.
-    guard
-        .bulk_load_into_graph(
+    // The shapes are read from the store, with the data's dictionary, but they are not the
+    // store's: they go into a graph that is rolled back when validation ends. They used to
+    // go into `urn:holos:python:shapes` and stay, so every call added another copy of every
+    // blank-node shape and the counts climbed with the data unchanged.
+    let (outcome, _) = guard
+        .with_transient_graph(
             std::io::BufReader::new(file),
             format,
             None,
-            &shapes_name.clone().into(),
+            |store, shapes_graph| -> PyResult<(bool, usize)> {
+                let options = ShaclOptions {
+                    data_graph: GraphFilter::Default,
+                    shapes_graph,
+                };
+                if which == "native" {
+                    let shapes = CompiledShapes::compile(store, options)
+                        .map_err(|e| HolosError::new_err(e.to_string()))?;
+                    let report = shapes
+                        .validate(store)
+                        .map_err(|e| HolosError::new_err(e.to_string()))?;
+                    Ok((report.conforms, report.results.len()))
+                } else {
+                    // "vendored" was the earlier spelling of "adapted"; still accepted.
+                    let mut run = holos_shacl::engine::EngineRun::prepare(store, options)
+                        .map_err(|e| HolosError::new_err(e.to_string()))?;
+                    let report = run
+                        .validate()
+                        .map_err(|e| HolosError::new_err(e.to_string()))?;
+                    Ok((run.conforms(&report), report.results.len()))
+                }
+            },
         )
         .map_err(|e| map_engine_error(&e))?;
-    let shapes_id = guard
-        .store()
-        .lookup_term(shapes_name.as_ref().into())
-        .map_err(|e| map_store_error(&e))?
-        .ok_or_else(|| HolosError::new_err("the shapes graph did not intern"))?;
-
-    let options = ShaclOptions {
-        data_graph: GraphFilter::Default,
-        shapes_graph: GraphFilter::Named(shapes_id),
-    };
-
-    match which {
-        // "vendored" was the earlier spelling; still accepted.
-        "adapted" | "vendored" => {
-            let mut run = holos_shacl::engine::EngineRun::prepare(guard.store(), options)
-                .map_err(|e| HolosError::new_err(e.to_string()))?;
-            let report = run
-                .validate()
-                .map_err(|e| HolosError::new_err(e.to_string()))?;
-            Ok((run.conforms(&report), report.results.len()))
-        }
-        "native" => {
-            let shapes = CompiledShapes::compile(guard.store(), options)
-                .map_err(|e| HolosError::new_err(e.to_string()))?;
-            let report = shapes
-                .validate(guard.store())
-                .map_err(|e| HolosError::new_err(e.to_string()))?;
-            Ok((report.conforms, report.results.len()))
-        }
-        other => Err(PyValueError::new_err(format!(
-            "unknown engine {other:?}; expected \"native\" or \"adapted\""
-        ))),
-    }
+    let (conforms, count) = outcome?;
+    Ok((conforms, count, leftovers))
 }
 
 // ---------------------------------------------------------------------------------

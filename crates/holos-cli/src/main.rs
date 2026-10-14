@@ -134,7 +134,8 @@ POLICY  (omit all of these for unrestricted access)
     --audit                  Print the audit record to stderr after the query.
 
 VALIDATE
-    --shapes <FILE>          Read shapes from a separate file, kept in its own graph.
+    --shapes <FILE>          Read shapes from a separate file. They are read alongside the
+                             data but not kept: nothing of them is in the store afterwards.
                              Without it the shapes are expected in the data itself.
     --report                 Print the validation report as N-Triples.
     --engine <NAME>          native (default) or adapted. 'native' reads the live store and
@@ -860,32 +861,41 @@ fn update_command(engine: &mut Engine, opts: &Options) -> Result<()> {
 /// indexes does not load at all — so the question this command answers is whether that
 /// actually shows up (DESIGN.md §8).
 fn validate(engine: &mut Engine, opts: &Options) -> Result<()> {
-    let shapes_graph = match &opts.shapes {
-        None => GraphFilter::Default,
-        Some(path) => {
-            let format = format_for(path)?;
-            let name = NamedNode::new_unchecked("urn:holos:shapes");
-            let n = engine.bulk_load_into_graph(
-                open_data(path)?,
-                format,
-                opts.base.as_deref(),
-                &name.clone().into(),
-            )?;
-            eprintln!("loaded {n} shape quads from {path}");
-            let id = engine
-                .store()
-                .lookup_term(name.as_ref().into())?
-                .context("shapes graph did not intern")?;
-            GraphFilter::Named(id)
-        }
+    for (graph, quads) in engine.leftover_shapes_graphs()? {
+        eprintln!(
+            "note: <{graph}> holds {quads} quads that an earlier holos validate --shapes left \
+             in this store; they are not read, and `DROP GRAPH <{graph}>` removes them"
+        );
+    }
+    let Some(path) = &opts.shapes else {
+        return validate_in(engine.store(), GraphFilter::Default, opts);
     };
+    // The shapes are read from the store, with the data's dictionary, but they are not the
+    // store's: they go into a graph that is rolled back when validation ends.
+    let format = format_for(path)?;
+    let (outcome, n) = engine.with_transient_graph(
+        open_data(path)?,
+        format,
+        opts.base.as_deref(),
+        |store, shapes_graph| validate_in(store, shapes_graph, opts),
+    )?;
+    eprintln!("read {n} shape quads from {path}, and kept none of them");
+    outcome
+}
 
+/// Validates the default graph against the shapes in `shapes_graph`, printing the summary
+/// and, with `--report`, the report.
+fn validate_in(
+    store: &holos_store::Store,
+    shapes_graph: GraphFilter,
+    opts: &Options,
+) -> Result<()> {
     // "vendored" was the earlier spelling; still accepted so a script written against it
     // does not break on a wording change.
     if matches!(opts.engine.as_deref(), Some("adapted" | "vendored")) {
         let started = std::time::Instant::now();
         let mut run = holos_shacl::engine::EngineRun::prepare(
-            engine.store(),
+            store,
             ShaclOptions {
                 data_graph: GraphFilter::Default,
                 shapes_graph,
@@ -916,7 +926,7 @@ fn validate(engine: &mut Engine, opts: &Options) -> Result<()> {
 
     let started = std::time::Instant::now();
     let shapes = CompiledShapes::compile(
-        engine.store(),
+        store,
         ShaclOptions {
             data_graph: GraphFilter::Default,
             shapes_graph,
@@ -925,7 +935,7 @@ fn validate(engine: &mut Engine, opts: &Options) -> Result<()> {
     let compiled = started.elapsed();
 
     let started = std::time::Instant::now();
-    let report = shapes.validate(engine.store())?;
+    let report = shapes.validate(store)?;
     let validated = started.elapsed();
 
     println!(
@@ -938,7 +948,7 @@ fn validate(engine: &mut Engine, opts: &Options) -> Result<()> {
     println!("results           {}", report.results.len());
 
     if opts.report {
-        let quads = shapes.report_to_quads(engine.store(), &report)?;
+        let quads = shapes.report_to_quads(store, &report)?;
         let mut out = stdout().lock();
         for quad in quads {
             writeln!(

@@ -262,6 +262,110 @@ impl Engine {
         })
     }
 
+    /// Runs `f` with RDF from `reader` loaded into a graph that exists only for the call.
+    ///
+    /// For input that has to be *in* the store to be read alongside its data — a shapes graph,
+    /// which a validator reads with the same dictionary as the data it checks — but that is
+    /// not the store's to keep. `f` is given the store and the graph; whatever it needs from
+    /// the graph it must read before returning, because afterwards the graph is gone.
+    ///
+    /// The graph is loaded inside a commit scope that is always rolled back, whether `f`
+    /// returns or panics. On the persistent backend a scope writes nothing to the database
+    /// until it commits, so the graph, its quads, the dictionary entries its blank nodes would
+    /// have taken, and the store's write generation are all as they were — a crash midway
+    /// leaves nothing behind either, which a load followed by a delete could not promise.
+    ///
+    /// Validation used to load shapes into a named graph of the store it was checking and
+    /// leave them there. Blank nodes are renamed on every load, so each call added another
+    /// copy of every blank-node shape, and the counts climbed 1, 2, 3 with the data
+    /// unchanged; on a persistent store they survived a restart. The graph is named afresh
+    /// for each call, unused by anything in the store, so a graph that an earlier version
+    /// left behind is never read as part of this one. [`Engine::leftover_shapes_graphs`]
+    /// finds those.
+    ///
+    /// Returns what `f` returned, and how many quads were loaded.
+    ///
+    /// # Errors
+    ///
+    /// The input does not parse, the store cannot read it, or a commit scope is already open.
+    pub fn with_transient_graph<R>(
+        &mut self,
+        reader: impl Read + Send,
+        format: RdfFormat,
+        base_iri: Option<&str>,
+        f: impl FnOnce(&Store, holos_store::GraphFilter) -> R,
+    ) -> Result<(R, usize), EngineError> {
+        // A name nothing in the store uses — not even as a term — so the graph starts empty
+        // whatever the store already holds.
+        let mut name = oxrdf::NamedNode::new_unchecked("urn:holos:transient");
+        let mut n = 0u32;
+        while self.store.lookup_term(name.as_ref().into())?.is_some() {
+            n += 1;
+            name = oxrdf::NamedNode::new_unchecked(format!("urn:holos:transient:{n}"));
+        }
+
+        self.store.begin()?;
+        // Everything from here to the rollback is inside the scope, the graph's name
+        // included: registering it first means even an empty input has a graph to name.
+        let prepared = (|| -> Result<(usize, holos_core::TermId), EngineError> {
+            let graph: oxrdf::GraphName = name.clone().into();
+            self.store.insert_named_graph(&graph)?;
+            let loaded = self.bulk_load_into_graph(reader, format, base_iri, &graph)?;
+            let id = self
+                .store
+                .lookup_term(name.as_ref().into())?
+                .ok_or_else(|| {
+                    EngineError::Io(std::io::Error::other("the graph did not intern"))
+                })?;
+            Ok((loaded, id))
+        })();
+        let (loaded, id) = match prepared {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                self.store.rollback();
+                return Err(e);
+            }
+        };
+        let graph = holos_store::GraphFilter::Named(id);
+        let store = &self.store;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(store, graph)));
+        self.store.rollback();
+        match outcome {
+            Ok(value) => Ok((value, loaded)),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// Shapes graphs that validation left in this store before it stopped writing them, with
+    /// how many quads each holds.
+    ///
+    /// `holos validate --shapes` loaded into `urn:holos:shapes` and the Python binding into
+    /// `urn:holos:python:shapes`, and neither removed them. Nothing reads them any more, but
+    /// they are still the store's — in its named graphs, its dumps and its backups — and only
+    /// their owner can say they are not wanted, so they are reported rather than dropped.
+    /// `DROP GRAPH <…>` removes one.
+    ///
+    /// # Errors
+    ///
+    /// The store cannot be read.
+    pub fn leftover_shapes_graphs(&self) -> Result<Vec<(String, usize)>, EngineError> {
+        let mut out = Vec::new();
+        for iri in ["urn:holos:shapes", "urn:holos:python:shapes"] {
+            let name = oxrdf::NamedNode::new_unchecked(iri);
+            let Some(id) = self.store.lookup_term(name.as_ref().into())? else {
+                continue;
+            };
+            let quads = self
+                .store
+                .quads_for_pattern(None, None, None, holos_store::GraphFilter::Named(id))
+                .count();
+            if quads > 0 {
+                out.push((iri.to_string(), quads));
+            }
+        }
+        Ok(out)
+    }
+
     /// Evaluates an already-parsed query.
     ///
     /// Separate from [`Engine::query`] because a conformance harness has to parse first

@@ -381,6 +381,59 @@ ex:PersonShape a sh:NodeShape ;
     assert report["violations"] == 1  # ex:b has no name
 
 
+def _person_files(tmp_path):
+    data = tmp_path / "d.ttl"
+    data.write_text(
+        f"@prefix ex: <{EX}> .\nex:a a ex:Person ; ex:name 'A' .\nex:b a ex:Person .\n"
+    )
+    shapes = tmp_path / "s.ttl"
+    shapes.write_text(
+        f"""@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <{EX}> .
+ex:PersonShape a sh:NodeShape ;
+  sh:targetClass ex:Person ;
+  sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+"""
+    )
+    return data, shapes
+
+
+def test_validating_again_gives_the_same_count_and_leaves_nothing(tmp_path):
+    # validate() loaded the shapes into a named graph of the store and kept them, and the
+    # blank-node property shape was a new copy on every load: 1, 2, 3, ... with the data
+    # unchanged, shared by both engines. A single validate() could not see it.
+    data, shapes = _person_files(tmp_path)
+    s = Store()
+    s.load(str(data))
+    counts = [s.validate(str(shapes), engine=e)["violations"] for e in ("native", "adapted") * 3]
+    assert counts == [1] * 6
+    assert s.named_graphs() == []
+
+
+@pytest.mark.skipif(not holosdb.has_rocksdb(), reason="built without persistence")
+def test_validating_a_persistent_store_leaves_nothing_on_disk(tmp_path):
+    data, shapes = _person_files(tmp_path)
+    path = str(tmp_path / "db")
+    with Store(path) as s:
+        s.load(str(data))
+        size = s.dictionary_size
+        assert [s.validate(str(shapes))["violations"] for _ in range(3)] == [1, 1, 1]
+    with Store(path) as s:
+        assert s.named_graphs() == []
+        assert s.dictionary_size == size
+        assert s.validate(str(shapes))["violations"] == 1
+
+
+def test_shapes_an_earlier_version_left_are_reported_and_not_read(tmp_path):
+    data, shapes = _person_files(tmp_path)
+    s = Store()
+    s.load(str(data))
+    for _ in range(2):  # what two calls of the old validate() left behind
+        s.load(str(shapes), graph="urn:holos:python:shapes")
+    with pytest.warns(UserWarning, match="DROP GRAPH <urn:holos:python:shapes>"):
+        assert s.validate(str(shapes))["violations"] == 1
+
+
 # --------------------------------------------------------------------------- persistence
 
 

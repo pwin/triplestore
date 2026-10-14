@@ -696,6 +696,7 @@ dependencies = [
  "getrandom 0.3.4",
  "holos-core",
  "holos-security",
+ "holos-shacl",
  "holos-stats",
  "holos-store",
  "oxiri",

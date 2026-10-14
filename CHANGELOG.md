@@ -3,6 +3,36 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## Unreleased
+
+### Validation no longer writes its shapes into the store it validates
+
+`holos validate --shapes` loaded the shapes file into `urn:holos:shapes` in the store being
+checked, and Python's `Store.validate` into `urn:holos:python:shapes`, and neither ever removed
+them. A shapes file is mostly blank nodes, and blank nodes are renamed on every load, so each
+call added another copy of every blank-node shape: with one real violation the count went
+**1, 2, 3** on unchanged data — and 1 to 6 from Python, where both engines read the same
+graph. On a persistent store the copies were still there after a restart, in its named graphs,
+its dumps and its backups. Reported from the SemOps manual, whose script validated twice on one
+store and read the doubled count as an engine bug; both engines count correctly.
+
+Shapes now go through `Engine::with_transient_graph`: loaded inside a commit scope that is
+always rolled back, whether validation returns, fails or panics. On disk a scope writes nothing
+until it commits, so the graph, its quads, the dictionary entries its blank nodes would have
+taken and the store's write generation are as they were — a crash midway leaves nothing either,
+which loading and then deleting could not promise. The graph is named afresh each time, so a
+store an earlier version validated is not read twice.
+
+Those leftovers are the owner's to remove, so they are reported rather than dropped: the CLI
+prints a note and Python raises a `UserWarning`, each naming the graph, its size, and
+`DROP GRAPH <urn:holos:shapes>` (or `<urn:holos:python:shapes>`) to remove it.
+
+Seven tests: the count stays at 1 across three runs and the store's quads, named graphs and
+generation are unchanged; the same after a panic and after input that does not parse; an empty
+input; a store already using the name; leftovers reported and not read; and on disk, the same
+after a restart with the dictionary no larger. Committing the scope instead of rolling it back
+fails five of them.
+
 ## 0.21.0 — 2026-10-08
 
 ### A `FILTER` that names a constant is now used as one
