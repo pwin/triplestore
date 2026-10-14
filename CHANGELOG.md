@@ -3,7 +3,7 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## Unreleased
+## 0.21.1 — 2026-10-14
 
 ### Validation no longer writes its shapes into the store it validates
 
