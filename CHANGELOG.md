@@ -3,6 +3,41 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## Unreleased
+
+### `holos validate` exits 1 on a graph that does not conform
+
+It exited 0 whatever the answer, so a CI step built on it passed on the very violations it
+was there to stop. The exit status is now the `shacl` CLI's: **0** the data conforms, **1**
+it does not, **2** validation could not run — a missing file, an unknown `--engine`, or a
+shapes graph the chosen engine refuses, which is an absence of an answer rather than a
+negative one. Every other command keeps the 1 a failure always had. A script that ran
+`holos validate` only for its printed summary, and treated any non-zero status as a crash,
+needs to accept 1.
+
+### `holos validate` defaults to the adapted validator, as Python always did
+
+The CLI defaulted to `native` and `Store.validate` to `adapted`, so the same shapes were
+refused on the command line — exit 2 under the new codes, `sh:sparql` unsupported — and
+validated from Python. Both are `adapted` now, by the rule `holos_shacl::engine` already
+states: the engine for coverage, the native evaluator for the write path, and a one-shot
+validation is not the write path. Measured before choosing: both pass all 98 W3C SHACL Core
+tests and all 138 SHACL 1.2 Core tests, so on Core they agree; beyond it `adapted`
+implements SPARQL constraints, SHACL-AF rules and node expressions where `native` refuses
+them by name. `adapted` copies the graph into memory once, so the largest stores are
+better served by `--engine native`. The holon Boundary keeps `native`, because only it
+revalidates a delta.
+
+An `--engine` value it did not know used to fall through to `native`, so `--engine adaptd`
+ran the other validator without a word. It is refused now, naming the two choices.
+
+Seven tests run the real binary: 0 and 1 on every engine, the default being `adapted`, a
+refused shapes graph at 2 rather than 1, an unknown engine and a missing file at 2, the old
+`vendored` spelling, and another command still failing with 1. Putting the default back to
+`native`, or letting a non-conforming graph exit 0, each fails at least one. One Python
+test pins `Store.validate`'s default to the same engine. The manual's comparison of the two
+validators carried coverage figures from August (92/97 and 127/138); it now carries these.
+
 ## 0.21.1 — 2026-10-14
 
 ### Validation no longer writes its shapes into the store it validates

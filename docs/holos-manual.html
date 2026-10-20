@@ -643,22 +643,31 @@ SELECT ?site WHERE {
 
   <div class="grid g2">
     <div class="cell">
-      <div class="h">adapted &mdash; coverage</div>
+      <div class="h">adapted &mdash; coverage, and the default</div>
       <div class="b">An adaptation of <b>SHACL_Engine</b>, bridged onto the store's own
-      dictionary so it never parses a file. <b>127/138</b> on SHACL 1.2 Core against the
-      native evaluator's 94. Use it for a full validation.</div>
+      dictionary so it never parses a file. SHACL Core plus SPARQL constraints, SHACL-AF
+      rules and node expressions. It copies the graph into memory once, so the largest
+      stores are better served by <code>native</code>. The default for
+      <code>holos validate</code> and Python's <code>Store.validate</code> alike.</div>
     </div>
     <div class="cell">
       <div class="h">native &mdash; incremental</div>
-      <div class="b">Reads the live store directly. Lower coverage (<b>92/97</b> SHACL Core),
-      but it is <b>the only one that can revalidate a delta</b> — the engine's graph is
-      immutable, so it cannot. That capability is what the holon layer needs.</div>
+      <div class="b">Reads the live store directly, with no copy, and is <b>the only one that
+      can revalidate a delta</b> — the engine's graph is immutable, so it cannot. That
+      capability is what the holon layer needs. Beyond SHACL Core it refuses the shapes
+      graph, naming the construct, rather than passing what it cannot check.</div>
     </div>
   </div>
 
-<pre><code>holos validate --data data.nt --shapes shapes.ttl              # native
-holos validate --data data.nt --shapes shapes.ttl --engine adapted
+  <p>Both pass every W3C SHACL Core test: 98/98 on SHACL 1.0 and 138/138 on SHACL 1.2.</p>
+
+<pre><code>holos validate --data data.nt --shapes shapes.ttl              # adapted
+holos validate --data data.nt --shapes shapes.ttl --engine native
 holos validate --data data.nt --shapes shapes.ttl --report     # N-Triples report</code></pre>
+
+  <p><code>holos validate</code> exits <b>0</b> when the data conforms, <b>1</b> when it does
+  not, and <b>2</b> when validation could not run — a missing file, or a shapes graph the
+  chosen engine refuses — so it can gate a CI job directly.</p>
 
   <h3>Incremental revalidation</h3>
   <p>This is the mechanism the whole design rests on. At compile time, a

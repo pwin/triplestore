@@ -424,6 +424,15 @@ def test_validating_a_persistent_store_leaves_nothing_on_disk(tmp_path):
         assert s.validate(str(shapes))["violations"] == 1
 
 
+def test_the_default_engine_is_the_one_holos_validate_uses(tmp_path):
+    # `holos validate` defaulted to the native validator and this to the adapted one, so the
+    # same shapes were refused on the command line and validated here. Both are adapted now.
+    data, shapes = _person_files(tmp_path)
+    s = Store()
+    s.load(str(data))
+    assert s.validate(str(shapes))["engine"] == "adapted"
+
+
 def test_shapes_an_earlier_version_left_are_reported_and_not_read(tmp_path):
     data, shapes = _person_files(tmp_path)
     s = Store()

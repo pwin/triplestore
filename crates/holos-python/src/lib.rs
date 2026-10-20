@@ -650,7 +650,8 @@ impl PyStore {
     /// afterwards, so validating twice gives the same answer twice.
     ///
     /// `engine="adapted"` covers considerably more of SHACL; `engine="native"` reads the
-    /// live store and is the only one that can revalidate a delta.
+    /// live store and is the only one that can revalidate a delta. `adapted` is the default
+    /// here and for `holos validate` alike.
     #[pyo3(signature = (shapes, *, engine="adapted"))]
     fn validate(&self, py: Python<'_>, shapes: &str, engine: &str) -> PyResult<Py<PyAny>> {
         let (conforms, count, leftovers) =

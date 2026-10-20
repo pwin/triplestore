@@ -18,6 +18,7 @@ use spareval::QueryResults;
 use std::fs::File;
 use std::io::{stdout, Read, Write};
 use std::path::Path;
+use std::process::ExitCode;
 
 /// What this binary was built from, for `--version`. See `holos_build`.
 const BUILD: holos_build::Build = holos_build::build!();
@@ -138,27 +139,52 @@ VALIDATE
                              data but not kept: nothing of them is in the store afterwards.
                              Without it the shapes are expected in the data itself.
     --report                 Print the validation report as N-Triples.
-    --engine <NAME>          native (default) or adapted. 'native' reads the live store and
-                             revalidates a delta; 'adapted' bridges the store into the
-                             adapted SHACL_Engine, which covers far more of SHACL.
-                             'native' refuses a shapes graph using anything it cannot check
-                             -- sh:sparql, SHACL-AF rules, node expressions -- rather than
-                             dropping the constraint and reporting conformance. Use
-                             'adapted' for those.
+    --engine <NAME>          adapted (default) or native, the same default as Python's
+                             Store.validate. 'adapted' bridges the store into the adapted
+                             SHACL_Engine: SHACL Core, SPARQL constraints, SHACL-AF rules
+                             and node expressions, at the cost of one pass to copy the
+                             graph into memory. 'native' reads the live store with no copy,
+                             which suits the largest stores, and revalidates a delta; it
+                             refuses a shapes graph using anything beyond Core rather than
+                             dropping the constraint and reporting conformance. Both pass
+                             every W3C SHACL Core test.
+
+                             Exit status, as the `shacl` CLI's: 0 the data conforms, 1 it
+                             does not, 2 validation could not run -- including a shapes
+                             graph the chosen engine refuses.
 
 OPTIONS
     -h, --help               This text.
 ";
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let validating = args.first().is_some_and(|c| c == "validate");
+    match run(&args) {
+        Ok(None | Some(true)) => ExitCode::SUCCESS,
+        // A graph that does not conform is an answer, not an error -- but `holos validate`
+        // used to exit 0 for it, which made it useless as a gate: CI passed on the very
+        // violations it was there to stop. 1 for "ran, and found violations", 2 for "could
+        // not say" -- the same codes as the `shacl` CLI, so a script can branch on either.
+        Ok(Some(false)) => ExitCode::from(1),
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            // Other commands keep 1, the code every failure had before; only `validate`
+            // needs 1 to mean something else.
+            ExitCode::from(if validating { 2 } else { 1 })
+        }
+    }
+}
+
+/// The command line, run. `Some(conforms)` from `validate`, `None` from everything else.
+fn run(args: &[String]) -> Result<Option<bool>> {
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
-        return Ok(());
+        return Ok(None);
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
         println!("holos {BUILD}");
-        return Ok(());
+        return Ok(None);
     }
     let (command, rest) = args.split_first().expect("checked non-empty");
     let opts = Options::parse(rest)?;
@@ -200,17 +226,18 @@ fn main() -> Result<()> {
     }
 
     match command.as_str() {
+        "validate" => return validate(&mut engine, &opts).map(Some),
         "query" => query(&mut engine, &opts),
         "stats" => stats(&engine, &opts),
         "dump" => dump(&engine, &opts),
         "update" => update_command(&mut engine, &opts),
-        "validate" => validate(&mut engine, &opts),
         "backup" => backup(&engine, &opts),
         "compact" => compact(&engine, &opts),
         "entail" => entail(&mut engine, &opts),
         "rules" => rules(&mut engine, &opts),
         other => bail!("unknown command `{other}`\n\n{USAGE}"),
-    }
+    }?;
+    Ok(None)
 }
 
 fn query(engine: &mut Engine, opts: &Options) -> Result<()> {
@@ -860,7 +887,11 @@ fn update_command(engine: &mut Engine, opts: &Options) -> Result<()> {
 /// has to build its own copy of the graph first. A validator that reads the store's
 /// indexes does not load at all — so the question this command answers is whether that
 /// actually shows up (DESIGN.md §8).
-fn validate(engine: &mut Engine, opts: &Options) -> Result<()> {
+/// Whether the data conforms.
+fn validate(engine: &mut Engine, opts: &Options) -> Result<bool> {
+    // Before anything is read: a name it does not know should fail at once, not after the
+    // shapes have been loaded.
+    shacl_engine(opts)?;
     for (graph, quads) in engine.leftover_shapes_graphs()? {
         eprintln!(
             "note: <{graph}> holds {quads} quads that an earlier holos validate --shapes left \
@@ -883,16 +914,42 @@ fn validate(engine: &mut Engine, opts: &Options) -> Result<()> {
     outcome
 }
 
+/// Which validator `--engine` names.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShaclEngine {
+    Adapted,
+    Native,
+}
+
+/// The validator `--engine` asks for, `adapted` when it asks for none.
+///
+/// `adapted` by default, as Python's `Store.validate` has always had it: this is a one-shot
+/// validation, and `holos_shacl::engine`'s own rule is the engine for coverage and the
+/// native evaluator for the write path. Before, the CLI defaulted to `native`, so the same
+/// shapes refused here (exit 2, `sh:sparql` unsupported) validated from Python. Both pass
+/// all 98 SHACL Core and 138 SHACL 1.2 Core tests; they differ beyond Core, where `native`
+/// refuses what `adapted` implements.
+///
+/// A name it does not know is an error. It used to fall through to `native`, so a typo ran
+/// the other validator without a word.
+fn shacl_engine(opts: &Options) -> Result<ShaclEngine> {
+    match opts.engine.as_deref() {
+        // "vendored" was the earlier spelling; still accepted so a script written against
+        // it does not break on a wording change.
+        None | Some("adapted" | "vendored") => Ok(ShaclEngine::Adapted),
+        Some("native") => Ok(ShaclEngine::Native),
+        Some(other) => bail!("unknown --engine `{other}`; expected `adapted` or `native`"),
+    }
+}
+
 /// Validates the default graph against the shapes in `shapes_graph`, printing the summary
 /// and, with `--report`, the report.
 fn validate_in(
     store: &holos_store::Store,
     shapes_graph: GraphFilter,
     opts: &Options,
-) -> Result<()> {
-    // "vendored" was the earlier spelling; still accepted so a script written against it
-    // does not break on a wording change.
-    if matches!(opts.engine.as_deref(), Some("adapted" | "vendored")) {
+) -> Result<bool> {
+    if shacl_engine(opts)? == ShaclEngine::Adapted {
         let started = std::time::Instant::now();
         let mut run = holos_shacl::engine::EngineRun::prepare(
             store,
@@ -912,7 +969,8 @@ fn validate_in(
             prepared.as_secs_f64()
         );
         println!("validated         {:.3}s", validated.as_secs_f64());
-        println!("conforms          {}", run.conforms(&report));
+        let conforms = run.conforms(&report);
+        println!("conforms          {conforms}");
         println!("results           {}", report.results.len());
         if opts.report {
             let graph = run.report_to_oxrdf(&report);
@@ -921,7 +979,7 @@ fn validate_in(
                 writeln!(out, "{triple} .")?;
             }
         }
-        return Ok(());
+        return Ok(conforms);
     }
 
     let started = std::time::Instant::now();
@@ -962,7 +1020,7 @@ fn validate_in(
             )?;
         }
     }
-    Ok(())
+    Ok(report.conforms)
 }
 
 /// The RDF format a file name implies, seeing through a `.gz` suffix.
