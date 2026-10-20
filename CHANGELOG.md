@@ -3,7 +3,7 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## Unreleased
+## 0.22.0 — 2026-10-21
 
 ### `holos validate` exits 1 on a graph that does not conform
 
