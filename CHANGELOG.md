@@ -3,6 +3,21 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## Unreleased
+
+### Python, and everything else calling `Engine::query`, gets the 0.21 rewrites
+
+`Engine::query` was a second pipeline that repeated `query_with`'s steps by hand, and being a
+copy it fell behind. The rewrites added in 0.21 — a filter's constants used as bindings,
+`GROUP BY` from the bind join, `SELECT DISTINCT ?p` from the predicate counts — went into
+`query_with` and not into it, so the Python binding, the holon layer and the CLI's audited
+query path, which all call it, still ran the plans 0.21 had replaced. The release was
+measured through the CLI and the server, which use `query_with`, so nothing showed it.
+
+It now *is* `query_with` with no options, one call, and cannot drift from it again. On two
+million quads, counting one kind of subject with one code pinned by a `FILTER`, from
+Python: **613.7 ms → 49.1 ms**.
+
 ## 0.22.0 — 2026-10-21
 
 ### `holos validate` exits 1 on a graph that does not conform

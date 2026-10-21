@@ -630,38 +630,28 @@ impl Engine {
     }
 
     /// Parses and evaluates a SPARQL 1.2 query against a view.
+    ///
+    /// [`Engine::query_with`] with no options, and nothing else. It used to be a second
+    /// pipeline that repeated the first's steps by hand — parse, check, rewrite, fast paths —
+    /// and, being a copy, it fell behind: the rewrites added in 0.21 (a filter's constants
+    /// used as bindings, `GROUP BY` from the bind join, `SELECT DISTINCT ?p` from the
+    /// predicate counts) reached `query_with` and not this, so the Python binding and the
+    /// holon layer, which both call it, ran the slow plans the CLI and the server no longer
+    /// did. One pipeline cannot drift from itself.
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::query_with`].
     pub fn query<'a>(
         view: &'a DatasetView<'a>,
         query: &str,
         base_iri: Option<&str>,
     ) -> Result<QueryResults<'a>, EngineError> {
-        let mut parser = SparqlParser::new();
+        let mut options = QueryOptions::new();
         if let Some(base) = base_iri {
-            parser = parser
-                .with_base_iri(base)
-                .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
+            options = options.with_base_iri(base);
         }
-        let parsed = parser.parse_query(query)?;
-        // Before anything looks at it. A query the specification calls invalid has no
-        // defined answer, and the answer this would otherwise give looks like data.
-        crate::validate::check(&parsed)?;
-        // Same rewrite as `query_with`: a topology property means the same thing whichever
-        // entry point asked, and answering it on one path only would be worse than not
-        // answering it at all. No spatial routing here — this entry point takes no options,
-        // so there is no index to route to, and the unnarrowed form is the correct one.
-        let parsed = crate::topology::rewrite(&parsed, None);
-        // The same fast paths the other two entry points take. This is the one the Python
-        // binding and the audited CLI path reach, so leaving either out meant the most-used
-        // surface was the only one not getting the operator.
-        if let Some(plan) = crate::topk::plan(&parsed) {
-            if plan.held().is_some() {
-                return Self::top_k(view, &plan, &QueryOptions::default(), None);
-            }
-        }
-        if let Some(results) = Self::try_bind_join(view, &parsed, None, None)? {
-            return Ok(results);
-        }
-        Ok(Self::evaluator().prepare(&parsed).execute(view)?)
+        Self::query_with(view, query, &options).map(|(results, _)| results)
     }
 
     /// Parses and evaluates a query with options.
