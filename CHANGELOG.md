@@ -3,7 +3,7 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## Unreleased
+## 0.23.0 — 2026-10-21
 
 ### Python, and everything else calling `Engine::query`, gets the 0.21 rewrites
 
