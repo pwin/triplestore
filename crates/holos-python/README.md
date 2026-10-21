@@ -50,12 +50,48 @@ compliance report, a reconciliation total — and an error is better than a quie
 ## What else is here
 
 ```python
-store.validate("shapes.ttl")            # SHACL, {'conforms': False, 'violations': 12, ...}
+store.update("INSERT DATA { ... }")     # SPARQL Update: all or nothing, policy applies
+store.validate("shapes.ttl")            # SHACL: conforms, violations, and each result
 store.named_graphs()
+store.predicate_counts()                # [(iri, quads), ...]: the store owner's view
 store.dictionary_size                   # smaller than you expect: see below
 holosdb.geosparql_functions()             # 45 of them
 holosdb.has_rocksdb()                     # what this wheel actually contains
 ```
+
+## Queries a program writes
+
+For a query you did not write yourself — an agent's, a user's, a notebook's — the store can
+bound it and explain it:
+
+```python
+store.query(q, timeout=5.0)        # QueryTimeoutError past five seconds
+store.query(q, limit=100)          # at most 100 rows; the evaluation stops there
+store.query(q, reorder=True)       # plan with statistics over the store
+store.explain(q)                   # the plan, with each operator's row count and time
+```
+
+`reorder=True` is the one to reach for on a large store. It builds statistics once per
+write — or loads the snapshot a persistent store keeps — and plans each query by them, which
+for a badly ordered pattern is the difference between milliseconds and minutes. It also
+lets a `DISTINCT`, `ORDER BY` or `GROUP BY` estimated at over ten million rows be refused at
+once with `QueryRefusedError` rather than discovered by the operating system.
+
+Failures come as types you can tell apart without reading the message: `SyntaxError`,
+`PolicyError`, `QueryRefusedError` and `QueryTimeoutError`, all of them `HolosError`.
+
+`validate()` returns every result, not just a count:
+
+```python
+>>> store.validate("shapes.ttl")["results"][0]
+{'focus': 'http://example.com/bob', 'path': 'http://example.com/name', 'value': None,
+ 'severity': 'Violation', 'component': 'http://www.w3.org/ns/shacl#MinCountConstraintComponent',
+ 'shape': '_:...', 'message': '...'}
+```
+
+There is no memory ceiling here, unlike `holos-server`: enforcing one needs a counting
+allocator, and a library does not install one in somebody else's process. A timeout and
+`reorder=True` cover the runaway cases a ceiling would.
 
 **GeoSPARQL** works through the ordinary query path, so it composes with policy — denying
 `geo:asWKT` makes a spatial join find nothing:
@@ -81,10 +117,6 @@ A `Store` is safe to share across threads, and **the GIL is released** around ev
 and every load. Concurrent readers genuinely run concurrently rather than taking turns.
 
 ## What is not here
-
-`store.update(...)` raises `NotImplementedError`. **There is no SPARQL Update evaluator in
-this build** — raising is deliberate, because silently accepting an update that did nothing
-would be much worse than an error. Writes go through `add()` and `load()`.
 
 Persistence is compiled into the wheel rather than installed beside it, so
 `pip install holosdb[rocksdb]` is accepted but installs nothing; the published wheels already

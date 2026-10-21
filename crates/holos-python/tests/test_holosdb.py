@@ -489,3 +489,98 @@ def test_the_context_manager_does_not_swallow_exceptions():
         with Store() as s:
             s.add(f"{EX}a", f"{EX}p", "x")
             raise ValueError("boom")
+
+
+# --------------------------------------------------------------------------- bounded queries
+#
+# What a program writing its own queries -- an agent, a notebook, a service -- needs from the
+# store: a time limit, a row cap, the planner's statistics, the plan, and failures it can tell
+# apart without reading the message.
+
+
+def _many(tmp_path, n=3000):
+    path = tmp_path / "many.nt"
+    path.write_text(
+        "".join(f"<{EX}s{i}> <{EX}p{i % 7}> <{EX}o{i % 11}> .\n" for i in range(n))
+    )
+    s = Store()
+    s.load(str(path))
+    return s
+
+
+def test_a_query_past_its_timeout_raises_and_is_still_a_holos_error(tmp_path):
+    s = _many(tmp_path)
+    # A three-way cross product of 3000 triples: 2.7e10 combinations, never finished.
+    q = "SELECT (COUNT(*) AS ?n) WHERE { ?a ?b ?c . ?d ?e ?f . ?g ?h ?i }"
+    with pytest.raises(holosdb.QueryTimeoutError):
+        s.query(q, timeout=0.2)
+    assert issubclass(holosdb.QueryTimeoutError, holosdb.HolosError)
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf")])
+def test_a_timeout_must_be_a_positive_number_of_seconds(bad):
+    with pytest.raises(ValueError):
+        Store().query("ASK {}", timeout=bad)
+
+
+def test_limit_caps_rows_and_triples(tmp_path):
+    s = _many(tmp_path, 50)
+    assert len(s.query("SELECT ?s WHERE { ?s ?p ?o }", limit=5)) == 5
+    assert len(s.query("SELECT ?s WHERE { ?s ?p ?o }", limit=500)) == 50
+    assert len(s.query("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }", limit=3)) == 3
+    assert s.query("SELECT ?s WHERE { ?s ?p ?o }", limit=0) == []
+
+
+def test_reorder_changes_the_plan_not_the_answer(tmp_path):
+    s = _many(tmp_path, 400)
+    q = f"SELECT ?s ?o WHERE {{ ?s <{EX}p3> ?o . ?s <{EX}p3> <{EX}o5> }}"
+    plain = sorted(r.to_dict()["s"] for r in s.query(q))
+    assert plain and plain == sorted(r.to_dict()["s"] for r in s.query(q, reorder=True))
+
+
+def test_reorder_refuses_a_group_by_estimated_over_budget_before_running_it(tmp_path):
+    # Two unconnected patterns: 25 million estimated input rows, over the ten-million budget.
+    # Without statistics nothing can be estimated, so only reorder=True refuses it.
+    s = _many(tmp_path, 5000)
+    q = "SELECT ?a (COUNT(*) AS ?n) WHERE { ?a ?b ?c . ?d ?e ?f } GROUP BY ?a"
+    with pytest.raises(holosdb.QueryRefusedError) as refused:
+        s.query(q, reorder=True)
+    assert "GROUP BY" in str(refused.value)
+
+
+def test_explain_returns_the_plan_with_its_row_counts(tmp_path):
+    s = _many(tmp_path, 100)
+    plan = s.explain(f"SELECT ?s WHERE {{ ?s <{EX}p1> ?o }}")
+    assert isinstance(plan, dict) and "plan" in plan
+    text = str(plan)
+    assert "number of results" in text, "measured, not just named"
+
+
+def test_predicate_counts_cover_every_graph(tmp_path):
+    s = Store()
+    s.add(f"{EX}a", f"{EX}p", f"{EX}b")
+    s.add(f"{EX}a", f"{EX}p", f"{EX}c")
+    s.add(f"{EX}a", f"{EX}q", f"{EX}b", graph=f"{EX}g")
+    assert s.predicate_counts() == [(f"{EX}p", 2), (f"{EX}q", 1)]
+
+
+def test_validate_returns_each_result_and_both_engines_agree(tmp_path):
+    data, shapes = _person_files(tmp_path)
+    s = Store()
+    s.load(str(data))
+    by_engine = {}
+    for engine in ("adapted", "native"):
+        report = s.validate(str(shapes), engine=engine)
+        assert len(report["results"]) == report["violations"] == 1
+        (result,) = report["results"]
+        assert result["focus"] == f"{EX}b"
+        assert result["path"] == f"{EX}name"
+        assert result["severity"] == "Violation"
+        assert result["component"].endswith("MinCountConstraintComponent")
+        by_engine[engine] = (result["focus"], result["path"], result["severity"], result["component"])
+    assert by_engine["adapted"] == by_engine["native"]
+
+
+def test_a_syntax_error_is_still_a_syntax_error():
+    with pytest.raises(holosdb.SyntaxError):
+        Store().query("SELECT WHERE")

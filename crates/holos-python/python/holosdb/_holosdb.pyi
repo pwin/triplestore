@@ -7,6 +7,8 @@ __version__: str
 class HolosError(Exception): ...
 class SyntaxError(HolosError): ...
 class PolicyError(HolosError): ...
+class QueryRefusedError(HolosError): ...
+class QueryTimeoutError(HolosError): ...
 
 class Principal:
     def __init__(
@@ -70,7 +72,21 @@ class Store:
         principal: Principal | None = None,
         policy: Policy | None = None,
         base_iri: str | None = None,
+        timeout: float | None = None,
+        reorder: bool = False,
+        limit: int | None = None,
     ) -> list[QuerySolution] | list[str] | bool: ...
+    def explain(
+        self,
+        query: str,
+        *,
+        principal: Principal | None = None,
+        policy: Policy | None = None,
+        base_iri: str | None = None,
+        timeout: float | None = None,
+        reorder: bool = False,
+    ) -> dict[str, Any]: ...
+    def predicate_counts(self) -> list[tuple[str, int]]: ...
     def update(
         self,
         update: str,

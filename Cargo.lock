@@ -739,6 +739,7 @@ dependencies = [
  "holos-engine",
  "holos-security",
  "holos-shacl",
+ "holos-stats",
  "holos-store",
  "oxrdf",
  "oxrdfio",

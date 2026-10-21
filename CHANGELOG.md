@@ -16,7 +16,38 @@ measured through the CLI and the server, which use `query_with`, so nothing show
 
 It now *is* `query_with` with no options, one call, and cannot drift from it again. On two
 million quads, counting one kind of subject with one code pinned by a `FILTER`, from
-Python: **613.7 ms → 49.1 ms**.
+Python: **613.7 ms → 49.1 ms**, and **5.5 ms** with `reorder=True` below.
+
+### The Python binding can bound, plan and explain a query
+
+What a program writing its own queries needs — an agent, a notebook, a service — and what
+the CLI and server already had:
+
+* `query(..., timeout=)` in seconds, raising `QueryTimeoutError`;
+* `query(..., limit=)`, returning at most that many rows or triples and stopping the
+  evaluation there;
+* `query(..., reorder=True)`, planning with statistics built once per write (or loaded from a
+  persistent store's snapshot), which also arms the admission check, so an over-budget
+  `DISTINCT`, `ORDER BY` or `GROUP BY` is refused at once with `QueryRefusedError`;
+* `explain()`, the plan as a dict with each operator's row count and time;
+* `predicate_counts()`, the store's own exact counts — all graphs, no policy, the owner's view;
+* `validate()` now returns each result — focus, path, value, severity, component, shape and
+  message — where it returned only a count, read from the report before the transient shapes
+  graph is rolled back.
+
+Failures are now distinct types: `QueryRefusedError` and `QueryTimeoutError` join
+`SyntaxError` and `PolicyError`, all `HolosError`. A timeout usually fires between two rows,
+after the query has started returning; it used to arrive there as a bare `HolosError`.
+
+There is no memory ceiling in the binding. Enforcing one needs a counting allocator, which
+is the workspace's one piece of `unsafe` and lives in `holos-server`'s binary; a library
+installing one in somebody else's Python process is a different decision, not made here.
+The timeout and the admission check cover the runaway cases a ceiling would.
+
+Twelve Python tests, eleven of which fail on 0.22.0 (the twelfth pins that a syntax error is
+still a `SyntaxError`). Mapping errors raised during iteration generically again fails the
+timeout test. The binding's README said `update()` raised `NotImplementedError`; it has been
+implemented for some time, and the README says so now.
 
 ## 0.22.0 — 2026-10-21
 

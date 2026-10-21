@@ -45,12 +45,28 @@ use std::sync::{Arc, RwLock};
 pyo3::create_exception!(holosdb, HolosError, pyo3::exceptions::PyException);
 pyo3::create_exception!(holosdb, SyntaxError, HolosError);
 pyo3::create_exception!(holosdb, PolicyError, HolosError);
+pyo3::create_exception!(holosdb, QueryRefusedError, HolosError);
+pyo3::create_exception!(holosdb, QueryTimeoutError, HolosError);
 
+/// The engine's own classification ([`holos_engine::EngineError::kind`]), as exception types a
+/// caller can catch separately. A refusal and a timeout are the deployment's limits, not the
+/// query's mistake, and a program -- an agent rewriting its own query, say -- needs to tell
+/// them from a syntax error without reading the message. All are [`HolosError`], so code
+/// that catches that is unaffected.
 fn map_engine_error(e: &holos_engine::EngineError) -> PyErr {
-    match e {
-        holos_engine::EngineError::Syntax(_) => SyntaxError::new_err(e.to_string()),
+    match e.kind().0 {
+        "syntax" => SyntaxError::new_err(e.to_string()),
+        "refused" => QueryRefusedError::new_err(e.to_string()),
+        "timeout" => QueryTimeoutError::new_err(e.to_string()),
+        "policy" => PolicyError::new_err(e.to_string()),
         _ => HolosError::new_err(e.to_string()),
     }
+}
+
+/// An error raised while the results are drained, mapped as one raised before them would be.
+/// A timeout usually lands here, between two rows, and used to arrive as a bare `HolosError`.
+fn map_evaluation_error(e: spareval::QueryEvaluationError) -> PyErr {
+    map_engine_error(&holos_engine::EngineError::from(e))
 }
 
 fn map_store_error(e: &holos_store::StorageError) -> PyErr {
@@ -363,6 +379,10 @@ pub struct PyStore {
     // now" that does not depend on when the garbage collector gets round to it.
     engine: Arc<RwLock<Option<Engine>>>,
     path: Option<String>,
+    // The statistics `reorder=True` plans with, and the write generation they describe. A
+    // write moves the generation and the next reordered query rebuilds them -- or loads them,
+    // since `Statistics::cached` keeps a snapshot with a persistent store.
+    statistics: std::sync::Mutex<Option<(u64, Arc<holos_stats::Statistics>)>>,
 }
 
 /// The error a caller gets for touching a store after closing it.
@@ -384,6 +404,113 @@ impl PyStore {
         let mut guard = self.engine.write().map_err(|_| poisoned())?;
         f(guard.as_mut().ok_or_else(closed)?)
     }
+
+    /// Statistics for the current state of the store, built or loaded at most once per write.
+    fn statistics(&self) -> PyResult<Arc<holos_stats::Statistics>> {
+        let generation = self.with_engine(|e| Ok(e.store().generation()))?;
+        if let Some((cached, stats)) = self.statistics.lock().map_err(|_| poisoned())?.as_ref() {
+            if *cached == generation {
+                return Ok(Arc::clone(stats));
+            }
+        }
+        // Mutable, because a persistent store keeps the snapshot it builds for next time.
+        let (generation, stats) = self.with_engine_mut(|engine| {
+            let stats = holos_stats::Statistics::cached(
+                engine.store_mut(),
+                holos_store::GraphFilter::Default,
+            )
+            .map_err(|e| HolosError::new_err(e.to_string()))?;
+            Ok((engine.store().generation(), Arc::new(stats)))
+        })?;
+        *self.statistics.lock().map_err(|_| poisoned())? = Some((generation, Arc::clone(&stats)));
+        Ok(stats)
+    }
+}
+
+/// The options a query from Python runs with: the command line's, plus what was asked for.
+///
+/// The spill budget and the admission budget are the CLI's defaults, set whether or not
+/// `reorder` is: admission needs statistics to estimate anything, so without them it never
+/// refuses, and with them a `DISTINCT` over most of a large store is refused in a
+/// millisecond -- or spilled -- rather than discovered by the operating system.
+fn query_options(
+    base_iri: Option<&str>,
+    timeout: Option<f64>,
+    statistics: Option<Arc<holos_stats::Statistics>>,
+) -> PyResult<holos_engine::QueryOptions> {
+    let mut options = holos_engine::QueryOptions::new()
+        .spilling(holos_engine::spill::SPILL_BYTES)
+        .with_blocking_budget(holos_engine::admit::DEFAULT_BLOCKING_ROWS);
+    if let Some(base) = base_iri {
+        options = options.with_base_iri(base);
+    }
+    if let Some(seconds) = timeout {
+        if !(seconds.is_finite() && seconds > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "timeout must be a positive number of seconds, not {seconds}"
+            )));
+        }
+        options = options.with_timeout(std::time::Duration::from_secs_f64(seconds));
+    }
+    if let Some(statistics) = statistics {
+        options = options.reordering(statistics);
+    }
+    Ok(options)
+}
+
+/// Results drained into owned values, `limit` rows or triples at most. Stopping early stops
+/// the evaluation too, since the evaluator produces rows only as they are asked for.
+fn collect(results: QueryResults<'_>, limit: Option<usize>) -> PyResult<Collected> {
+    let cap = limit.unwrap_or(usize::MAX);
+    match results {
+        QueryResults::Boolean(value) => Ok(Collected::Boolean(value)),
+        QueryResults::Graph(triples) => {
+            let mut out = Vec::new();
+            for triple in triples.take(cap) {
+                out.push(triple.map_err(map_evaluation_error)?.to_string());
+            }
+            Ok(Collected::Graph(out))
+        }
+        QueryResults::Solutions(solutions) => {
+            let names: Arc<Vec<String>> = Arc::new(
+                solutions
+                    .variables()
+                    .iter()
+                    .map(|v| v.as_str().to_owned())
+                    .collect(),
+            );
+            let mut rows = Vec::new();
+            for solution in solutions.take(cap) {
+                let solution = solution.map_err(map_evaluation_error)?;
+                rows.push(
+                    names
+                        .iter()
+                        .map(|n| solution.get(n.as_str()).cloned())
+                        .collect::<Vec<_>>(),
+                );
+            }
+            Ok(Collected::Solutions(names, rows))
+        }
+    }
+}
+
+/// Every row read and discarded, for an explanation: its statistics are counted as rows go
+/// through the operators, so a plan written before the results are drained shows zeroes.
+fn drain(results: QueryResults<'_>) -> PyResult<()> {
+    match results {
+        QueryResults::Boolean(_) => {}
+        QueryResults::Graph(triples) => {
+            for triple in triples {
+                triple.map_err(map_evaluation_error)?;
+            }
+        }
+        QueryResults::Solutions(solutions) => {
+            for solution in solutions {
+                solution.map_err(map_evaluation_error)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[pymethods]
@@ -398,6 +525,7 @@ impl PyStore {
         Ok(Self {
             engine: Arc::new(RwLock::new(Some(engine))),
             path,
+            statistics: std::sync::Mutex::new(None),
         })
     }
 
@@ -523,7 +651,19 @@ impl PyStore {
     /// With `principal` and/or `policy`, the answer is the one that principal is entitled
     /// to — enforced at the index scan, so it holds for every query shape including
     /// `COUNT` and `FILTER NOT EXISTS`.
-    #[pyo3(signature = (query, *, principal=None, policy=None, base_iri=None))]
+    ///
+    /// `timeout` is in seconds; a query that runs past it raises `QueryTimeoutError`.
+    /// `reorder=True` plans with statistics over the store, built or loaded once per write,
+    /// which on a large store is the difference between seconds and minutes for a badly
+    /// ordered pattern; it also lets a `DISTINCT`, `ORDER BY` or `GROUP BY` estimated over
+    /// ten million rows be refused at once with `QueryRefusedError`. `limit` returns at most
+    /// that many rows or triples and stops the evaluation there: ask for one more than you
+    /// will show to learn whether there were more.
+    ///
+    /// There is no memory ceiling here, unlike `holos-server`: enforcing one needs a counting
+    /// allocator, which this library does not install in someone else's process.
+    #[pyo3(signature = (query, *, principal=None, policy=None, base_iri=None, timeout=None, reorder=false, limit=None))]
+    #[allow(clippy::too_many_arguments)]
     fn query(
         &self,
         py: Python<'_>,
@@ -531,6 +671,9 @@ impl PyStore {
         principal: Option<PyPrincipal>,
         policy: Option<PyPolicy>,
         base_iri: Option<&str>,
+        timeout: Option<f64>,
+        reorder: bool,
+        limit: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         let core_policy = policy.map_or_else(CorePolicy::permit_all, |p| p.inner);
         let core_principal = principal.map_or_else(CorePrincipal::anonymous, |p| p.inner);
@@ -538,47 +681,20 @@ impl PyStore {
         // Evaluate without the GIL, then build Python objects with it. Solutions borrow the
         // view, so they are drained into owned terms inside the detached section.
         let collected = py.detach(|| -> PyResult<Collected> {
+            let statistics = if reorder {
+                Some(self.statistics()?)
+            } else {
+                None
+            };
+            let options = query_options(base_iri, timeout, statistics)?;
             let outer = self.engine.read().map_err(|_| poisoned())?;
             let guard = outer.as_ref().ok_or_else(closed)?;
             let session = CoreSession::open(guard.store(), core_principal, core_policy)
                 .map_err(|e| PolicyError::new_err(e.to_string()))?;
             let view = guard.view(&session);
-            let results =
-                Engine::query(&view, query, base_iri).map_err(|e| map_engine_error(&e))?;
-            match results {
-                QueryResults::Boolean(value) => Ok(Collected::Boolean(value)),
-                QueryResults::Graph(triples) => {
-                    let mut out = Vec::new();
-                    for triple in triples {
-                        out.push(
-                            triple
-                                .map_err(|e| HolosError::new_err(e.to_string()))?
-                                .to_string(),
-                        );
-                    }
-                    Ok(Collected::Graph(out))
-                }
-                QueryResults::Solutions(solutions) => {
-                    let names: Arc<Vec<String>> = Arc::new(
-                        solutions
-                            .variables()
-                            .iter()
-                            .map(|v| v.as_str().to_owned())
-                            .collect(),
-                    );
-                    let mut rows = Vec::new();
-                    for solution in solutions {
-                        let solution = solution.map_err(|e| HolosError::new_err(e.to_string()))?;
-                        rows.push(
-                            names
-                                .iter()
-                                .map(|n| solution.get(n.as_str()).cloned())
-                                .collect::<Vec<_>>(),
-                        );
-                    }
-                    Ok(Collected::Solutions(names, rows))
-                }
-            }
+            let (results, _) =
+                Engine::query_with(&view, query, &options).map_err(|e| map_engine_error(&e))?;
+            collect(results, limit)
         })?;
 
         match collected {
@@ -598,6 +714,75 @@ impl PyStore {
                 Ok(list.into_any().unbind())
             }
         }
+    }
+
+    /// The plan a query runs with, as a dict, with each operator's row count and time.
+    ///
+    /// The query is run to the end and its results discarded, because the counts are taken as
+    /// rows pass through the operators. The plan is the evaluator's: a query the store answers
+    /// by a faster route — the index join, or `SELECT DISTINCT ?p` from the predicate counts —
+    /// is shown as the evaluator would run it, which is the plan to read when it is slow.
+    /// The same arguments as `query`, without `limit`.
+    #[pyo3(signature = (query, *, principal=None, policy=None, base_iri=None, timeout=None, reorder=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn explain(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        principal: Option<PyPrincipal>,
+        policy: Option<PyPolicy>,
+        base_iri: Option<&str>,
+        timeout: Option<f64>,
+        reorder: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let core_policy = policy.map_or_else(CorePolicy::permit_all, |p| p.inner);
+        let core_principal = principal.map_or_else(CorePrincipal::anonymous, |p| p.inner);
+        let json = py.detach(|| -> PyResult<String> {
+            let statistics = if reorder {
+                Some(self.statistics()?)
+            } else {
+                None
+            };
+            let options = query_options(base_iri, timeout, statistics)?.explaining();
+            let outer = self.engine.read().map_err(|_| poisoned())?;
+            let guard = outer.as_ref().ok_or_else(closed)?;
+            let session = CoreSession::open(guard.store(), core_principal, core_policy)
+                .map_err(|e| PolicyError::new_err(e.to_string()))?;
+            let view = guard.view(&session);
+            let (results, explanation) =
+                Engine::query_with(&view, query, &options).map_err(|e| map_engine_error(&e))?;
+            drain(results)?;
+            let explanation = explanation
+                .ok_or_else(|| HolosError::new_err("the engine returned no plan for this query"))?;
+            let mut out = Vec::new();
+            explanation
+                .write_in_json(&mut out)
+                .map_err(|e| HolosError::new_err(e.to_string()))?;
+            String::from_utf8(out).map_err(|e| HolosError::new_err(e.to_string()))
+        })?;
+        Ok(py.import("json")?.call_method1("loads", (json,))?.unbind())
+    }
+
+    /// Every predicate in the store and how many quads use it, most used first.
+    ///
+    /// The store's own counts, kept exactly on every write, so this costs nothing however
+    /// large the store is. They cover **every graph** and **ignore policy**: they are the
+    /// store owner's view. For what a given principal can see, ask
+    /// `SELECT DISTINCT ?p WHERE { ?s ?p ?o }` with that principal, which the store also
+    /// answers from these counts, confirming each predicate visible before naming it.
+    fn predicate_counts(&self) -> PyResult<Vec<(String, u64)>> {
+        self.with_engine(|engine| {
+            let store = engine.store();
+            let mut out = Vec::new();
+            for (id, count) in store.predicate_histogram() {
+                if let Some(Term::NamedNode(predicate)) =
+                    store.decode_term(id).map_err(|e| map_store_error(&e))?
+                {
+                    out.push((predicate.as_str().to_owned(), count));
+                }
+            }
+            Ok(out)
+        })
     }
 
     /// Applies a SPARQL 1.1 update.
@@ -649,12 +834,18 @@ impl PyStore {
     /// The shapes are read alongside the data but not kept: nothing of them is in the store
     /// afterwards, so validating twice gives the same answer twice.
     ///
+    /// Returns `conforms`, `violations` (how many results, of every severity), `engine`, and
+    /// `results`: one dict per result with `focus`, `path`, `value`, `severity`
+    /// (`Violation`, `Warning` or `Info`), `component`, `shape` and `message`, each `None`
+    /// where the report gives none. IRIs come as themselves, blank nodes as `_:label`, and a
+    /// value literal in N-Triples form so that its datatype survives.
+    ///
     /// `engine="adapted"` covers considerably more of SHACL; `engine="native"` reads the
     /// live store and is the only one that can revalidate a delta. `adapted` is the default
     /// here and for `holos validate` alike.
     #[pyo3(signature = (shapes, *, engine="adapted"))]
     fn validate(&self, py: Python<'_>, shapes: &str, engine: &str) -> PyResult<Py<PyAny>> {
-        let (conforms, count, leftovers) =
+        let (conforms, count, rows, leftovers) =
             py.detach(|| validate_against(&self.engine, shapes, engine))?;
         for (graph, quads) in leftovers {
             PyErr::warn(
@@ -673,6 +864,19 @@ impl PyStore {
         dict.set_item("conforms", conforms)?;
         dict.set_item("violations", count)?;
         dict.set_item("engine", engine)?;
+        let results = PyList::empty(py);
+        for row in rows {
+            let result = PyDict::new(py);
+            result.set_item("focus", row.focus)?;
+            result.set_item("path", row.path)?;
+            result.set_item("value", row.value)?;
+            result.set_item("severity", row.severity)?;
+            result.set_item("component", row.component)?;
+            result.set_item("shape", row.shape)?;
+            result.set_item("message", row.message)?;
+            results.append(result)?;
+        }
+        dict.set_item("results", results)?;
         Ok(dict.into_any().unbind())
     }
 
@@ -809,9 +1013,87 @@ fn format_for_path(path: &str) -> PyResult<RdfFormat> {
     })
 }
 
-/// Whether the data conforms, how many results, and the shapes graphs an earlier version
-/// left in the store (see `Engine::leftover_shapes_graphs`).
-type Validated = (bool, usize, Vec<(String, usize)>);
+/// One validation result, as text a caller can show or act on.
+#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct ResultRow {
+    focus: Option<String>,
+    path: Option<String>,
+    component: Option<String>,
+    severity: Option<String>,
+    value: Option<String>,
+    shape: Option<String>,
+    message: Option<String>,
+}
+
+/// An IRI as itself, a blank node as `_:label`, a literal in its N-Triples form so that its
+/// datatype or language survives.
+fn term_text(term: &Term) -> String {
+    match term {
+        Term::NamedNode(n) => n.as_str().to_owned(),
+        Term::BlankNode(b) => format!("_:{}", b.as_str()),
+        other => other.to_string(),
+    }
+}
+
+/// The results of a SHACL validation report, read the same way from either engine's report:
+/// every `sh:result` and the properties the specification gives one. A path that is not a
+/// single predicate comes back as the blank node that heads it.
+fn results_from_report(triples: impl IntoIterator<Item = oxrdf::Triple>) -> Vec<ResultRow> {
+    use std::collections::HashMap;
+    const SH: &str = "http://www.w3.org/ns/shacl#";
+    let result_predicate = format!("{SH}result");
+    let mut by_subject: HashMap<NamedOrBlankNode, Vec<(String, Term)>> = HashMap::new();
+    let mut results: Vec<NamedOrBlankNode> = Vec::new();
+    for triple in triples {
+        let predicate = triple.predicate.as_str().to_owned();
+        if predicate == result_predicate {
+            match &triple.object {
+                Term::NamedNode(n) => results.push(n.clone().into()),
+                Term::BlankNode(b) => results.push(b.clone().into()),
+                _ => {}
+            }
+        }
+        by_subject
+            .entry(triple.subject)
+            .or_default()
+            .push((predicate, triple.object));
+    }
+    let mut rows: Vec<ResultRow> = results
+        .iter()
+        .map(|result| {
+            let properties = by_subject
+                .get(result)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let get = |local: &str| {
+                let iri = format!("{SH}{local}");
+                properties.iter().find(|(p, _)| *p == iri).map(|(_, o)| o)
+            };
+            ResultRow {
+                focus: get("focusNode").map(term_text),
+                path: get("resultPath").map(term_text),
+                value: get("value").map(term_text),
+                severity: get("resultSeverity").map(|t| {
+                    let text = term_text(t);
+                    text.strip_prefix(SH)
+                        .map_or_else(|| text.clone(), str::to_owned)
+                }),
+                component: get("sourceConstraintComponent").map(term_text),
+                shape: get("sourceShape").map(term_text),
+                message: get("resultMessage").map(|t| match t {
+                    Term::Literal(l) => l.value().to_owned(),
+                    other => term_text(other),
+                }),
+            }
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// Whether the data conforms, how many results, each result, and the shapes graphs an earlier
+/// version left in the store (see `Engine::leftover_shapes_graphs`).
+type Validated = (bool, usize, Vec<ResultRow>, Vec<(String, usize)>);
 
 fn validate_against(
     engine: &Arc<RwLock<Option<Engine>>>,
@@ -845,7 +1127,7 @@ fn validate_against(
             std::io::BufReader::new(file),
             format,
             None,
-            |store, shapes_graph| -> PyResult<(bool, usize)> {
+            |store, shapes_graph| -> PyResult<(bool, usize, Vec<ResultRow>)> {
                 let options = ShaclOptions {
                     data_graph: GraphFilter::Default,
                     shapes_graph,
@@ -856,7 +1138,13 @@ fn validate_against(
                     let report = shapes
                         .validate(store)
                         .map_err(|e| HolosError::new_err(e.to_string()))?;
-                    Ok((report.conforms, report.results.len()))
+                    // Read now: a result can name a shape's blank node, which exists only
+                    // until the transient graph is rolled back.
+                    let quads = shapes
+                        .report_to_quads(store, &report)
+                        .map_err(|e| HolosError::new_err(e.to_string()))?;
+                    let rows = results_from_report(quads.into_iter().map(oxrdf::Triple::from));
+                    Ok((report.conforms, report.results.len(), rows))
                 } else {
                     // "vendored" was the earlier spelling of "adapted"; still accepted.
                     let mut run = holos_shacl::engine::EngineRun::prepare(store, options)
@@ -864,13 +1152,15 @@ fn validate_against(
                     let report = run
                         .validate()
                         .map_err(|e| HolosError::new_err(e.to_string()))?;
-                    Ok((run.conforms(&report), report.results.len()))
+                    let graph = run.report_to_oxrdf(&report);
+                    let rows = results_from_report(graph.iter().map(oxrdf::TripleRef::into_owned));
+                    Ok((run.conforms(&report), report.results.len(), rows))
                 }
             },
         )
         .map_err(|e| map_engine_error(&e))?;
-    let (conforms, count) = outcome?;
-    Ok((conforms, count, leftovers))
+    let (conforms, count, rows) = outcome?;
+    Ok((conforms, count, rows, leftovers))
 }
 
 // ---------------------------------------------------------------------------------
@@ -921,6 +1211,14 @@ fn _holosdb(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("HolosError", module.py().get_type::<HolosError>())?;
     module.add("SyntaxError", module.py().get_type::<SyntaxError>())?;
     module.add("PolicyError", module.py().get_type::<PolicyError>())?;
+    module.add(
+        "QueryRefusedError",
+        module.py().get_type::<QueryRefusedError>(),
+    )?;
+    module.add(
+        "QueryTimeoutError",
+        module.py().get_type::<QueryTimeoutError>(),
+    )?;
     module.add_class::<PyStore>()?;
     module.add_class::<PyPrincipal>()?;
     module.add_class::<PyPolicy>()?;

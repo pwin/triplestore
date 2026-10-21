@@ -18,6 +18,7 @@ holos-store.workspace = true
 holos-security.workspace = true
 holos-engine.workspace = true
 holos-shacl.workspace = true
+holos-stats.workspace = true
 oxrdf.workspace = true
 oxrdfio.workspace = true
 sparesults.workspace = true
