@@ -835,7 +835,8 @@ impl<'a> Compiler<'a> {
             };
             if !Self::KNOWN.contains(&local) {
                 return Err(ShaclError::Unsupported(format!(
-                    "sh:{local} is not implemented by the incremental evaluator; validate                      through holos_shacl::engine::EngineRun instead"
+                    "sh:{local} is not implemented by the native evaluator; validate with the \
+                     adapted engine instead"
                 )));
             }
         }

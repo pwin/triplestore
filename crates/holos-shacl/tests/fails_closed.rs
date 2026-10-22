@@ -54,6 +54,13 @@ fn a_sparql_constraint_is_refused_rather_than_dropped() {
                 what.contains("sh:sparql"),
                 "the refusal should name the construct, got: {what}"
             );
+            // The message reaches a Python caller and the CLI as it is, so it names the
+            // engine they can choose. A lost line continuation once left a run of spaces in
+            // it, and the Rust type it named instead is not something either can call.
+            assert!(
+                what.contains("adapted engine") && !what.contains("  "),
+                "the refusal should say what to use instead, in one line, got: {what}"
+            );
         }
         Err(e) => panic!("expected Unsupported, got {e}"),
         Ok(shapes) => {
