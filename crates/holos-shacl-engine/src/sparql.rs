@@ -233,8 +233,10 @@ pub fn prefix_header(node: TermId, shapes: &Graph, store: &TermStore, vocab: &Vo
 }
 /// Rejects queries SHACL declares incompatible with pre-binding.
 ///
-/// The spec rules out `VALUES`, `MINUS` and `SERVICE` outright, and forbids
-/// re-binding a pre-bound variable with `BIND`. These are failures rather than
+/// SHACL 5.3.2 rules out `VALUES`, `MINUS` and `SERVICE` outright, forbids
+/// re-binding a pre-bound variable with `BIND ... AS`, and requires a
+/// subquery to return the pre-bound variables -- narrowed here to a subquery
+/// that uses `$this`, see [`unsupported_in`]. These are failures rather than
 /// violations: the shape cannot be evaluated at all, so answering either way
 /// would be a guess.
 fn reject_unsupported(query: &Query, bindings: &[(&str, Term)]) -> Result<()> {
@@ -245,7 +247,7 @@ fn reject_unsupported(query: &Query, bindings: &[(&str, Term)]) -> Result<()> {
         _ => return Ok(()),
     };
     let names: Vec<&str> = bindings.iter().map(|(n, _)| *n).collect();
-    if let Some(what) = unsupported_in(pattern, &names) {
+    if let Some(what) = unsupported_in(pattern, &names, true) {
         return Err(Error::Sparql(format!(
             "{what} cannot be combined with SHACL pre-binding"
         )));
@@ -349,9 +351,15 @@ fn predicates_in_expression(e: &spargebra::algebra::Expression, out: &mut Vec<Na
         E::Coalesce(xs) | E::FunctionCall(_, xs) => all(xs, out),
     }
 }
-fn unsupported_in(p: &spargebra::algebra::GraphPattern, prebound: &[&str]) -> Option<&'static str> {
+/// `outermost` is true until the query's own projection has been passed;
+/// any `Project` met after that is a subquery.
+fn unsupported_in(
+    p: &spargebra::algebra::GraphPattern,
+    prebound: &[&str],
+    outermost: bool,
+) -> Option<&'static str> {
     use spargebra::algebra::GraphPattern as G;
-    let recurse = |x: &G| unsupported_in(x, prebound);
+    let recurse = |x: &G| unsupported_in(x, prebound, false);
     match p {
         G::Values { .. } => Some("VALUES"),
         G::Minus { .. } => Some("MINUS"),
@@ -364,19 +372,73 @@ fn unsupported_in(p: &spargebra::algebra::GraphPattern, prebound: &[&str]) -> Op
             }
             recurse(inner)
         }
+        G::Project { inner, variables } => {
+            // A subquery that uses `$this` must also return it. Upstream
+            // d7769bf, narrowed in 1944802.
+            //
+            // SHACL 5.3.2 states this without the first clause: every
+            // subquery must project every potentially pre-bound variable.
+            // That rule is written for an engine that pre-binds by *initial
+            // bindings*, where a value reaches a subquery only by being
+            // projected out of it. This engine pre-binds by *substitution*,
+            // which replaces the variable wherever it occurs before the query
+            // runs, so a subquery with no occurrence of `$this` has nothing to
+            // carry and is perfectly well defined.
+            //
+            // Applying the letter of the rule refuses ordinary shapes. A
+            // graph-wide aggregate -- `{ SELECT (COUNT(?node) AS ?total) WHERE
+            // { ?node ?p ?o } }` joined against a pattern on `$this` -- cannot
+            // project `$this`: it does not mention it, and a substituted
+            // constant cannot be projected at all. Three such checks in the
+            // consolidated ontology suite broke on the stricter reading.
+            //
+            // The cost is the suite's `unsupported-sparql-004`, whose
+            // subquery projects other variables and never mentions `$this`;
+            // it expects a failure and gets an answer. `pre-binding-006`
+            // fails as it should: its subquery filters on `$this` and
+            // projects nothing.
+            if !outermost
+                && prebound.contains(&"this")
+                && !variables.iter().any(|v| v.as_str() == "this")
+                && mentions_variable(inner, "this")
+            {
+                return Some("a subquery that uses $this without returning it");
+            }
+            recurse(inner)
+        }
         G::Join { left, right } | G::Union { left, right } | G::LeftJoin { left, right, .. } => {
             recurse(left).or_else(|| recurse(right))
         }
-        G::Filter { inner, .. }
-        | G::Graph { inner, .. }
-        | G::OrderBy { inner, .. }
-        | G::Project { inner, .. }
+        // LIMIT, DISTINCT and ORDER BY sit above the query's own projection,
+        // so passing through them does not leave the outermost level.
+        G::OrderBy { inner, .. }
         | G::Distinct { inner }
         | G::Reduced { inner }
-        | G::Slice { inner, .. }
-        | G::Group { inner, .. } => recurse(inner),
+        | G::Slice { inner, .. } => unsupported_in(inner, prebound, outermost),
+        G::Filter { inner, .. } | G::Graph { inner, .. } | G::Group { inner, .. } => recurse(inner),
         _ => None,
     }
+}
+
+/// Whether `name` occurs anywhere in `p`, at any depth.
+///
+/// Used to tell a subquery that needs a pre-bound variable from one that is
+/// independent of it. Walks the pattern rather than the folded query, because
+/// the question is about occurrences inside this branch alone.
+fn mentions_variable(p: &spargebra::algebra::GraphPattern, name: &str) -> bool {
+    // `Cell` because `fold_pattern` takes an `Fn`, as `mentions` below does
+    // for the same reason.
+    let found = std::cell::Cell::new(false);
+    let probe = |v: &Variable| -> Option<Term> {
+        if v.as_str() == name {
+            found.set(true);
+        }
+        None
+    };
+    // `fold_pattern` visits every variable position the substitution would,
+    // which is exactly the set of places an occurrence could matter.
+    fold_pattern(p, &probe);
+    found.get()
 }
 /// Pre-bound variables and the terms they stand for.
 type Binding<'a> = Vec<(&'a str, Term)>;
@@ -1138,5 +1200,50 @@ mod tests {
         let q = parse_query("", "SELECT ?s WHERE { BIND(CONCAT(\"a\", \"b\") AS ?s) }").unwrap();
         let rows = run(&q, &[], &g, &store).unwrap();
         assert_eq!(rows[0]["s"].to_string(), "\"ab\"");
+    }
+
+    #[test]
+    fn a_subquery_must_return_this_only_if_it_uses_it() {
+        // The narrowed SHACL 5.3.2 rule. A graph-wide aggregate never mentions
+        // `$this` and is joined against a pattern that does: the consolidated
+        // ontology suite has three such checks, and the letter of the rule
+        // refused all of them. A subquery that filters on `$this` and does not
+        // return it is the suite's pre-binding-006, and stays refused.
+        let (mut store, _, g) = fixture(DATA);
+        let a = store.named_node("http://ex/a");
+        let this = [("this", to_term(a, &store))];
+
+        let aggregate = parse_query(
+            "",
+            "SELECT $this ?total WHERE {
+                $this <http://ex/p> ?o .
+                { SELECT (COUNT(?node) AS ?total) WHERE { ?node <http://ex/p> ?x } }
+            }",
+        )
+        .unwrap();
+        let rows = run(&aggregate, &this, &g, &store).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0]["total"].to_string(),
+            r#""3"^^<http://www.w3.org/2001/XMLSchema#integer>"#
+        );
+
+        let uses_this = parse_query(
+            "",
+            "SELECT $this WHERE { { SELECT * WHERE { FILTER ($this = <http://ex/a>) } } }",
+        )
+        .unwrap();
+        let err = run(&uses_this, &this, &g, &store).unwrap_err();
+        assert!(
+            err.to_string().contains("$this without returning it"),
+            "{err}"
+        );
+
+        let returns_this = parse_query(
+            "",
+            "SELECT ?o WHERE { { SELECT $this ?o WHERE { $this <http://ex/p> ?o } } }",
+        )
+        .unwrap();
+        assert_eq!(run(&returns_this, &this, &g, &store).unwrap().len(), 1);
     }
 }
