@@ -33,21 +33,21 @@ and finds none of the thousands of lines that actually differ.
 ## Measured divergence
 
 Line counts and differing lines, `diff` against v0.3.4, counting changed lines
-on both sides:
+on both sides, re-measured after the SHACL-SPARQL ports below:
 
 | file | here | upstream | differing |
 |---|---:|---:|---:|
-| `sparql.rs` | 1115 | 1242 | 2357 |
+| `sparql.rs` | 1249 | 1242 | 2491 |
 | `report.rs` | 914 | 897 | 1811 |
 | `model/graph.rs` | 467 | 334 | 801 |
-| `model/vocab.rs` | 378 | 396 | 774 |
-| `shapes.rs` | 1792 | 1623 | 635 |
-| `validate.rs` | 1547 | 1834 | 401 |
+| `model/vocab.rs` | 380 | 396 | 776 |
+| `shapes.rs` | 1798 | 1623 | 631 |
+| `validate.rs` | 1723 | 1834 | 297 |
 | `model/interner.rs` | 144 | 177 | 321 |
 | `model/mod.rs` | 120 | 121 | 241 |
 | `inference.rs` | 396 | 563 | 175 |
 | `model/term.rs` | 676 | 774 | 116 |
-| `nodeexpr.rs` | 986 | 1070 | 84 |
+| `nodeexpr.rs` | 1071 | 1070 | 1 |
 
 In `sparql.rs`, `report.rs`, `model/graph.rs` and `model/vocab.rs` the differing
 lines outnumber the lines in either copy. Those are rewrites. A three-way merge
@@ -56,6 +56,8 @@ on them is not a merge, it is a rewrite with extra steps.
 Seven files are byte-identical to upstream: `datatypes.rs`, `error.rs`,
 `lib.rs`, `model/loader.rs`, `path.rs`, `rules.rs`, `valueset.rs`. Those are the
 only ones where taking upstream wholesale is safe by inspection.
+`nodeexpr.rs` differs from upstream by one line now, the comment naming the
+upstream commit its SPARQL node expressions came from.
 
 `model/index.rs` exists upstream and not here. It caches a parsed graph on disk,
 which has no use in a store that already holds the graph.
@@ -84,43 +86,60 @@ upstream's own answer to the same problem.
 | `edition` and dependency versions given literally | `Cargo.toml` | upstream inherits them from its workspace, which this tree is not part of |
 | no `mimalloc` | `Cargo.toml` | upstream's allocator choice; this workspace makes its own |
 
-## Correctness fixes upstream has and this copy does not
+## Correctness fixes taken from upstream
 
-All four were found upstream by running the full W3C suites rather than the two
-Core manifests tracked here, and each is verified absent from this `src/` as of
-v0.3.4.
+Upstream found these by running the full W3C suites rather than the two Core
+manifests this file used to describe. Each was ported on its own, against the
+SHACL-SPARQL ratchets below, and each port says which upstream commit it came
+from in a comment at the site.
 
-- **`{?var}` and `{$var}` substitution** in the `sh:message` of a SPARQL
-  constraint or SPARQL-based component. Here the placeholder reaches the report
-  verbatim.
-- **Prefix declarations with no `sh:prefixes`** taken only from nodes typed
-  `sh:ShapesGraph`. Taking every `sh:declare` in the graph can pick the wrong
-  declaration; the suite's `prefixes-002` plants one to catch exactly that.
-- **`sh:values` with `sh:select` and `sh:sparqlExpr`** node expressions.
-- **The SHACL 5.3.2 subquery rule**, with a caveat that matters more than the
-  fix. The rule as the specification words it refuses any subquery in a
-  pre-bound query that does not project `$this`. Implemented that way upstream,
-  it reached 426/426 on the W3C suites and broke three graph-wide aggregate
-  checks in the consolidated ontology suite — subqueries that count across the
-  graph and have no reason to mention the focus node. Upstream narrowed it in
-  0.3.1 to refuse only a subquery that *uses* `$this` without projecting it, and
-  accepts 425/426 as the price. **Port the narrowed version.** The
-  specification's rule is phrased for an engine that supplies initial bindings;
-  both engines substitute into the algebra, so the projection requirement does
-  not carry across unchanged.
+| fix | upstream | tests it passes |
+|---|---|---|
+| no `sh:sourceConstraint` on a SPARQL-based component's results | 2006c4e | `optional-001`, `propertyValidator-select-001`, `validator-001` (1.0) |
+| `{?var}` and `{$var}` substituted in a SPARQL constraint's `sh:message` | 2006c4e | `propertyValidator-select-001` (1.2) |
+| prefixes with no `sh:prefixes` only from nodes typed `sh:ShapesGraph` | d7769bf | `prefixes-002` |
+| `sh:values`, with the `sh:select` and `sh:sparqlExpr` node expressions | d7769bf | `property-select-001`, `property-sparqlExpr-001` |
+| a subquery that uses `$this` must return it (SHACL 5.3.2, narrowed) | d7769bf, 1944802 | `pre-binding-006` |
 
-Port them one at a time, each against the ratchet below. Do not sync the files
-wholesale — see the divergence table.
+The list kept here before named four of these. The first was not on it: it
+shows only when reports are compared as the suite compares them, which this
+harness did not do until the ratchets below were added.
+
+The subquery rule is the **narrowed** version. As the specification words it,
+the rule refuses any subquery in a pre-bound query that does not project
+`$this`. Implemented that way upstream, it broke three graph-wide aggregate
+checks in the consolidated ontology suite — subqueries that count across the
+graph and have no reason to mention the focus node. Upstream narrowed it in
+0.3.1 to refuse only a subquery that *uses* `$this` without projecting it, and
+accepts `unsupported-sparql-004` as the price. Both engines substitute into the
+algebra rather than supply initial bindings, so the projection requirement does
+not carry across unchanged. `sparql::tests::a_subquery_must_return_this_only_if_it_uses_it`
+pins both directions.
+
+Not taken, because they had already converged here: `sh:pattern` results
+without `sh:sourceConstraint`, `sh:nodeByExpression` results with it, messages
+and severities annotated onto a constraint triple, and
+`sh:reificationRequired`. Do not sync the files wholesale — see the divergence
+table.
 
 ## What the conformance numbers actually say
 
 This workspace measures the two Core manifests, 236 tests, running both
-validators against the same expectations:
+validators against the same expectations, and the SHACL-SPARQL sections through
+the adapted engine only, since the native evaluator does not speak SHACL-SPARQL:
 
 | suite | native evaluator | adapted engine |
 |---|---:|---:|
 | SHACL 1.0 Core | 98/98 | 98/98 |
 | SHACL 1.2 Core | 138/138 | 138/138 |
+| SHACL 1.0 `sparql` | — | 21/22 |
+| SHACL 1.2 `sparql` | — | 23/26 |
+| SHACL 1.2 `node-expr` (`sht:Validate` entries) | — | 2/2 |
+
+The SHACL 1.0 failure is `unsupported-sparql-004`, described above. The three
+SHACL 1.2 failures are `sparql/functions/`: SHACL 1.2's SPARQL functions, which
+neither this engine nor upstream implements; upstream's copy of the suite
+predates them.
 
 An earlier version of this file justified carrying the adapted engine on
 coverage: *127/138 on SHACL 1.2 Core against the native evaluator's 94*. **That
@@ -129,12 +148,10 @@ the adapted engine buys no coverage, and the coverage argument for vendoring it
 should not be repeated.
 
 What remains is the architectural reason below, and the limits of these suites.
-236 Core tests are a subset of the 426 upstream runs across the full SHACL 1.0
-and 1.2 suites; SHACL-AF rules, node expressions and SPARQL-based constraints
-are covered thinly here or not at all, and upstream sits at 425/426 with the one
-exception described above. Nothing in this tree measures that, so "the adapted
-engine handles more than Core" is plausible and, here, unevidenced. Anyone
-relying on it should extend the ratchet rather than cite this file.
+Upstream also runs the node-expression evaluation tests in `node-expr/` that are
+not `sht:Validate` entries, and the SHACL-AF rules suite; neither is measured
+here. SHACL-SPARQL now is, and that is where the adapted engine covers what the
+native evaluator does not: 44 of 48 tests, against none.
 
 ## Why it is adapted in-tree rather than depended on
 
@@ -158,9 +175,10 @@ holds it, and builds this crate's `Graph` and `TermStore` from a
    upstream tag is the only reliable account. The `HOLOS change:` markers are
    not one: there are two and both are stale.
 2. The build differences above.
-3. `cargo test -p holos-conformance shacl` — four ratchets in
-   [`conformance/`](../../conformance/), native and adapted. All four currently
-   record no known failures, so a regression appears as a new line rather than a
-   changed number.
+3. `cargo test -p holos-conformance shacl` — seven ratchets in
+   [`conformance/`](../../conformance/): Core native and adapted, and the
+   SHACL-SPARQL and node-expression sections adapted. The Core four record no
+   known failures, so a regression appears as a new line rather than a changed
+   number. `HOLOS_CONFORMANCE_FULL_DIFF=1` prints every differing triple.
 4. Re-measure before quoting. Every figure in the previous version of this file
    was wrong within two months, including the ones that were right when written.

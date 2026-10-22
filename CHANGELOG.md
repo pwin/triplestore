@@ -3,6 +3,45 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## Unreleased
+
+### The SHACL engine takes upstream's five SHACL-SPARQL fixes
+
+`holos validate`, `holosdb.Store.validate` and the wasm `validate` default to the adapted SHACL
+engine, vendored from SHACL_Engine and diverged from it since. Upstream had fixed five things
+that this copy had not, all in SHACL-SPARQL, and nothing here measured that part of the
+engine. Three new conformance ratchets now run the `sparql` sections of the SHACL 1.0 and 1.2
+suites, and SHACL 1.2's `node-expr`, through the adapted engine, and the five fixes are ported
+one at a time against them:
+
+- a result from a SPARQL-based constraint *component* no longer carries `sh:sourceConstraint`,
+  which the specification gives only to `sh:sparql` constraints;
+- `{?var}` and `{$var}` in a SPARQL constraint's `sh:message` are replaced with the solution's
+  values, instead of reaching the report as written;
+- a query with no `sh:prefixes` takes its prefixes only from nodes typed `sh:ShapesGraph`, not
+  from every `sh:declare` in the shapes graph;
+- `sh:values` on a property shape supplies the value nodes, including through the `sh:select`
+  and `sh:sparqlExpr` node expressions; it was ignored, and the path's values validated
+  instead;
+- a subquery in a pre-bound query that uses `$this` without returning it is refused, per SHACL
+  5.3.2. A subquery that never mentions `$this` -- a graph-wide `COUNT` joined against the focus
+  node -- is still accepted, as upstream decided after the letter of the rule refused three
+  checks in the consolidated ontology suite.
+
+| adapted engine | before | after | upstream v0.3.4 |
+|---|---:|---:|---:|
+| SHACL 1.0 `sparql` | 17/22 | 21/22 | 21/22 |
+| SHACL 1.2 `sparql` | 17/26 | 23/26 | all it carries |
+| SHACL 1.0 / 1.2 Core | 98/98, 138/138 | unchanged | |
+
+The one SHACL 1.0 test left is `unsupported-sparql-004`, the price of the narrowed subquery
+rule. The three SHACL 1.2 tests left are `sparql/functions/`, SHACL 1.2's SPARQL functions,
+which neither engine implements; upstream's copy of the suite predates them.
+
+The harness now compares reports the way the suite says to: only the predicates an expected
+report uses, and `sh:resultMessage` only where the expected report carries the same message.
+`mf:result sht:Failure` means the run must fail. Core results are unchanged by it.
+
 ## 0.24.0 — 2026-10-22
 
 ### A zero-length path from a joined value no longer matches a term the graph lacks
