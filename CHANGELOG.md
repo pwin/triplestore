@@ -24,7 +24,27 @@ Every surface using the index join had it: the CLI, the server, the Python bindi
 wasm binding's `query()`. The wasm `queryFederated()`, which the browser editor uses, was right,
 because it skipped the index join entirely -- so in 0.23.0 the two wasm methods disagreed on
 this query, 1 row against 0. W3C `sparql11/property-path/values_and_path` is this case, and it
-passed only because the conformance harness's entry point skipped the index join too.
+passed only because the conformance harness's entry point skipped the index join too; see below.
+
+### One query pipeline, for every entry point
+
+`Engine::query_prepared`, `query_prepared_with_services` and `query_prepared_with_handler` now
+go through the same pipeline as `query_with` -- check, shortcut, admit, rewrite, plan, evaluate
+-- with a `SERVICE` handler carried on the options so that a federated query sent down the
+top-k path or a spill is still federated. They were partial copies, and copies fall behind:
+
+* `query_prepared_with_handler`, which the wasm binding's `queryFederated()` calls and the
+  browser editor sends **every** query through, applied the topology rewrite and the bound
+  join and then evaluated. No index join, no rewrites, ever -- including after 0.23.0 unified
+  `Engine::query`. Its comment reasoned that a handler is only supplied when the query has a
+  `SERVICE`; the editor supplies one for every query.
+* `query_prepared`, the conformance harness's entry point, was the bare evaluator, so the W3C
+  SPARQL suites tested none of the index join or the rewrites built on it. They test all of it
+  now: sparql11 stays at 511/511, with the zero-length fix above, which is what sending them
+  through the real pipeline found.
+
+A 34th wasm smoke check asserts `queryFederated()` answers as `query()` does, through the same
+pipeline.
 
 ## 0.23.0 — 2026-10-21
 

@@ -124,9 +124,47 @@ pub struct QueryOptions {
     /// so `crate::topology` verifies it still describes the store and falls back to a full
     /// scan if not. Supplying a stale one costs time, never correctness.
     pub spatial: Option<std::sync::Arc<crate::spatial::SpatialIndex>>,
+    /// An evaluator with a `SERVICE` handler registered, set by
+    /// [`QueryOptions::with_service_handler`]. Every step that evaluates builds from it, so a
+    /// federated query sent down the top-k path or a spill is still federated.
+    pub(crate) services: Option<Services>,
+}
+
+/// A `spareval` evaluator carrying a `SERVICE` handler. Its own type only so that
+/// [`QueryOptions`] can stay `Debug`: the evaluator is not.
+#[derive(Clone)]
+pub(crate) struct Services(pub(crate) spareval::QueryEvaluator);
+
+impl std::fmt::Debug for Services {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Services(..)")
+    }
 }
 
 impl QueryOptions {
+    /// Answers `SERVICE` clauses through `handler`, and pushes each clause the keys it will be
+    /// joined against first (see `crate::boundjoin`).
+    ///
+    /// Without one, a `SERVICE` fails rather than resolving to nothing: federation is opt-in.
+    #[must_use]
+    pub fn with_service_handler(
+        mut self,
+        handler: impl spareval::DefaultServiceHandler + 'static,
+    ) -> Self {
+        self.services = Some(Services(
+            crate::Engine::evaluator().with_default_service_handler(handler),
+        ));
+        self
+    }
+
+    /// The evaluator every step of the pipeline builds from: the engine's, with this query's
+    /// `SERVICE` handler when it has one.
+    pub(crate) fn evaluator(&self) -> spareval::QueryEvaluator {
+        self.services
+            .as_ref()
+            .map_or_else(crate::Engine::evaluator, |s| s.0.clone())
+    }
+
     /// Nothing set: the store's own dataset, no timeout, no substitutions.
     #[must_use]
     pub fn new() -> Self {

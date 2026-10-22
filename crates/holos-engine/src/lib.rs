@@ -369,12 +369,17 @@ impl Engine {
     /// Evaluates an already-parsed query.
     ///
     /// Separate from [`Engine::query`] because a conformance harness has to parse first
-    /// to tell a syntax failure apart from an evaluation failure.
+    /// to tell a syntax failure apart from an evaluation failure. The same pipeline otherwise:
+    /// see [`Engine::run`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::query_with`], less the syntax error, which the caller has already had.
     pub fn query_prepared<'a>(
         view: &'a DatasetView<'a>,
         query: &spargebra::Query,
     ) -> Result<QueryResults<'a>, EngineError> {
-        Ok(Self::evaluator().prepare(query).execute(view)?)
+        Self::run(view, query.clone(), &QueryOptions::new()).map(|(results, _)| results)
     }
 
     /// Evaluates an already-parsed query with a service handler registered.
@@ -391,29 +396,14 @@ impl Engine {
         query: &spargebra::Query,
         services: crate::service::LocalServiceHandler,
     ) -> Result<QueryResults<'a>, EngineError> {
-        // The same rewrite the other two entry points apply, and for the same reason: a
-        // topology property is a geometry lookup plus a `geof:` call, and a query that skips
-        // the rewrite matches nothing and says so silently. Leaving it off here meant
-        // `geo:sfContains` was answered correctly through two entry points and emptily
-        // through the third.
-        let parsed = crate::topology::rewrite(query, None);
-
-        // The same fast path `query_with` takes. It was attached only there at first, which
-        // meant the W3C conformance suites — which reach evaluation through *this* function —
-        // gave it no coverage at all while appearing to be its main test. A `SERVICE` query
-        // is outside the fragment regardless, so this is safe with a handler present, but it
-        // is only attempted without one so that the two paths cannot diverge unnoticed.
-        if services.is_empty() {
-            if let Some(results) = Self::try_bind_join(view, &parsed, None, None)? {
-                return Ok(results);
-            }
-        }
-        let evaluator = if services.is_empty() {
-            Self::evaluator()
+        // The W3C suites reach evaluation through here, so this being the same pipeline as
+        // every other entry point is also what makes those suites test it.
+        let options = if services.is_empty() {
+            QueryOptions::new()
         } else {
-            Self::evaluator().with_default_service_handler(services)
+            QueryOptions::new().with_service_handler(services)
         };
-        Ok(evaluator.prepare(&parsed).execute(view)?)
+        Self::run(view, query.clone(), &options).map(|(results, _)| results)
     }
 
     /// Pushes the keys a `SERVICE` will be joined against into the clause itself.
@@ -522,8 +512,11 @@ impl Engine {
     /// function. This takes any handler, so the policy decision about *what* may be called
     /// belongs to whoever builds one rather than to this crate.
     ///
-    /// No bind-join fast path here, deliberately: a handler is only supplied when the query
-    /// has a `SERVICE` in it, and a `SERVICE` is outside the fragment that path accepts.
+    /// The same pipeline as every other entry point ([`Engine::run`]). It used to be its own,
+    /// with the topology rewrite and the bound join and nothing else, on the reasoning that a
+    /// handler is only supplied when the query has a `SERVICE` in it. The browser editor
+    /// supplies one for every query, so every query it ran skipped the index join and every
+    /// rewrite since -- through 0.23.0, after `Engine::query` had been unified.
     ///
     /// # Errors
     ///
@@ -534,15 +527,12 @@ impl Engine {
         query: &spargebra::Query,
         handler: impl spareval::DefaultServiceHandler + 'static,
     ) -> Result<QueryResults<'a>, EngineError> {
-        // The same topology rewrite the other entry points apply; see
-        // `query_prepared_with_services` for what skipping it cost.
-        let parsed = crate::topology::rewrite(query, None);
-        // The bound join, after the topology rewrite and not before: the probe has to see the
-        // query the engine will actually evaluate, or a geometry predicate would match nothing
-        // in the probe, report fewer keys than the real evaluation needs, and lose rows.
-        let parsed = Self::bind_services(view, &parsed)?;
-        let evaluator = Self::evaluator().with_default_service_handler(handler);
-        Ok(evaluator.prepare(&parsed).execute(view)?)
+        Self::run(
+            view,
+            query.clone(),
+            &QueryOptions::new().with_service_handler(handler),
+        )
+        .map(|(results, _)| results)
     }
 
     /// Inserts one quad, subject to the session's write policy.
@@ -680,6 +670,22 @@ impl Engine {
                 .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
         }
         let parsed = parser.parse_query(query)?;
+        Self::run(view, parsed, options)
+    }
+
+    /// The query pipeline: every entry point that evaluates a query ends here.
+    ///
+    /// Check, shortcut, admit, rewrite, plan, and evaluate -- in that order, and once. The
+    /// entry points differ only in how the query arrives (text or parsed) and what options
+    /// it carries, a `SERVICE` handler among them. There used to be four pipelines, each a
+    /// partial copy of this one, and the copies fell behind: `Engine::query` missed 0.21's
+    /// rewrites until 0.23.0, and `query_prepared_with_handler`, which the browser editor
+    /// sends every query through, never had the index join at all.
+    fn run<'a>(
+        view: &'a DatasetView<'a>,
+        parsed: spargebra::Query,
+        options: &QueryOptions,
+    ) -> Result<(QueryResults<'a>, Option<spareval::QueryExplanation>), EngineError> {
         crate::validate::check(&parsed)?;
 
         // `SELECT DISTINCT ?p WHERE { ?s ?p ?o }` from the store's own predicate list, each
@@ -751,6 +757,15 @@ impl Engine {
                 store: view.store(),
             });
         let parsed = crate::topology::rewrite(&parsed, routing);
+        // The bound join, when there is a `SERVICE` handler: each clause is sent the keys it
+        // will be joined against. After the topology rewrite, so the probe sees the query that
+        // will be evaluated -- a geometry predicate would otherwise match nothing in the probe
+        // and lose rows -- and before everything that only plans.
+        let parsed = if options.services.is_some() {
+            Self::bind_services(view, &parsed)?
+        } else {
+            parsed
+        };
         // A filter that pins a variable to a constant, given to the planner as a binding.
         // Before the reorder, so the statistics see the constant as bound.
         let parsed = {
@@ -903,7 +918,7 @@ impl Engine {
         options: &QueryOptions,
         deadline: Option<Deadline>,
     ) -> Result<QueryResults<'a>, EngineError> {
-        let evaluator = Self::evaluator();
+        let evaluator = options.evaluator();
         // Checked by both callers before they route here.
         let held = plan.held().unwrap_or_default();
         let token = deadline.as_ref().map(Deadline::token);
@@ -977,7 +992,7 @@ impl Engine {
         };
         Ok(QueryResults::Solutions(plan.collect_spilled(
             rows,
-            &Self::evaluator(),
+            &options.evaluator(),
             budget,
             options.spill_disk,
             token,
@@ -1123,7 +1138,7 @@ impl Engine {
         options: &QueryOptions,
         deadline: Option<Deadline>,
     ) -> Result<(QueryResults<'a>, Option<spareval::QueryExplanation>), EngineError> {
-        let mut evaluator = Self::evaluator();
+        let mut evaluator = options.evaluator();
         if let Some(deadline) = &deadline {
             evaluator = evaluator.with_cancellation_token(deadline.token());
         }

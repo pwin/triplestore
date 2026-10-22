@@ -497,5 +497,30 @@ check('explain returns a plan carrying the statistics from the run', () => {
   })(root);
 });
 
+// The browser editor sends every query through queryFederated, SERVICE or not. That entry point
+// used to be its own pipeline -- the topology rewrite and the bound join, then the evaluator --
+// so the editor ran none of the engine's rewrites and not even its index join. It is the same
+// pipeline as query() now. W3C property-path/values_and_path is the case that showed the
+// difference: `1` is no node of the graph, so a zero-length path from it is no row.
+check('queryFederated answers as query does, through the same pipeline', () => {
+  const s2 = new holos.Store();
+  try {
+    s2.loadTurtle('<urn:a> <urn:p> <urn:b> .', undefined);
+    for (const q of [
+      'SELECT * WHERE { VALUES ?v { 1 } ?v <urn:p>? ?v }',
+      'SELECT * WHERE { VALUES ?v { <urn:a> 1 } ?v <urn:p>* ?v }',
+      'SELECT ?s WHERE { ?s <urn:p> ?o FILTER(?o = <urn:b>) }',
+    ]) {
+      const federated = s2.queryFederated(q, undefined);
+      assert.strictEqual(federated.pending.length, 0, q);
+      assert.strictEqual(federated.result.length, s2.query(q, undefined).length, q);
+    }
+    const none = s2.queryFederated('SELECT * WHERE { VALUES ?v { 1 } ?v <urn:p>? ?v }', undefined);
+    assert.strictEqual(none.result.length, 0, JSON.stringify(none.result));
+  } finally {
+    s2.free?.();
+  }
+});
+
 console.log(failures === 0 ? '\nall checks passed' : `\n${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);
