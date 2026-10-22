@@ -54,11 +54,16 @@ pyo3::create_exception!(holosdb, QueryTimeoutError, HolosError);
 /// them from a syntax error without reading the message. All are [`HolosError`], so code
 /// that catches that is unaffected.
 fn map_engine_error(e: &holos_engine::EngineError) -> PyErr {
+    // A typed exception names the kind already, so it carries the detail without the kind's
+    // prefix: a read the policy denies raised `PolicyError("query evaluation failed: access
+    // denied by policy")` from 0.23.0, where 0.22.0 had said "access denied by policy". The
+    // catch-all keeps the prefix, since there it is the only word on what kind of failure
+    // this was.
     match e.kind().0 {
-        "syntax" => SyntaxError::new_err(e.to_string()),
-        "refused" => QueryRefusedError::new_err(e.to_string()),
-        "timeout" => QueryTimeoutError::new_err(e.to_string()),
-        "policy" => PolicyError::new_err(e.to_string()),
+        "syntax" => SyntaxError::new_err(e.detail()),
+        "refused" => QueryRefusedError::new_err(e.detail()),
+        "timeout" => QueryTimeoutError::new_err(e.detail()),
+        "policy" => PolicyError::new_err(e.detail()),
         _ => HolosError::new_err(e.to_string()),
     }
 }

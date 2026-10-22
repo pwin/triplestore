@@ -251,6 +251,24 @@ def test_a_denied_write_is_refused_and_rolled_back():
     assert len(s) == 0
 
 
+def test_a_fail_closed_read_says_access_denied_and_nothing_else():
+    # The class names the kind, so the message is the detail alone. From 0.23.0 to 0.25.0 a
+    # sorted query carried "query evaluation failed: " in front: the sort collects the rows
+    # inside the engine, so the denial came back wrapped as an evaluation error and kept that
+    # error's wording. An unsorted query, denied as it is drained, never did.
+    s = Store()
+    s.update(
+        f'INSERT DATA {{ <{EX}a> <{EX}name> "A" ; <{EX}secret> 1 . '
+        f'<{EX}b> <{EX}name> "B" ; <{EX}secret> 2 }}'
+    )
+    policy = Policy().deny_predicate(f"{EX}secret").fail_closed()
+    for order in ("", "ORDER BY ?n"):
+        query = f"SELECT ?n ?v WHERE {{ ?s <{EX}name> ?n OPTIONAL {{ ?s <{EX}secret> ?v }} }} {order}"
+        with pytest.raises(holosdb.PolicyError) as raised:
+            s.query(query, policy=policy)
+        assert str(raised.value) == "access denied by policy", order
+
+
 def test_an_update_cannot_delete_what_the_principal_cannot_read():
     s = Store()
     s.update(f"INSERT DATA {{ <{EX}a> <{EX}salary> 100 . <{EX}a> <{EX}name> 'A' }}")

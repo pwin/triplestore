@@ -13,6 +13,16 @@ followed by a run of spaces and *through holos_shacl::engine::EngineRun instead"
 continuation, and a Rust type no Python or command-line caller can reach. It now ends *"validate
 with the adapted engine instead"*, which they can, and which is the default.
 
+### A policy denial in Python says "access denied by policy" again
+
+From 0.23.0, a sorted query that a `fail_closed()` policy refused raised
+`PolicyError("query evaluation failed: access denied by policy")`; 0.22.0 had said "access denied
+by policy", and an unsorted query still did. The sort collects rows inside the engine, so the
+denial came back wrapped as an evaluation error and kept that error's wording. Every typed
+exception -- `SyntaxError`, `QueryRefusedError`, `QueryTimeoutError`, `PolicyError` -- now carries
+the detail without the kind's prefix, since the class already names the kind; a bare `HolosError`
+keeps it. Found re-running the SemOps Manual's evidence on 0.25.0.
+
 ## 0.25.0 — 2026-10-22
 
 ### The SHACL engine takes upstream's five SHACL-SPARQL fixes
