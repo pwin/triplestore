@@ -3,7 +3,7 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## Unreleased
+## 0.24.0 — 2026-10-22
 
 ### A zero-length path from a joined value no longer matches a term the graph lacks
 
