@@ -200,14 +200,15 @@ pub fn prefix_header(node: TermId, shapes: &Graph, store: &TermStore, vocab: &Vo
     let mut header = String::new();
     let mut seen = Vec::new();
     let mut queue: Vec<TermId> = shapes.objects(node, vocab.sh_prefixes).collect();
-    // With no `sh:prefixes` of its own, fall back to every prefix the shapes
-    // graph declares. SHACL says a query's prefixes come from `sh:prefixes`,
-    // but a graph that declares them at the top — `ex: a sh:ShapesGraph ;
-    // sh:declare [ … ]` — and writes `ex:` in a rule is a shape people
-    // actually write, and the W3C 1.2 suite contains one. Refusing it means
-    // refusing the whole shapes graph over a prefix that is right there.
+    // With no `sh:prefixes` of its own, a query takes the declarations made
+    // on the shapes graph as a whole: SHACL 1.2 lets a node typed
+    // `sh:ShapesGraph` carry `sh:declare` for every query in the graph.
+    // Only those nodes count. The suite's `prefixes-002` declares the same
+    // prefix a second time on an unrelated resource, and a fallback that
+    // took every `sh:declare` in the graph could pick the wrong one.
+    // Upstream d7769bf.
     if queue.is_empty() {
-        queue.extend(shapes.subjects_of(vocab.sh_declare));
+        queue.extend(shapes.subjects(vocab.rdf_type, vocab.sh_ShapesGraph));
     }
     while let Some(owner) = queue.pop() {
         if seen.contains(&owner) {

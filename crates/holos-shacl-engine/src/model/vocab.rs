@@ -40,6 +40,7 @@ vocab! {
         sh_NodeShape = "NodeShape",
         sh_PropertyShape = "PropertyShape",
         sh_ShapeClass = "ShapeClass",
+        sh_ShapesGraph = "ShapesGraph",
         sh_property = "property",
         sh_path = "path",
         sh_deactivated = "deactivated",
