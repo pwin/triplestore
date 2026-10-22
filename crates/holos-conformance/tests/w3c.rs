@@ -295,7 +295,16 @@ fn shacl12_core() {
 /// Running both against the same expectations is the only sound way to compare them:
 /// the number that matters is not "how many does each pass" in isolation but how much
 /// coverage the adapted engine actually adds for the bridging cost it charges.
-fn run_shacl_suite_with(name: &str, relative: &str, engine: holos_conformance::shacl::Engine) {
+///
+/// `section` is the directory under `tests/`: `core`, or one of the sections only the
+/// adapted engine speaks -- `sparql` (SHACL-SPARQL) and `node-expr` (SHACL 1.2 node
+/// expressions), where the engine's fixes from upstream are measured.
+fn run_shacl_suite_with(
+    name: &str,
+    relative: &str,
+    section: &str,
+    engine: holos_conformance::shacl::Engine,
+) {
     use holos_conformance::shacl;
     let Some(root) = shacl::suite_root() else {
         return;
@@ -303,7 +312,7 @@ fn run_shacl_suite_with(name: &str, relative: &str, engine: holos_conformance::s
     let manifest = root
         .join(relative)
         .join("tests")
-        .join("core")
+        .join(section)
         .join("manifest.ttl");
     if !manifest.is_file() {
         return;
@@ -322,6 +331,7 @@ fn shacl_core_adapted() {
     run_shacl_suite_with(
         "shacl-core-adapted",
         "data-shapes-test-suite",
+        "core",
         holos_conformance::shacl::Engine::Adapted,
     );
 }
@@ -331,6 +341,37 @@ fn shacl12_core_adapted() {
     run_shacl_suite_with(
         "shacl12-core-adapted",
         "shacl12-test-suite",
+        "core",
+        holos_conformance::shacl::Engine::Adapted,
+    );
+}
+
+#[test]
+fn shacl_sparql_adapted() {
+    run_shacl_suite_with(
+        "shacl-sparql-adapted",
+        "data-shapes-test-suite",
+        "sparql",
+        holos_conformance::shacl::Engine::Adapted,
+    );
+}
+
+#[test]
+fn shacl12_sparql_adapted() {
+    run_shacl_suite_with(
+        "shacl12-sparql-adapted",
+        "shacl12-test-suite",
+        "sparql",
+        holos_conformance::shacl::Engine::Adapted,
+    );
+}
+
+#[test]
+fn shacl12_node_expr_adapted() {
+    run_shacl_suite_with(
+        "shacl12-node-expr-adapted",
+        "shacl12-test-suite",
+        "node-expr",
         holos_conformance::shacl::Engine::Adapted,
     );
 }

@@ -165,6 +165,12 @@ fn run_inner(test: &ShaclTest, engine: Engine) -> Result<super::Outcome> {
         return Ok(super::Outcome::skip("no sht:Validate entry"));
     };
 
+    // `mf:result sht:Failure` says the shapes cannot be evaluated at all -- a pre-bound
+    // variable inside `MINUS`, say -- so the expected outcome is an error rather than a report.
+    // Read as a report it is empty, and nothing a validator returns could ever match it.
+    let expects_failure = graph
+        .object_for_subject_predicate(entry, mf("result").as_ref())
+        .is_some_and(|r| r == TermRef::NamedNode(sht("Failure").as_ref()));
     let expected = expected_report(&graph, entry)?;
 
     // Most tests put data and shapes in the same file, referenced as `<>`. Some point at
@@ -206,14 +212,17 @@ fn run_inner(test: &ShaclTest, engine: Engine) -> Result<super::Outcome> {
         shapes_graph: shapes_graph_name,
     };
     if engine == Engine::Adapted {
-        return run_adapted(&store, options, &expected);
+        return run_adapted(&store, options, &expected, expects_failure);
     }
 
+    // The native evaluator's `Unsupported` is a skip either way: it says what this evaluator
+    // does not do, not that the shapes are ill-formed, so it cannot pass a failure test.
     let shapes = match CompiledShapes::compile(&store, options) {
         Ok(s) => s,
         Err(holos_shacl::ShaclError::Unsupported(what)) => {
             return Ok(super::Outcome::skip(format!("unsupported: {what}")))
         }
+        Err(_) if expects_failure => return Ok(super::Outcome::Passed),
         Err(e) => return Ok(super::Outcome::fail(format!("compiling shapes: {e}"))),
     };
     let report = match shapes.validate(&store) {
@@ -221,8 +230,14 @@ fn run_inner(test: &ShaclTest, engine: Engine) -> Result<super::Outcome> {
         Err(holos_shacl::ShaclError::Unsupported(what)) => {
             return Ok(super::Outcome::skip(format!("unsupported: {what}")))
         }
+        Err(_) if expects_failure => return Ok(super::Outcome::Passed),
         Err(e) => return Ok(super::Outcome::fail(format!("validating: {e}"))),
     };
+    if expects_failure {
+        return Ok(super::Outcome::fail(
+            "expected a failure, but the shapes validated",
+        ));
+    }
     // `sh:conformanceDisallows` is a property of the *report*, not of the shapes: it says
     // which severities the validator was asked to treat as disqualifying. A test that sets
     // it is asking for a run under that rule, so the harness has to read it from the
@@ -232,6 +247,7 @@ fn run_inner(test: &ShaclTest, engine: Engine) -> Result<super::Outcome> {
         None => report,
     };
     let actual = to_dataset(shapes.report_to_quads(&store, &report)?);
+    let actual = normalise(&actual, &expected);
 
     Ok(match compare(&expected, &actual) {
         Ok(()) => super::Outcome::Passed,
@@ -240,15 +256,27 @@ fn run_inner(test: &ShaclTest, engine: Engine) -> Result<super::Outcome> {
 }
 
 /// Runs a test through the adapted engine, bridged from the store.
-fn run_adapted(store: &Store, options: Options, expected: &Dataset) -> Result<super::Outcome> {
+fn run_adapted(
+    store: &Store,
+    options: Options,
+    expected: &Dataset,
+    expects_failure: bool,
+) -> Result<super::Outcome> {
     let mut run = match holos_shacl::engine::EngineRun::prepare(store, options) {
         Ok(r) => r,
+        Err(_) if expects_failure => return Ok(super::Outcome::Passed),
         Err(e) => return Ok(super::Outcome::fail(format!("preparing the engine: {e}"))),
     };
     let report = match run.validate() {
         Ok(r) => r,
+        Err(_) if expects_failure => return Ok(super::Outcome::Passed),
         Err(e) => return Ok(super::Outcome::fail(format!("validating: {e}"))),
     };
+    if expects_failure {
+        return Ok(super::Outcome::fail(
+            "expected a failure, but the shapes validated",
+        ));
+    }
     // Same rule as the native path: `sh:conformanceDisallows` is a property of the report,
     // so a test that sets one is asking for a run judged under it.
     let declared: Vec<_> = disallowed_iris(expected)
@@ -269,6 +297,7 @@ fn run_adapted(store: &Store, options: Options, expected: &Dataset) -> Result<su
             graph_name: GraphName::DefaultGraph,
         });
     }
+    let actual = normalise(&actual, expected);
     Ok(match compare(expected, &actual) {
         Ok(()) => super::Outcome::Passed,
         Err(diff) => super::Outcome::Failed(diff),
@@ -398,6 +427,92 @@ fn expected_report(graph: &Graph, entry: NamedOrBlankNodeRef<'_>) -> Result<Data
     Ok(out)
 }
 
+/// Reduces an actual report to what the suite compares.
+///
+/// The suite's own description (`data-shapes-test-suite/index.html`) lists the predicates an
+/// expected report uses and says every other triple "needs to be removed from the actual
+/// graph prior to comparison". `sh:resultMessage` is the exception it names: removed, unless
+/// the expected graph has a message with the same object, so a test written to check messages
+/// still can. SHACL 1.2's expected reports also use `sh:conformanceDisallows` and `sh:detail`,
+/// so those are kept -- `sh:detail` only where the expected report has one, as the 1.0 text
+/// says the actual report "must not include any nested results".
+///
+/// A walk from the report node through the structural predicates, the same reach
+/// [`expected_report`] has, so that dropping an edge drops what hung off it too.
+fn normalise(actual: &Dataset, expected: &Dataset) -> Dataset {
+    const SH: &str = "http://www.w3.org/ns/shacl#";
+    let sh = |local: &str| NamedNode::new_unchecked(format!("{SH}{local}"));
+    let compared: Vec<NamedNode> = [
+        "result",
+        "conforms",
+        "conformanceDisallows",
+        "focusNode",
+        "resultPath",
+        "resultSeverity",
+        "sourceConstraint",
+        "sourceConstraintComponent",
+        "sourceShape",
+        "value",
+        "inversePath",
+        "alternativePath",
+        "zeroOrMorePath",
+        "oneOrMorePath",
+        "zeroOrOnePath",
+    ]
+    .into_iter()
+    .map(sh)
+    .chain([
+        rdf::TYPE.into_owned(),
+        rdf::FIRST.into_owned(),
+        rdf::REST.into_owned(),
+    ])
+    .collect();
+    let message = sh("resultMessage");
+    let detail = sh("detail");
+    let messages: Vec<Term> = expected
+        .iter()
+        .filter(|q| q.predicate == message.as_ref())
+        .map(|q| q.object.into_owned())
+        .collect();
+    let has_detail = expected.iter().any(|q| q.predicate == detail.as_ref());
+    let keep = |q: &oxrdf::QuadRef<'_>| {
+        if q.predicate == message.as_ref() {
+            return messages.iter().any(|m| m.as_ref() == q.object);
+        }
+        if q.predicate == detail.as_ref() {
+            return has_detail;
+        }
+        compared.iter().any(|c| c.as_ref() == q.predicate)
+    };
+
+    let report = Term::from(sh("ValidationReport"));
+    let mut frontier: Vec<oxrdf::NamedOrBlankNode> = actual
+        .iter()
+        .filter(|q| q.predicate == rdf::TYPE && q.object == report.as_ref())
+        .map(|q| q.subject.into_owned())
+        .collect();
+    let mut seen: HashSet<oxrdf::NamedOrBlankNode> = frontier.iter().cloned().collect();
+    let mut out = Dataset::new();
+    while let Some(node) = frontier.pop() {
+        for quad in actual.quads_for_subject(node.as_ref()) {
+            if !keep(&quad) {
+                continue;
+            }
+            out.insert(quad);
+            if !is_structural(quad.predicate.as_str()) {
+                continue;
+            }
+            if let TermRef::BlankNode(b) = quad.object {
+                let next = oxrdf::NamedOrBlankNode::from(b.into_owned());
+                if seen.insert(next.clone()) {
+                    frontier.push(next);
+                }
+            }
+        }
+    }
+    out
+}
+
 fn to_dataset(quads: Vec<Quad>) -> Dataset {
     let mut out = Dataset::new();
     for quad in &quads {
@@ -430,8 +545,12 @@ fn compare(expected: &Dataset, actual: &Dataset) -> std::result::Result<(), Stri
     // reads.
     missing.sort_unstable();
     extra.sort_unstable();
-    missing.truncate(3);
-    extra.truncate(3);
+    // Every line under HOLOS_CONFORMANCE_FULL_DIFF: the first lines of a canonical diff are
+    // often relabelled blank nodes, and the triple that actually differs is further down.
+    if std::env::var_os("HOLOS_CONFORMANCE_FULL_DIFF").is_none() {
+        missing.truncate(3);
+        extra.truncate(3);
+    }
     Err(format!(
         "{} expected vs {} actual triples; missing {missing:?}; unexpected {extra:?}",
         a.len(),
