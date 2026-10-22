@@ -3,6 +3,29 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## Unreleased
+
+### A zero-length path from a joined value no longer matches a term the graph lacks
+
+```sparql
+SELECT * WHERE { VALUES ?v { 1 } ?v <urn:p>? ?v }
+```
+
+over a graph that does not contain `1` is no rows: with variables at both ends SPARQL
+evaluates the path on its own, where its zero-length solutions are the graph's nodes, and only
+then joins them with the `VALUES`. The index join walks from the value `VALUES` bound, as
+though the query had written `1 <urn:p>? 1`, and with a constant end a zero-length path *does*
+match a term the graph lacks. So it answered one row. A constant written in the query keeps
+that meaning; a value the join bound earlier now has to be a node of the graph -- subject or
+object of a quad the session can see -- for a zero-length step to start from it, and a value
+that is not has no edges either, so it answers nothing.
+
+Every surface using the index join had it: the CLI, the server, the Python binding, and the
+wasm binding's `query()`. The wasm `queryFederated()`, which the browser editor uses, was right,
+because it skipped the index join entirely -- so in 0.23.0 the two wasm methods disagreed on
+this query, 1 row against 0. W3C `sparql11/property-path/values_and_path` is this case, and it
+passed only because the conformance harness's entry point skipped the index join too.
+
 ## 0.23.0 — 2026-10-21
 
 ### Python, and everything else calling `Engine::query`, gets the 0.21 rewrites

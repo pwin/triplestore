@@ -1844,6 +1844,12 @@ impl Plan {
                 return Ok(());
             }
         };
+        // A seed this walk did not get from the query text may not be a node of the graph at
+        // all -- `VALUES ?v { 1 } ?v :p? ?v` -- and then it has no edges and no zero-length
+        // path either. See `zero_length_admissible`.
+        if !zero_length_admissible(view, closure, seed, bindings)? {
+            return Ok(());
+        }
         let direction = crate::reach::Direction::of(from_subject, closure.inverse);
         let far_end = if from_subject {
             &closure.object
@@ -1934,6 +1940,9 @@ impl Plan {
                 return Ok(());
             }
         };
+        if !zero_length_admissible(view, closure, seed, bindings)? {
+            return Ok(());
+        }
         // The zero-length path binds the far end to the seed, or, where the far end is also
         // bound, holds only when the two are the same term.
         if let Slot::Fixed(target) = far_slot {
@@ -2326,6 +2335,60 @@ fn bind_predicate<'p>(
 /// reliably sorts ahead of a scan — the behaviour the spatial index exists to produce.
 /// Whether a closure has an end the walk can start from: a constant, or a variable some
 /// earlier pattern has already bound.
+/// Whether a zero-length step may start from `seed`.
+///
+/// SPARQL gives a zero-length path two meanings, and a nested-loop join has to keep them apart.
+/// With a **constant** at either end, the path connects that term to itself whether or not the
+/// graph mentions it (§18.4, `ZeroLengthPath` with a term). With **variables** at both ends,
+/// the path is evaluated on its own and its zero-length solutions are the nodes of the graph:
+/// subjects and objects of its triples, nothing else. The join walks from a seed it bound
+/// earlier -- out of `VALUES`, or another pattern -- and turns the second case into the first
+/// unless it checks. `VALUES ?v { 1 } ?v :p? ?v` over an empty graph is no rows, because `1` is
+/// not a node of it; walking from `1` as if it were a constant answered one. W3C
+/// `property-path/values_and_path` is the test, and it was not running through this path.
+///
+/// A seed not in the graph has no edges in it either, so a `false` here means the closure
+/// answers nothing at all, not only that the zero-length row is dropped.
+fn zero_length_admissible(
+    view: &DatasetView<'_>,
+    closure: &ClosureItem,
+    seed: TermId,
+    bindings: &FxHashMap<&Variable, TermId>,
+) -> Result<bool, ViewError> {
+    if !matches!(
+        closure.hops,
+        crate::reach::Hops::ZeroOrMore | crate::reach::Hops::ZeroOrOne
+    ) {
+        return Ok(true);
+    }
+    let free = |term: &TermPattern| {
+        matches!(term, TermPattern::Variable(_) | TermPattern::BlankNode(_))
+    };
+    if !(free(&closure.subject) && free(&closure.object)) {
+        return Ok(true);
+    }
+    let graph: Option<Option<TermId>> = match &closure.scope {
+        Scope::Default => Some(None),
+        Scope::Named(g) => match lookup(view, oxrdf::Term::from(g.clone()).as_ref())? {
+            Slot::Fixed(id) => Some(Some(id)),
+            Slot::Missing | Slot::Any => return Ok(false),
+        },
+        Scope::Variable(v) => bindings.get(v).map(|id| Some(*id)),
+    };
+    let graph = graph.as_ref().map(Option::as_ref);
+    let dataset = &view;
+    for (subject, object) in [(Some(&seed), None), (None, Some(&seed))] {
+        if let Some(quad) = dataset
+            .internal_quads_for_pattern(subject, None, object, graph)
+            .next()
+        {
+            quad?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn closure_seeds_bound(
     closure: &ClosureItem,
     bindings: &FxHashMap<&Variable, TermId>,

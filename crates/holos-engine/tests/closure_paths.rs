@@ -123,6 +123,68 @@ fn the_join_and_the_evaluator_agree() {
     }
 }
 
+/// A seed the join bound earlier is not a constant of the query, and a zero-length path from
+/// it is only a solution if it is a node of the graph.
+///
+/// With variables at both ends, SPARQL evaluates the path on its own, where its zero-length
+/// solutions are the graph's nodes; the join then keeps those that agree with what `VALUES`
+/// bound. The join walked from the bound value as though the query had written it, so `1` --
+/// in no triple at all -- reached itself. W3C `property-path/values_and_path` is this case; it
+/// passed only because the conformance harness's entry point skipped the join, and failed as
+/// soon as every entry point shared one pipeline.
+#[test]
+fn a_seed_from_values_reaches_itself_only_if_the_graph_has_it() {
+    let e = engine();
+    let session = Session::unrestricted(e.store()).expect("session");
+    let view = e.view(&session);
+    let p = "PREFIX ex: <http://example.com/> ";
+
+    for (query, expected) in [
+        // `1` is no node of the graph: nothing, whatever the operator.
+        (
+            format!("{p}SELECT * WHERE {{ VALUES ?v {{ 1 }} ?v ex:p? ?v }}"),
+            0,
+        ),
+        (
+            format!("{p}SELECT * WHERE {{ VALUES ?v {{ 1 }} ?v ex:p* ?v }}"),
+            0,
+        ),
+        (
+            format!("{p}SELECT * WHERE {{ VALUES ?v {{ 1 }} ?v ex:p* ?o }}"),
+            0,
+        ),
+        (
+            format!("{p}SELECT * WHERE {{ VALUES ?v {{ 1 }} ?o ex:p* ?v }}"),
+            0,
+        ),
+        // Under a predicate the store never saw, the zero-length case is all there is.
+        (
+            format!("{p}SELECT * WHERE {{ VALUES ?v {{ 1 }} ?v ex:nosuch? ?o }}"),
+            0,
+        ),
+        // A node of the graph still reaches itself, with edges or without.
+        (
+            format!("{p}SELECT * WHERE {{ VALUES ?v {{ ex:a 1 }} ?v ex:p* ?v }}"),
+            1,
+        ),
+        (
+            format!("{p}SELECT * WHERE {{ VALUES ?v {{ ex:sink }} ?v ex:p* ?v }}"),
+            1,
+        ),
+        (
+            format!("{p}SELECT * WHERE {{ VALUES ?v {{ ex:zz }} ?v ex:nosuch* ?o }}"),
+            1,
+        ),
+        // A constant end keeps the other meaning: the term reaches itself, in the graph or not.
+        (format!("{p}SELECT * WHERE {{ ex:a ex:nosuch? ?o }}"), 1),
+    ] {
+        let joined = rows(&view, &query, &QueryOptions::new());
+        let evaluated = rows(&view, &query, &QueryOptions::new().without_bind_join());
+        assert_eq!(joined, evaluated, "join and evaluator differ for: {query}");
+        assert_eq!(joined.len(), expected, "{query}: {joined:?}");
+    }
+}
+
 /// The answers themselves, spelled out, so a change that moves *both* arms together is
 /// caught. The differential test above cannot see that.
 #[test]
@@ -134,7 +196,13 @@ fn the_answers_are_what_the_graph_says() {
     let names = |query: &str| -> Vec<String> {
         rows(&view, query, &QueryOptions::new())
             .into_iter()
-            .map(|row| row.rsplit('/').next().unwrap_or_default().trim_end_matches('>').to_owned())
+            .map(|row| {
+                row.rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_end_matches('>')
+                    .to_owned()
+            })
             .collect()
     };
 
@@ -164,7 +232,9 @@ fn the_answers_are_what_the_graph_says() {
     assert!(names(&format!("{p}SELECT ?o WHERE {{ ex:a ex:nosuch+ ?o }}")).is_empty());
     // The sequence this work exists for: `leaf memberOf b`, then `b p*`.
     assert_eq!(
-        names(&format!("{p}SELECT ?u WHERE {{ ex:leaf ex:memberOf/ex:p* ?u }}")),
+        names(&format!(
+            "{p}SELECT ?u WHERE {{ ex:leaf ex:memberOf/ex:p* ?u }}"
+        )),
         ["b", "c", "d", "e"]
     );
 }
@@ -193,8 +263,12 @@ fn the_fragment_accepts_a_closure_and_still_refuses_what_it_cannot_walk() {
 
     // A compound inner path is not a single-predicate walk, so the fragment still refuses it
     // rather than approximating one.
-    assert!(!accepts(&format!("{p}SELECT ?o WHERE {{ ex:a (ex:p|ex:q)+ ?o }}")));
-    assert!(!accepts(&format!("{p}SELECT ?o WHERE {{ ex:a (ex:p/ex:p)* ?o }}")));
+    assert!(!accepts(&format!(
+        "{p}SELECT ?o WHERE {{ ex:a (ex:p|ex:q)+ ?o }}"
+    )));
+    assert!(!accepts(&format!(
+        "{p}SELECT ?o WHERE {{ ex:a (ex:p/ex:p)* ?o }}"
+    )));
     // A negated property set is not a closure at all.
     assert!(!accepts(&format!("{p}SELECT ?o WHERE {{ ex:a !ex:p ?o }}")));
 }
