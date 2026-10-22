@@ -659,7 +659,10 @@ SELECT ?site WHERE {
     </div>
   </div>
 
-  <p>Both pass every W3C SHACL Core test: 98/98 on SHACL 1.0 and 138/138 on SHACL 1.2.</p>
+  <p>Both pass every W3C SHACL Core test: 98/98 on SHACL 1.0 and 138/138 on SHACL 1.2.
+  SHACL-SPARQL is the adapted engine's alone: 21/22 of the SHACL 1.0 <code>sparql</code>
+  tests and 23/26 of SHACL 1.2's. The four it misses are one pre-binding test it answers
+  rather than refuses, and SHACL 1.2's SPARQL functions, which it does not implement.</p>
 
 <pre><code>holos validate --data data.nt --shapes shapes.ttl              # adapted
 holos validate --data data.nt --shapes shapes.ttl --engine native

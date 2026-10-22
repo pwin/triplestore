@@ -3,7 +3,7 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## Unreleased
+## 0.25.0 — 2026-10-22
 
 ### The SHACL engine takes upstream's five SHACL-SPARQL fixes
 
