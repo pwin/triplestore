@@ -1246,7 +1246,11 @@ impl Engine<'_> {
                             let mut r = self
                                 .result(shape, cc.component, row.focus)
                                 .with_value(value);
-                            r.source_constraint = Some(cc.query.source);
+                            // No `sh:sourceConstraint`. The specification
+                            // gives it to `sh:sparql` constraints, whose node
+                            // is the constraint; a component's validator is
+                            // not, and the suite's `validator-001` reports
+                            // none. Upstream 2006c4e.
                             if !cc.query.message.is_empty() {
                                 r.messages.clone_from(&cc.query.message);
                             }
