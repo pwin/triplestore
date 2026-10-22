@@ -3,6 +3,16 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## Unreleased
+
+### The native validator's refusal says what to use instead, on one line
+
+A shapes graph the native validator cannot evaluate -- `sh:sparql`, say -- is refused rather than
+half-checked. The refusal read *"... is not implemented by the incremental evaluator; validate*
+followed by a run of spaces and *through holos_shacl::engine::EngineRun instead"*: a lost line
+continuation, and a Rust type no Python or command-line caller can reach. It now ends *"validate
+with the adapted engine instead"*, which they can, and which is the default.
+
 ## 0.25.0 — 2026-10-22
 
 ### The SHACL engine takes upstream's five SHACL-SPARQL fixes
