@@ -147,6 +147,7 @@ vocab! {
         sh_expression = "expression",
         sh_nodeByExpression = "nodeByExpression",
         sh_sparqlExpr = "sparqlExpr",
+        sh_values = "values",
         sh_nodeShape = "nodeShape",
         sh_shape = "shape",
 

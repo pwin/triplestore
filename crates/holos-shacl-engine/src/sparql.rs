@@ -878,6 +878,32 @@ impl SparqlConstraint {
         })
     }
 }
+/// The variables a SELECT query projects, in order. Empty for `SELECT *`,
+/// which projects whatever the pattern binds, and for ASK and CONSTRUCT.
+pub fn projected_variables(query: &Query) -> Vec<String> {
+    use spargebra::algebra::GraphPattern as G;
+    let Query::Select { pattern, .. } = query else {
+        return Vec::new();
+    };
+    // The projection is the outermost operator, possibly under a slice or
+    // ordering, which is what LIMIT and ORDER BY compile to.
+    let mut at = pattern;
+    loop {
+        match at {
+            G::Project { variables, .. } => {
+                return variables.iter().map(|v| v.as_str().to_owned()).collect();
+            }
+            G::Slice { inner, .. }
+            | G::Distinct { inner }
+            | G::Reduced { inner }
+            | G::OrderBy { inner, .. } => {
+                at = inner;
+            }
+            _ => return Vec::new(),
+        }
+    }
+}
+
 /// An empty solution, used to stand for the single failure an unsatisfied
 /// `sh:ask` produces.
 pub fn empty_solution() -> HashMap<String, Term> {

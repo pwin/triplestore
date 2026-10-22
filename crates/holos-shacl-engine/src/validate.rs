@@ -590,7 +590,7 @@ impl Engine<'_> {
         stack.depth += 1;
 
         let mut frames: Vec<Frame> = Vec::new();
-        let mut outcome = self.push_frame(id, focus, stack, &mut frames);
+        let mut outcome = self.push_frame(id, focus, stack, &mut frames, store);
         if outcome.is_ok() {
             outcome = self.run_frames(&mut frames, out, stack, store);
         }
@@ -643,7 +643,7 @@ impl Engine<'_> {
                 Constraint::Property(inner) => {
                     let inner = *inner;
                     let values: Vec<TermId> = frames[i].sets.all_values().to_vec();
-                    self.push_frame(inner, &values, stack, frames)?;
+                    self.push_frame(inner, &values, stack, frames, store)?;
                 }
                 constraint => {
                     // A `{| sh:message ... |}` or `{| sh:severity ... |}` annotation
@@ -675,6 +675,7 @@ impl Engine<'_> {
         focus: &[TermId],
         stack: &mut Stack,
         frames: &mut Vec<Frame>,
+        store: &mut TermStore,
     ) -> Result<()> {
         let shape = self.shapes.get(id);
         if shape.deactivated || focus.is_empty() {
@@ -708,9 +709,20 @@ impl Engine<'_> {
             &filtered
         };
 
-        let sets = match &shape.path {
-            Some(p) => p.eval_sets(focus, self.data),
-            None => ValueSets::identity(focus),
+        let sets = match (&shape.values, &shape.path) {
+            // `sh:values`: the node expression, evaluated with each focus node
+            // as `$this`, supplies the value nodes the path would have.
+            // Upstream d7769bf.
+            (Some(expr), _) => {
+                let mut b = ValueSets::builder();
+                for &f in focus {
+                    let values = self.eval_expr(*expr, f, store)?;
+                    b.push_row(f, &values);
+                }
+                b.finish()
+            }
+            (None, Some(p)) => p.eval_sets(focus, self.data),
+            (None, None) => ValueSets::identity(focus),
         };
 
         let mark = stack.pairs.len();

@@ -281,6 +281,9 @@ pub struct Shape {
     /// The raw `sh:path` node, carried so `sh:resultPath` can be serialised
     /// with its original structure.
     pub path_node: Option<TermId>,
+    /// `sh:values`: a node expression that supplies the value nodes in place
+    /// of evaluating `path`. The path is still what the report names.
+    pub values: Option<TermId>,
     pub targets: Vec<Target>,
     pub constraints: Vec<Constraint>,
     pub severity: TermId,
@@ -346,6 +349,7 @@ impl Shape {
             node,
             path: None,
             path_node: None,
+            values: None,
             targets: Vec::new(),
             constraints: Vec::new(),
             severity,
@@ -844,11 +848,13 @@ impl<'a> Compiler<'a> {
 
         let rules = self.compile_rules(node)?;
         let annotations = self.annotations_for(node, &constraints);
+        let values = g.object(node, v.sh_values);
 
         Ok(Shape {
             node,
             path,
             path_node,
+            values,
             targets,
             constraints,
             severity,
