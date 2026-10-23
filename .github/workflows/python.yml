@@ -27,7 +27,7 @@ on:
     # directly rather than through pull requests, so the `pull_request` trigger below covers
     # a workflow nobody here uses. Building the matrix on every push costs CI minutes; not
     # building it costs a failed release and a re-tag, which is worse.
-    branches: ["develop"]
+    branches: ["main"]
   pull_request:
     paths:
       - "crates/**"

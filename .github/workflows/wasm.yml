@@ -22,7 +22,7 @@ name: wasm
 on:
   push:
     tags: ["v*"]
-    branches: [develop, main]
+    branches: [main]
     paths:
       - "crates/holos-wasm/**"
       - "crates/holos-engine/**"
