@@ -24,6 +24,7 @@ pub mod bindjoin;
 pub mod boundjoin;
 pub mod crs;
 pub mod distinct;
+pub mod dump;
 pub mod entailment;
 pub mod equality;
 pub mod functions;

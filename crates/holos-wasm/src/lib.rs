@@ -38,7 +38,7 @@ mod service;
 
 use holos_engine::Engine;
 use holos_security::{Policy, Principal, Session};
-use oxrdf::{GraphName, Quad, Term};
+use oxrdf::Term;
 use oxrdfio::{RdfFormat, RdfSerializer};
 use spareval::QueryResults;
 use wasm_bindgen::prelude::*;
@@ -579,72 +579,11 @@ impl Store {
         )
         .map_err(|e| failed("opening a session", &e))?;
         let view = self.engine.view(&session);
-        // The default graph and the named graphs in one pass, which is what the CLI's own
-        // `dump` does -- a plain `?s ?p ?o` would silently omit every named graph.
-        let results = Engine::query(
-            &view,
-            "SELECT * WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }",
-            None,
-        )
-        .map_err(|e| failed("reading the store", &e))?;
-        let QueryResults::Solutions(solutions) = results else {
-            return Err(JsError::new("the dump query did not return solutions").into());
-        };
-
-        let mut writer = RdfSerializer::from_format(rdf_format).for_writer(Vec::new());
-        for solution in solutions {
-            let solution = solution.map_err(|e| failed("reading a quad", &e))?;
-            let (Some(s), Some(p), Some(o)) =
-                (solution.get("s"), solution.get("p"), solution.get("o"))
-            else {
-                continue;
-            };
-            // A literal or triple term in subject position, or anything but an IRI as a
-            // predicate, cannot be written as a quad. Nothing in the store can hold one, so
-            // these arms are unreachable rather than a silent drop -- but skipping is the
-            // safe reading either way.
-            let subject = match s {
-                Term::NamedNode(n) => oxrdf::NamedOrBlankNode::NamedNode(n.clone()),
-                Term::BlankNode(b) => oxrdf::NamedOrBlankNode::BlankNode(b.clone()),
-                _ => continue,
-            };
-            let Term::NamedNode(predicate) = p else {
-                continue;
-            };
-            let graph_name = match solution.get("g") {
-                Some(Term::NamedNode(n)) => GraphName::NamedNode(n.clone()),
-                Some(Term::BlankNode(b)) => GraphName::BlankNode(b.clone()),
-                _ => GraphName::DefaultGraph,
-            };
-            let named_graph = !matches!(graph_name, GraphName::DefaultGraph);
-            writer
-                .serialize_quad(
-                    Quad {
-                        subject,
-                        predicate: predicate.clone(),
-                        object: o.clone(),
-                        graph_name,
-                    }
-                    .as_ref(),
-                )
-                .map_err(|e| {
-                    // oxrdfio's own message -- "Only quads in the default graph can be
-                    // serialized to a RDF graph format" -- says what is wrong but not what
-                    // to do about it, and this is the one failure a caller will actually
-                    // hit. Naming the formats that work turns it into an instruction.
-                    if named_graph {
-                        JsError::new(&format!(
-                            "dumping to {format}: this store has named graphs and {format}                              cannot carry one. Use nquads or trig. ({e})"
-                        ))
-                        .into()
-                    } else {
-                        failed("serialising a quad", &e)
-                    }
-                })?;
-        }
-        let bytes = writer
-            .finish()
-            .map_err(|e| failed("finishing the document", &e))?;
+        // The same dump as the command line, Python and the server: one pass over the
+        // default graph and every named graph, refusing a named graph in a format that
+        // cannot carry one with a message that names the formats that can.
+        let (_, bytes) = holos_engine::dump::write(&view, rdf_format, Vec::new())
+            .map_err(|e| failed("dumping the store", &e))?;
         String::from_utf8(bytes).map_err(|e| failed("the serialiser produced invalid UTF-8", &e))
     }
 }

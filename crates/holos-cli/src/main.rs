@@ -11,8 +11,8 @@ use holos_security::{
 };
 use holos_shacl::{CompiledShapes, Options as ShaclOptions};
 use holos_store::GraphFilter;
-use oxrdf::{GraphName, NamedNode, Quad};
-use oxrdfio::{RdfFormat, RdfSerializer};
+use oxrdf::NamedNode;
+use oxrdfio::RdfFormat;
 use sparesults::{QueryResultsFormat, QueryResultsSerializer};
 use spareval::QueryResults;
 use std::fs::File;
@@ -792,53 +792,8 @@ fn stats(engine: &Engine, opts: &Options) -> Result<()> {
 fn dump(engine: &Engine, opts: &Options) -> Result<()> {
     let session = opts.session(engine)?;
     let view = engine.view(&session);
-    let results = Engine::query(
-        &view,
-        "SELECT * WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }",
-        None,
-    )?;
-
     let format = opts.format.unwrap_or(RdfFormat::NQuads);
-    let QueryResults::Solutions(solutions) = results else {
-        bail!("the dump query did not return solutions");
-    };
-
-    let mut writer = RdfSerializer::from_format(format).for_writer(stdout().lock());
-    let mut written = 0_u64;
-    for solution in solutions {
-        let solution = solution?;
-        let (Some(s), Some(p), Some(o)) = (solution.get("s"), solution.get("p"), solution.get("o"))
-        else {
-            continue;
-        };
-        let subject = match s {
-            oxrdf::Term::NamedNode(n) => oxrdf::NamedOrBlankNode::NamedNode(n.clone()),
-            oxrdf::Term::BlankNode(b) => oxrdf::NamedOrBlankNode::BlankNode(b.clone()),
-            // A literal or a triple term in subject position cannot be serialised as a
-            // quad. Nothing in the store can produce one, so this is unreachable rather
-            // than a silent drop, but skipping is the safe reading either way.
-            _ => continue,
-        };
-        let oxrdf::Term::NamedNode(predicate) = p else {
-            continue;
-        };
-        let graph_name = match solution.get("g") {
-            Some(oxrdf::Term::NamedNode(n)) => GraphName::NamedNode(n.clone()),
-            Some(oxrdf::Term::BlankNode(b)) => GraphName::BlankNode(b.clone()),
-            _ => GraphName::DefaultGraph,
-        };
-        writer.serialize_quad(
-            Quad {
-                subject,
-                predicate: predicate.clone(),
-                object: o.clone(),
-                graph_name,
-            }
-            .as_ref(),
-        )?;
-        written += 1;
-    }
-    let _ = writer.finish()?;
+    let (written, _) = holos_engine::dump::write(&view, format, stdout().lock())?;
     eprintln!("{written} quads");
     Ok(())
 }
