@@ -327,6 +327,53 @@ def test_concatenated_gzip_members_all_load(tmp_path):
     assert s.load(str(path)) == 4
 
 
+def _three_graphs():
+    s = Store()
+    s.update(
+        f"INSERT DATA {{ <{EX}a> <{EX}p> <{EX}o> . "
+        f"GRAPH <{EX}g1> {{ <{EX}b> <{EX}p> 1 }} "
+        f'GRAPH <{EX}g2> {{ <{EX}c> <{EX}secret> "x"@en }} }}'
+    )
+    return s
+
+
+def test_a_dump_restores_into_an_empty_store_graphs_and_all(tmp_path):
+    # Memory as the store, a file as the backup: what dump writes, load must read back
+    # whole, with every quad in the graph it came from.
+    s = _three_graphs()
+    path = tmp_path / "backup.nq.gz"
+    assert s.dump(str(path)) == 3
+    restored = Store()
+    assert restored.load(str(path)) == 3
+    assert sorted(restored.named_graphs()) == [f"<{EX}g1>", f"<{EX}g2>"]
+    rows = restored.query(f"SELECT ?o WHERE {{ GRAPH <{EX}g2> {{ ?s <{EX}secret> ?o }} }}")
+    assert [r["o"] for r in rows] == ["x"]
+
+
+def test_a_format_that_cannot_hold_a_graph_is_refused_and_the_old_file_kept(tmp_path):
+    s = _three_graphs()
+    path = tmp_path / "backup.ttl"
+    path.write_text("# an earlier backup\n", encoding="utf-8")
+    with pytest.raises(holosdb.HolosError, match="nquads or trig"):
+        s.dump(str(path))
+    # Written beside the target and renamed only when finished, so a failure part-way
+    # leaves the earlier file as it was and nothing half-written next to it.
+    assert path.read_text(encoding="utf-8") == "# an earlier backup\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["backup.ttl"]
+
+
+def test_a_dump_under_a_policy_writes_what_the_principal_may_read(tmp_path):
+    s = _three_graphs()
+    path = tmp_path / "public.nq"
+    assert s.dump(str(path), policy=Policy().deny_predicate(f"{EX}secret")) == 2
+    assert f"{EX}secret" not in path.read_text(encoding="utf-8")
+
+
+def test_dump_needs_a_format_it_can_name(tmp_path):
+    with pytest.raises(ValueError, match="cannot infer an RDF format"):
+        _three_graphs().dump(str(tmp_path / "backup.bin"))
+
+
 # --------------------------------------------------------------------------- geospatial
 
 

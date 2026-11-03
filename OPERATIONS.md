@@ -297,8 +297,9 @@ Two refusals worth knowing, both preventing a backup that looks fine and is not:
 
 - **During a bulk load.** Those writes are buffered in the process rather than in RocksDB, so
   a checkpoint taken then would be internally consistent and missing data.
-- **An in-memory store.** It has no files to snapshot, and says so rather than writing nothing
-  and reporting success.
+- **An in-memory store, from `holos backup`.** It has no files to checkpoint, and says so
+  rather than writing nothing and reporting success. The server's `POST /backup` writes a
+  snapshot of one instead: see [Memory as the store](#memory-as-the-store-with-snapshots).
 
 ### Over HTTP
 
@@ -317,12 +318,54 @@ curl -X POST -H 'X-Holos-Roles: ops' http://127.0.0.1:7878/backup
 | Identity not trusted | **403** — every request is anonymous, so nobody holds the role |
 | Role missing or wrong | **403** |
 | Role held | **201** with the path and quad count |
-| Bulk load in progress, or in-memory store | **409** with the reason |
+| Role held, in-memory store | **201** with the snapshot's path, `holos-<seconds>.nq.gz`, and quad count |
+| Bulk load in progress | **409** with the reason |
+| In-memory store, a snapshot already taken this second | **409**: it would overwrite the first |
+| In-memory store, the disk fills while writing | **507**, and the partial file removed |
 
 **The caller never names the destination.** `POST /backup?to=/anywhere` would be an
 arbitrary-write primitive — whatever the server process can write, a caller could ask it to
 fill with a copy of the database. The server owns `--backup-dir` and mints a timestamped
 child inside it.
+
+### Memory as the store, with snapshots
+
+A store does not have to be on disk. Without `--store` the server holds everything in memory,
+which is the fastest arrangement there is and the simplest to run: no RocksDB directory, no
+compaction, nothing to size. What it gives up is durability, and a snapshot on a schedule is
+how to buy as much of that back as the service needs.
+
+```sh
+holos-server --data /backups/latest.nq.gz --backup-dir /backups --backup-role ops --trust-forwarded-identity
+
+curl -X POST -H 'X-Holos-Roles: ops' http://127.0.0.1:7878/backup
+# {"path":"/backups/holos-1787763950.nq.gz","quads":1048576}
+```
+
+The snapshot is **every graph as gzipped N-Quads**, the format `--data` reads at start-up, so
+restoring is restarting with `--data` on the newest file. It is the same dump as `holos dump`,
+Python's `Store.dump()` and the WebAssembly `dump()`, so a snapshot from any of them restores
+into any of them.
+
+- **What you can lose is everything since the last snapshot.** A crash or a restart without
+  one discards it. Schedule the snapshot as often as that window must be short, and use
+  `--store` where it must be zero.
+- **Writers wait while a snapshot is written.** It holds the read lock for the whole dump, so
+  the file is one state of the store rather than a mixture of before and after some update.
+  That takes as long as serialising the store does, which is far longer than a checkpoint.
+- **The file appears complete or not at all.** It is written beside its final name and renamed
+  when finished, so a reader, or the next restore, never sees half of one.
+- **Restoring costs a load.** A restart parses the whole snapshot before it answers, and the
+  store needs the memory to hold it: see [Loading data](#loading-data).
+- **Retention is yours.** Snapshots are named by the second and none is ever deleted, as with
+  checkpoints. Point `latest.nq.gz` at the newest, keep the last few, copy them off the machine.
+
+From Python the same pattern is a pair of calls on an ordinary `Store()`:
+
+```python
+store.dump("backup.nq.gz")        # every graph; written beside the name, then renamed
+Store().load("backup.nq.gz")      # a fresh store holding the same quads in the same graphs
+```
 
 A backup copies the whole store, ignoring the policy that governs every query. It is the one
 operation where the ordinary access controls do not apply, which is why it has its own role —

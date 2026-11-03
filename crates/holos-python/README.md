@@ -59,6 +59,24 @@ holosdb.geosparql_functions()             # 45 of them
 holosdb.has_rocksdb()                     # what this wheel actually contains
 ```
 
+## Memory as the store, a file as the backup
+
+An in-memory `Store()` is the fastest arrangement and needs no directory, and `dump` makes it a
+durable one at whatever interval you choose: every graph, as gzipped N-Quads, which `load`
+reads back.
+
+```python
+store.dump("backup.nq.gz")          # returns the quad count; every named graph kept
+store = Store()
+store.load("backup.nq.gz")          # the same quads, in the same graphs
+```
+
+The file appears complete or not at all: it is written beside its name and renamed when
+finished, so a failure part-way leaves an earlier backup at that path as it was. A graph-only
+format such as Turtle refuses a store with named graphs rather than flattening them. Pass
+`principal=` and `policy=` to write only what that principal may read. Anything written after
+the last dump is what a crash loses; use `Store("./var/db")` where that must be nothing.
+
 ## Queries a program writes
 
 For a query you did not write yourself — an agent's, a user's, a notebook's — the store can

@@ -622,6 +622,50 @@ impl PyStore {
         })
     }
 
+    /// Write everything the store holds -- the default graph and every named graph -- to a
+    /// file, and return how many quads went into it.
+    ///
+    /// The format is `format`, or the one the file name implies; a `.gz` suffix compresses.
+    /// `backup.nq.gz` is the one to use for a backup: N-Quads keeps every graph name, and
+    /// `Store().load("backup.nq.gz")` reads it back. A graph-only format such as Turtle
+    /// refuses a store with named graphs rather than flattening them into the default graph.
+    ///
+    /// The file appears complete or not at all: the dump is written beside it and renamed
+    /// into place when finished, so an earlier backup at the same path survives a failure.
+    /// With `principal` and `policy` it writes what that principal may read, as `query` does.
+    #[pyo3(signature = (path, *, format=None, principal=None, policy=None))]
+    fn dump(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        format: Option<&str>,
+        principal: Option<PyPrincipal>,
+        policy: Option<PyPolicy>,
+    ) -> PyResult<u64> {
+        let rdf_format = match format {
+            Some(name) => format_by_name(name)?,
+            None => format_for_path(path)?,
+        };
+        let core_policy = policy.map_or_else(CorePolicy::permit_all, |p| p.inner);
+        let core_principal = principal.map_or_else(CorePrincipal::anonymous, |p| p.inner);
+        // Serialising touches no Python objects, and a large store takes a while.
+        py.detach(move || {
+            let outer = self.engine.read().map_err(|_| poisoned())?;
+            let guard = outer.as_ref().ok_or_else(closed)?;
+            let session = CoreSession::open(guard.store(), core_principal, core_policy)
+                .map_err(|e| PolicyError::new_err(e.to_string()))?;
+            let view = guard.view(&session);
+            holos_engine::dump::to_file(&view, Path::new(path), Some(rdf_format)).map_err(|e| {
+                match e {
+                    holos_engine::EngineError::Io(io) => {
+                        PyIOError::new_err(format!("writing {path}: {io}"))
+                    }
+                    other => map_engine_error(&other),
+                }
+            })
+        })
+    }
+
     /// Add one quad. Subject and predicate are IRIs; the object may be an IRI or a literal.
     #[pyo3(signature = (subject, predicate, object, graph=None))]
     fn add(

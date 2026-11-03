@@ -148,9 +148,12 @@ SERVER
                              then reaches nothing beyond the CDN and this server.
 
 MAINTENANCE
-    --backup-dir <DIR>       Parent directory for `POST /backup` checkpoints. The endpoint
-                             does not exist unless this and --backup-role are both set: a
-                             client never names a path, so it cannot be aimed at one.
+    --backup-dir <DIR>       Parent directory for `POST /backup`. With --store it writes a
+                             RocksDB checkpoint, holos-<seconds>/. In memory it writes a
+                             snapshot, holos-<seconds>.nq.gz: every graph, which --data
+                             reads back at the next start. The endpoint does not exist
+                             unless this and --backup-role are both set: a client never
+                             names a path, so it cannot be aimed at one.
     --backup-role <ROLE>     Role a principal must hold to trigger a backup.
     --purge-role <ROLE>      Role a principal must hold to call POST /maintenance/purge,
                              which reclaims spatial index entries for geometries no longer
@@ -834,12 +837,10 @@ fn backup(state: &State, request: Request) -> Result<()> {
         );
     }
 
-    let destination = std::path::Path::new(dir).join(format!(
-        "holos-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
-    ));
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let destination = std::path::Path::new(dir).join(format!("holos-{stamp}"));
     if let Err(e) = std::fs::create_dir_all(dir) {
         return respond(
             request,
@@ -855,6 +856,62 @@ fn backup(state: &State, request: Request) -> Result<()> {
         .engine
         .read()
         .map_err(|_| anyhow::anyhow!("poisoned"))?;
+
+    // An in-memory store has no files to checkpoint, so its backup is a snapshot: every
+    // graph, as gzipped N-Quads, which `--data` reads back at the next start. That is what
+    // makes memory a usable store for a service, not only for a test -- serve from memory,
+    // call this from a scheduler, and restart from the newest file.
+    //
+    // It holds the read lock for the whole dump, so writers wait and the file is one
+    // consistent state of the store. That is longer than a checkpoint takes, and the
+    // price of a backup that is not a mixture of before and after some write.
+    if guard.store().on_disk_bytes().is_none() {
+        let destination = destination.with_extension("nq.gz");
+        if destination.exists() {
+            drop(guard);
+            return respond(
+                request,
+                409,
+                "text/plain",
+                format!(
+                    "{} already exists; backups are named by the second, so try again in one",
+                    destination.display()
+                )
+                .into_bytes(),
+            );
+        }
+        let outcome = Session::open(guard.store(), Principal::anonymous(), Policy::permit_all())
+            .map_err(holos_engine::EngineError::from)
+            .and_then(|session| {
+                // Everything, whatever the caller's own policy: a backup that left out what
+                // its trigger could not read would restore a different store.
+                let view = guard.view(&session);
+                holos_engine::dump::to_file(&view, &destination, None)
+            });
+        drop(guard);
+        return match outcome {
+            Ok(quads) => {
+                let body = format!(
+                    r#"{{"path":{},"quads":{quads}}}"#,
+                    ui::json_string(&destination.display().to_string())
+                );
+                respond(request, 201, "application/json", body.into_bytes())
+            }
+            // 507, as for a checkpoint that will not fit: the storage is short, not the
+            // server broken. The partial file is already gone.
+            Err(holos_engine::EngineError::Io(e))
+                if e.kind() == std::io::ErrorKind::StorageFull =>
+            {
+                respond(
+                    request,
+                    507,
+                    "text/plain",
+                    format!("not enough room in {dir} for the snapshot: {e}").into_bytes(),
+                )
+            }
+            Err(e) => respond(request, 500, "text/plain", e.to_string().into_bytes()),
+        };
+    }
 
     // Refused before it starts, if it cannot fit. This is the endpoint a scheduler calls
     // every night, so it is the one that fills a disk while nobody is watching — and the

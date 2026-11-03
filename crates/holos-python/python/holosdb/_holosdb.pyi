@@ -58,6 +58,14 @@ class Store:
         graph: str | None = None,
         bulk: bool = False,
     ) -> int: ...
+    def dump(
+        self,
+        path: str,
+        *,
+        format: str | None = None,
+        principal: Principal | None = None,
+        policy: Policy | None = None,
+    ) -> int: ...
     def add(
         self,
         subject: str,

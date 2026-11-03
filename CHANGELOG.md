@@ -5,6 +5,29 @@ them are in `BENCHMARKS.md` and are runnable.
 
 ## Unreleased
 
+### Memory as the store, with snapshots to a file
+
+A store held in memory could be filled from files and not emptied back into one: the server's
+`POST /backup` answered 409, because an in-memory store has no RocksDB files to checkpoint, and
+the Python `Store` had no way to write its contents out at all. So memory was a store for tests
+and one-off runs, and a service that wanted durability had to run on RocksDB.
+
+- **`POST /backup` on an in-memory server writes a snapshot**, `holos-<seconds>.nq.gz` in
+  `--backup-dir`: every graph, as gzipped N-Quads, under the same role check as a checkpoint.
+  Restarting with `--data` on it restores the store. It holds the read lock while it writes,
+  so the file is one consistent state; a second snapshot in the same second is refused rather
+  than overwriting the first, and a full disk answers 507.
+- **`Store.dump(path)`** in Python writes the same thing, with the format from the name and
+  `.gz` compressing, and returns the quad count. `principal=` and `policy=` restrict it as
+  they do a query.
+- Every dump is written beside its final name and renamed into place, so a failure part-way
+  leaves an earlier file at that path untouched.
+
+The command line's `dump`, the WebAssembly `dump()`, Python and the server now share one
+implementation, `holos_engine::dump`, where there had been two copies. A snapshot from any of
+them loads into any of them. The WebAssembly copy's error for a named graph in a graph-only
+format carried a run of spaces from a lost line continuation; the shared message does not.
+
 ### The native validator's refusal says what to use instead, on one line
 
 A shapes graph the native validator cannot evaluate -- `sh:sparql`, say -- is refused rather than
