@@ -206,7 +206,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # ubuntu-24.04 rather than ubuntu-latest: from Ubuntu 26.04, setup-python has no 3.9
+        # for the image, and the job failed before installing anything. The oldest
+        # interpreter is the half of this matrix that matters, so the image moves, not the
+        # interpreter.
+        os: [ubuntu-24.04, macos-latest, windows-latest]
         # The oldest and newest interpreters the abi3 wheel claims to serve. If abi3 is
         # working, one wheel satisfies both; if it is not, this is where that shows up.
         python: ["3.9", "3.13"]
