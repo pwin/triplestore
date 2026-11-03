@@ -190,10 +190,35 @@ fn one_group_without_group_by() {
 
 #[test]
 fn an_empty_input_still_counts_zero() {
-    let body = "SELECT (COUNT(*) AS ?n) WHERE { ?p ex:dept ex:nowhere }";
+    // Two patterns, so the input goes to the bind join; one is left to the evaluator below.
+    let body = "SELECT (COUNT(*) AS ?n) WHERE { ?p ex:dept ex:nowhere ; ex:name ?name }";
     assert!(materialised(body), "answered without the evaluator's scan");
     let rows = agreed(body);
     assert_eq!(rows.len(), 1, "{rows:?}");
+}
+
+#[test]
+fn one_triple_pattern_is_left_to_the_evaluator() {
+    // One index scan either way, and the evaluator counts it as it streams; a table built
+    // first only adds the cost of every row. Empty, it still counts zero.
+    for body in [
+        "SELECT (COUNT(*) AS ?n) WHERE { ?p ex:dept ?d }",
+        "SELECT ?d (COUNT(*) AS ?n) WHERE { ?p ex:dept ?d } GROUP BY ?d",
+        "SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?p ex:dept ?d } }",
+        "SELECT (COUNT(*) AS ?n) WHERE { ?p ex:dept ex:nowhere }",
+    ] {
+        assert!(!materialised(body), "{body}");
+        agreed(body);
+    }
+    assert_eq!(
+        agreed("SELECT (COUNT(*) AS ?n) WHERE { ?p ex:dept ex:nowhere }").len(),
+        1
+    );
+    // A filter over the one pattern is still taken: its constant is an index binding to
+    // the bind join, and the evaluator would scan the predicate and filter every row.
+    assert!(materialised(
+        "SELECT (COUNT(*) AS ?n) WHERE { ?p ex:dept ?d FILTER(?d = ex:c) }"
+    ));
 }
 
 #[test]

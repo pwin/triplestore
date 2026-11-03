@@ -100,6 +100,16 @@ pub fn materialised(
     let Some((inner, keyless)) = group_input(pattern) else {
         return Ok(None);
     };
+    // One triple pattern is one index scan whoever evaluates it, and the evaluator's
+    // `COUNT` streams that scan with a counter. Building the table first only adds the cost
+    // of turning every row into terms the evaluator then reads back: on 800k triples,
+    // counting the 50,000 that match one pattern went from 7-15 ms to 87 ms when this took
+    // it. What this buys is a better join, so with nothing to join it declines. A filter
+    // over one pattern is not declined: the bind join can use a filter's constant as an
+    // index binding, which the evaluator cannot.
+    if is_one_scan(inner) {
+        return Ok(None);
+    }
     // An input estimated over the budget would be built only to be thrown away — and a
     // `COUNT(*)` over it streams through the evaluator in constant memory, so building it is
     // the one thing that could make such a query fail.
@@ -171,6 +181,16 @@ pub fn materialised(
         query,
         replace_group_input(pattern, table),
     )))
+}
+
+/// Whether a group's input is a single triple pattern, in a graph or not: one index scan,
+/// with no join for the bind join to order.
+fn is_one_scan(pattern: &GraphPattern) -> bool {
+    match pattern {
+        GraphPattern::Bgp { patterns } => patterns.len() == 1,
+        GraphPattern::Graph { inner, .. } => is_one_scan(inner),
+        _ => false,
+    }
 }
 
 /// The input of the query's own group — the first `Group` reached from the top through the

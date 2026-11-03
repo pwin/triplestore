@@ -3,6 +3,23 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## Unreleased
+
+### A `COUNT` over one triple pattern streams again
+
+From 0.21, a query whose `GROUP BY` or aggregate sat over a single triple pattern had that pattern
+evaluated by the bind join and handed to the evaluator as a `VALUES` table. That is what makes a
+grouped *join* fast, and for one pattern it is only overhead: the scan is the same index scan
+either way, and the evaluator's `COUNT` counts it as it streams, where the table first turns every
+row into terms. Measured from Python on 800k triples, counting the 50,000 that match
+`?s <p> "hit"`: 7-15 ms on 0.22.0 (before Python took the 0.21 rewrites), 87 ms on 0.26.0, 4.5 ms
+now. A single pattern, in a graph or not, now goes to the evaluator whole.
+
+A filter over one pattern is still taken by the bind join, because the bind join can use an
+equality filter's constant as an index binding and the evaluator cannot. On the same data,
+`?s <p> ?o FILTER(?o = "hit")` stays at about 105 ms, against 484-725 ms on 0.22.0; the evaluator
+alone would scan all 800k triples and filter them.
+
 ## 0.26.0 — 2026-11-03
 
 ### holosdb needs Python 3.11 or later
