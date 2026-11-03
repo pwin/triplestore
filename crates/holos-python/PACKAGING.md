@@ -51,8 +51,8 @@ common cause of a failed build; `deploy/setup.sh` checks for it.
 
 ### Why abi3
 
-`pyo3` is configured with `abi3-py39`, so **one wheel per platform serves every CPython
-3.9+** instead of one wheel per minor version. With a statically linked RocksDB inside, each
+`pyo3` is configured with `abi3-py311`, so **one wheel per platform serves every CPython
+3.11+** instead of one wheel per minor version. With a statically linked RocksDB inside, each
 wheel is tens of megabytes; multiplying that by six Python versions for no functional gain
 would be careless with other people's bandwidth.
 

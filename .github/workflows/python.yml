@@ -70,7 +70,7 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------------
-  # One wheel per platform. abi3 means each serves every CPython 3.9+, so the matrix is
+  # One wheel per platform. abi3 means each serves every CPython 3.11+, so the matrix is
   # over operating systems rather than over interpreter versions.
   # ---------------------------------------------------------------------------------
   wheels:
@@ -206,14 +206,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ubuntu-24.04 rather than ubuntu-latest: from Ubuntu 26.04, setup-python has no 3.9
-        # for the image, and the job failed before installing anything. The oldest
-        # interpreter is the half of this matrix that matters, so the image moves, not the
-        # interpreter.
-        os: [ubuntu-24.04, macos-latest, windows-latest]
-        # The oldest and newest interpreters the abi3 wheel claims to serve. If abi3 is
-        # working, one wheel satisfies both; if it is not, this is where that shows up.
-        python: ["3.9", "3.13"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # The oldest and newest interpreters the abi3 wheel claims to serve: 3.11, the floor
+        # and the oldest CPython still receiving security fixes, and 3.15, the latest stable.
+        # If abi3 is working, one wheel satisfies both; if it is not, this is where that shows
+        # up. Move both when a release moves them.
+        python: ["3.11", "3.15"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

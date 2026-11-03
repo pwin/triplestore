@@ -5,6 +5,15 @@ them are in `BENCHMARKS.md` and are runnable.
 
 ## Unreleased
 
+### holosdb needs Python 3.11 or later
+
+The wheel declared CPython 3.9+, and CI tested 3.9 and 3.13. 3.9 reached end of life in
+October 2025 and 3.10 in October 2026, so the floor claimed support for interpreters that no
+longer get security fixes. It is now 3.11, the oldest that still does: the wheel is built
+`abi3-py311` and tagged `cp311-abi3`, and pip on 3.9 or 3.10 resolves an earlier holosdb
+rather than this one. CI tests 3.11 and 3.15, the latest stable release. Every downstream
+project here already required 3.11 or later.
+
 ### Memory as the store, with snapshots to a file
 
 A store held in memory could be filled from files and not emptied back into one: the server's

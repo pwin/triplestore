@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "holosdb"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 description = "An RDF 1.2 triplestore with SPARQL 1.2 and access policy enforced at the index scan"
 readme = "README.md"
 license = { text = "MIT OR Apache-2.0" }
@@ -47,7 +47,7 @@ module-name = "holosdb._holosdb"
 python-source = "python"
 manifest-path = "Cargo.toml"
 features = ["pyo3/extension-module"]
-# abi3: one wheel per platform serves every CPython 3.9+, which matters when each wheel
+# abi3: one wheel per platform serves every CPython 3.11+, which matters when each wheel
 # carries a statically linked RocksDB.
 #
 # `compatibility` is deliberately not pinned here. The right manylinux tag depends on the

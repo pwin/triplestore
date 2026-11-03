@@ -199,7 +199,7 @@ cargo test --workspace
 ## Python
 
 The bindings are packaged as **`holosdb`** — one abi3 wheel per platform, serving CPython
-3.9+, with RocksDB linked in.
+3.11+, with RocksDB linked in.
 
 ```sh
 pip install holosdb
