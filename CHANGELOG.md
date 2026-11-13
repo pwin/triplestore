@@ -3,6 +3,86 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## Unreleased
+
+### Decimal arithmetic rounds to 18 digits instead of failing
+
+An `xsd:decimal` is held to 18 fractional digits, and a product of two of them can need 36.
+`oxsdatatypes`, the Oxigraph crate the evaluator does its arithmetic with, returned an error for
+any product it could not hold exactly, and in SPARQL an error leaves its variable unbound:
+
+```sparql
+SELECT ?x WHERE { BIND(1.3 * 31.583333333333333333 AS ?x) }   # ?x unbound
+SELECT ?x WHERE { BIND(2   * 31.583333333333333333 AS ?x) }   # 63.166666666666666666
+```
+
+Division failed the same way once the dividend was too large to shift 18 places:
+`1000 / 31.583333333333333333` was an error. In a SHACL-SPARQL constraint the unbound variable
+showed up in the message, which printed `{?ratio}` as written.
+
+Both now compute the exact result and round it once to 18 digits, half to even: the first query
+above gives `41.058333333333333333`, the division `31.662269129287598945`. Only division by zero
+and a result beyond about ±1.7 × 10²⁰ are errors. XPath F&O §4.2 leaves an over-long decimal
+result "truncated or rounded in an implementation-defined manner", and keeps its overflow error
+for overflow.
+
+One visible change to answers that worked before: division used to truncate, so an inexact
+quotient can differ in its 18th digit. `2 / 3` was `0.666666666666666666` and is now
+`0.666666666666666667`, and `AVG`, a sum divided by a count, follows.
+
+The fix is in `vendor/oxsdatatypes`, a copy of `oxsdatatypes` 0.2.4 that the workspace puts in
+place of the registry crate with `[patch.crates-io]`. So it reaches the evaluator, the vendored
+SHACL engine, the command line, the server, Python and the WebAssembly packages at once.
+`PROVENANCE.md` there records the change. It was checked against Python's `decimal` module on
+200,000 random pairs of values, at every scale and both signs, with no differences.
+
+### Arithmetic and a filter's scope that the Oxigraph crates answered wrongly
+
+`spareval` pins `oxsdatatypes` to one exact version, so the patch above has to be the version a
+locked `spareval` asks for, and 0.2.4 is asked for by `spareval` 0.2.9. The lockfile moves the
+whole Oxigraph family up with it: `spargebra` 0.4.6 → 0.4.8, `spareval` 0.2.6 → 0.2.9,
+`sparopt` 0.3.6 → 0.3.9, `oxsdatatypes` 0.2.2 → 0.2.4, and `oxrdf`, `oxrdfio`, `oxttl`,
+`oxrdfxml`, `oxjsonld`, `sparesults` and `spargeo` by two patch releases each. `spargeo` 0.5.7
+uses the same `geojson` 0.24 as `holos-engine`, so `geojson` 1.0 and `tinyvec` leave the
+dependency graph, which is 206 third-party crates, down from 209. The new versions fix answers
+that 0.26.1 gave without an error:
+
+| Expression | 0.26.1 | 0.26.2 |
+|---|---:|---:|
+| `10 - 2 - 3` | 11 | 5 |
+| `24 / 4 / 2` | 12 | 3 |
+| `1 -2*3 -4` | -1 | -9 |
+| `ROUND(-2.5001)` | -2 | -3 |
+| `ROUND(-2.5e0)` | -3 | -2 |
+
+`spargebra` 0.4.6 grouped a chain of `-` or `/` from the right, and a signed literal straight
+after an operand took the operator before it, so `1 -2*3 -4` was read as `1 - (2*3 - 4)`.
+`oxsdatatypes` 0.2.2 cut a decimal to one fractional digit before rounding it, and rounded a
+double's half away from zero where `fn:round` takes it towards positive infinity.
+
+A filter in a group nested inside `OPTIONAL` was moved out into the `OPTIONAL`'s own
+condition, where it could see the variables bound outside:
+
+```sparql
+SELECT ?title ?price WHERE {
+  ?book dc:title ?title .
+  OPTIONAL { { ?book x:price ?price FILTER(?title = "TITLE 2") } }
+}
+```
+
+`?title` is not in scope in the inner group, so the filter is an error there and no book gets a
+price. 0.26.1 gave TITLE 2 its price. This is W3C `dawg-optional-filter-005-not-simplified`,
+which the harness had filed as an upstream skip because the reference evaluator gave the same
+wrong answer. It passes now, so SPARQL 1.0 is 276/277 with 6 skipped, where it was 275/276 with
+7. Every other suite is where it was. The README's SPARQL 1.1 line still said 512/512 from
+August; it has been 511/511 since before 0.24.0, as that release's entry says, and the README
+now shows 511/511.
+
+`tests/arithmetic.rs` and `tests/nested_filter_scope.rs` in `holos-engine` pin these answers.
+Each fails on 0.26.1. The second is needed because the ratchet only compares failures: if the
+scoping went wrong again in the reference evaluator too, that test would go back to being a skip
+and nothing would fail.
+
 ## 0.26.1 — 2026-11-03
 
 ### A `COUNT` over one triple pattern streams again

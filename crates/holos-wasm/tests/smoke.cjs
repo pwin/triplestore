@@ -522,5 +522,14 @@ check('queryFederated answers as query does, through the same pipeline', () => {
   }
 });
 
+// Decimal arithmetic comes from the patched oxsdatatypes in vendor/, which the wasm build has
+// to resolve as the native one does. The registry crate left this product unbound, because
+// it needs more than 18 fractional digits.
+check('a decimal product is rounded to 18 digits rather than left unbound', () => {
+  const row = store.query('SELECT ((1.3 * 31.583333333333333333) AS ?x) WHERE {}', undefined)[0];
+  assert.ok(row.x, JSON.stringify(row));
+  assert.strictEqual(row.x.value, '41.058333333333333333');
+});
+
 console.log(failures === 0 ? '\nall checks passed' : `\n${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

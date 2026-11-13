@@ -105,6 +105,17 @@ def test_an_unbound_variable_is_none(store):
     assert rows[0]["missing"] is None
 
 
+def test_a_decimal_product_is_rounded_rather_than_left_unbound(store):
+    # Decimal arithmetic comes from the patched oxsdatatypes in vendor/, which the wheel has
+    # to resolve as the native build does. The registry crate left this product unbound,
+    # because it needs more than 18 fractional digits.
+    rows = store.query("SELECT ((1.3 * 31.583333333333333333) AS ?x) WHERE {}")
+    assert rows[0]["x"] is not None
+    assert rows[0].term("x") == (
+        '"41.058333333333333333"^^<http://www.w3.org/2001/XMLSchema#decimal>'
+    )
+
+
 def test_an_unknown_variable_raises(store):
     rows = store.query(f"SELECT ?n WHERE {{ GRAPH ?g {{ ?s <{EX}name> ?n }} }} LIMIT 1")
     with pytest.raises(KeyError):

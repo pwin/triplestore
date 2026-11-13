@@ -12,16 +12,24 @@ python scripts/third-party.py > THIRD-PARTY.md
 
 ## Code copied into this tree
 
-One component. Everything else is a dependency, not a copy.
+Two components. Everything else is a dependency, not a copy.
 
 | Component | Origin | Licence | Copyright |
 |---|---|---|---|
 | [`holos-shacl-engine`](crates/holos-shacl-engine) | [pwin/SHACL_Engine](https://github.com/pwin/SHACL_Engine) @ `874e6e57` | MIT OR Apache-2.0 | Peter Winstanley — **the same holder as this project** |
+| [`oxsdatatypes`](vendor/oxsdatatypes) | [oxsdatatypes 0.2.4](https://crates.io/crates/oxsdatatypes/0.2.4) from [Oxigraph](https://github.com/oxigraph/oxigraph) | MIT OR Apache-2.0 | Oxigraph developers |
 
-Its `LICENSE-MIT` and `LICENSE-APACHE` are kept in the crate, and
-[`PROVENANCE.md`](crates/holos-shacl-engine/PROVENANCE.md) records every change
-made to it. Because the upstream copyright holder and this project's are the same
-person, no third-party copyright attaches to that code.
+Each keeps its `LICENSE-MIT` and `LICENSE-APACHE` beside a `PROVENANCE.md` that
+records every change made to it.
+
+`holos-shacl-engine`: because the upstream copyright holder and this project's are
+the same person, no third-party copyright attaches to that code.
+
+`oxsdatatypes`: copyright in it remains with the Oxigraph developers. It is in the
+tree for one change: decimal multiplication and division round to 18 fractional
+digits where upstream returned an error
+([`PROVENANCE.md`](vendor/oxsdatatypes/PROVENANCE.md)). A `[patch.crates-io]` entry
+makes every crate here, `spareval` included, resolve this copy.
 
 ## Approaches reimplemented rather than copied
 
@@ -65,20 +73,21 @@ comparison in `ui.rs` favoured the fork above.
 
 ## Dependency licences
 
-182 third-party crates in the full dependency graph.
+206 third-party crates in the full dependency graph.
 
 | Count | Licence |
 |---:|---|
-| 113 | MIT OR Apache-2.0 |
-| 21 | MIT |
-| 11 | MIT/Apache-2.0 |
-| 8 | Apache-2.0 OR MIT |
+| 129 | MIT OR Apache-2.0 |
+| 26 | MIT |
+| 10 | MIT/Apache-2.0 |
+| 9 | Apache-2.0 OR MIT |
+| 4 | Unlicense OR MIT |
+| 4 | Apache-2.0/MIT |
 | 4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
-| 3 | Unlicense OR MIT |
 | 3 | Apache-2.0 |
-| 2 | Apache-2.0/MIT |
 | 2 | ISC |
 | 2 | MIT OR Apache-2.0 OR LGPL-2.1-or-later |
+| 2 | Unlicense/MIT |
 | 2 | BSD-2-Clause OR Apache-2.0 OR MIT |
 | 1 | 0BSD OR MIT OR Apache-2.0 |
 | 1 | BSD-3-Clause |
@@ -88,8 +97,6 @@ comparison in `ui.rs` favoured the fork above.
 | 1 | MIT OR Zlib OR Apache-2.0 |
 | 1 | Apache-2.0 OR BSL-1.0 |
 | 1 | Apache-2.0 WITH LLVM-exception |
-| 1 | Zlib OR Apache-2.0 OR MIT |
-| 1 | MIT OR Apache-2.0 OR Zlib |
 | 1 | (MIT OR Apache-2.0) AND Unicode-3.0 |
 
 ### Requiring anything of us

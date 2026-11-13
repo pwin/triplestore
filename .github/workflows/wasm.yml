@@ -27,6 +27,8 @@ on:
       - "crates/holos-wasm/**"
       - "crates/holos-engine/**"
       - "crates/holos-store/**"
+      - "vendor/**"
+      - "Cargo.lock"
       - ".cargo/config.toml"
       - ".github/workflows/wasm.yml"
   pull_request:
@@ -34,6 +36,8 @@ on:
       - "crates/holos-wasm/**"
       - "crates/holos-engine/**"
       - "crates/holos-store/**"
+      - "vendor/**"
+      - "Cargo.lock"
       - ".cargo/config.toml"
       - ".github/workflows/wasm.yml"
   workflow_dispatch:

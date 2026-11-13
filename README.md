@@ -119,9 +119,9 @@ passes; **coverage** is how much of the suite runs at all.
 
 | Suite | Correctness | Coverage | Not run |
 |---|---:|---:|---|
-| SPARQL 1.1 | **512/512** · 100% | 512/625 · **82%** | Entailment, upstream parser gaps, result formats |
+| SPARQL 1.1 | **511/511** · 100% | 511/625 · **82%** | Entailment, upstream parser gaps, result formats |
 | SPARQL 1.2 | **268/269** · 99.6% | 269/269 · **100%** | — |
-| SPARQL 1.0 | **275/276** · 99.6% | 276/283 · **98%** | 7 the parser rejects (upstream) |
+| SPARQL 1.0 | **276/277** · 99.6% | 277/283 · **98%** | 6 the upstream evaluator answers differently |
 | SPARQL Protocol | **34/34** · 100% | 34/34 · **100%** | — |
 | Graph Store Protocol | **13/13** · 100% | 13/13 · **100%** | — |
 
@@ -152,9 +152,9 @@ left, and needs the reasoner at L4.
 |---|---|---|---|---|
 | RDF 1.1 | **1038 / 1040** | 2 | 1 | **0** |
 | RDF 1.2 | **1401 / 1405** | 4 | 1 | **0** |
-| SPARQL 1.1 | **512 / 512** | 0 | 113 | **0** |
+| SPARQL 1.1 | **511 / 511** | 0 | 114 | **0** |
 | SPARQL 1.2 | 268 / 269 | 1 | 0 | **0** |
-| SPARQL 1.0 | 275 / 276 | 1 | 7 | **0** |
+| SPARQL 1.0 | 276 / 277 | 1 | 6 | **0** |
 | SPARQL Protocol | **34 / 34** | 0 | 0 | **0** |
 | Graph Store Protocol | **13 / 13** | 0 | 0 | **0** |
 | SHACL Core | **98 / 98** | 0 | 0 | **0** |
