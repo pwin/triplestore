@@ -3,7 +3,7 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
-## Unreleased
+## 0.26.2 — 2026-11-13
 
 ### Decimal arithmetic rounds to 18 digits instead of failing
 
