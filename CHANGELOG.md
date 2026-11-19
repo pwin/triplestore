@@ -3,6 +3,19 @@
 Notable changes per release. Numbers quoted here are measured; the benchmarks that produce
 them are in `BENCHMARKS.md` and are runnable.
 
+## Unreleased
+
+### holos-engine re-exports the Oxigraph crates it is built on
+
+`holos_engine::{oxiri, oxrdf, oxrdfio, oxsdatatypes, sparesults, spareval, spargebra, sparopt}`.
+The engine's API takes and returns their types (`Engine::evaluator()` is a
+`spareval::QueryEvaluator`, a query gives `spareval::QueryResults`), so a crate that calls
+HOLOS can name them through holos-engine instead of depending on them itself, and gets them as
+HOLOS builds them: one copy, with HOLOS's RDF 1.2, SPARQL 1.2 and `sep-0002` features.
+`[patch.crates-io]` applies only from the workspace being built, so a dependent workspace that
+wants the vendored `spareval` and `oxsdatatypes` repeats those two entries, pointing at
+`vendor/` here. tarka is the first such crate.
+
 ## 0.26.4 — 2026-11-18
 
 ### A duration adds to a date, time or dateTime for every value

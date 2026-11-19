@@ -49,6 +49,15 @@ pub use options::{Deadline, QueryOptions};
 
 pub use view::{DatasetView, ViewError};
 
+/// The Oxigraph crates HOLOS is built on, as HOLOS builds them: the RDF 1.2 and SPARQL 1.2
+/// features on, and `spareval` and `oxsdatatypes` the vendored copies when the workspace's
+/// `[patch]` applies. The engine's API takes and returns their types ([`QueryEvaluator`],
+/// [`QueryResults`], [`oxrdf::Quad`] …), so a crate that calls HOLOS names them through here
+/// rather than depending on those crates itself, and cannot end up with a second copy at
+/// another version. A dependent workspace that wants the vendored fixes too repeats the
+/// `[patch.crates-io]` entries, pointing at `vendor/` in this repository.
+pub use {oxiri, oxrdf, oxrdfio, oxsdatatypes, sparesults, spareval, spargebra, sparopt};
+
 use holos_security::{Action, AuditSink, Modes, Outcome, Principal, Session};
 use holos_store::Store;
 use oxrdf::QuadRef;
