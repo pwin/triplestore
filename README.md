@@ -1,5 +1,12 @@
 # HOLOS
 
+> **HOLOS has moved to [pwin/SemopsSystem](https://github.com/pwin/SemopsSystem).** It is developed and released there, in
+> [`holos/`](https://github.com/pwin/SemopsSystem/tree/main/holos), with the SHACL engine and tarka. From 0.30.0, the
+> `holosdb` wheel, the `holos-wasm` and `holos-wasm-node` packages and the `holos` and
+> `holos-server` commands are published from there, at the workspace's version. This
+> repository keeps the history up to 0.27.0 and no longer releases. Please open issues and
+> pull requests [there](https://github.com/pwin/SemopsSystem/issues).
+
 An RDF 1.2 triplestore with SPARQL 1.2, and fine-grained access policy enforced at the scan.
 
 Working name. Early — see [Status](#status) for exactly what runs.
